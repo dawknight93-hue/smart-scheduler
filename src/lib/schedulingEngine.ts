@@ -1,0 +1,357 @@
+import type {
+  FixedEvent,
+  Habit,
+  Task,
+  PlacedItem,
+  UnscheduledItem,
+  ContextTag,
+  LifePillar,
+} from "./types";
+
+export const WORK_START_HOUR = 6;
+export const WORK_END_HOUR = 22;
+export const GRID_START_HOUR = 0;
+export const GRID_END_HOUR = 24;
+export const SLOT_MINUTES = 15;
+export const SHORT_TASK_MAX = 15;
+export const BATCH_TARGET = 30;
+export const ERRAND_TRAVEL_BUFFER_MIN = 20;
+
+export function getWeekStart(date: Date): Date {
+  const d = new Date(date);
+  const day = d.getDay(); // 0 = Sunday
+  const diff = day === 0 ? -6 : 1 - day; // Monday as week start
+  d.setDate(d.getDate() + diff);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+export function addDays(date: Date, days: number): Date {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+export function addMinutes(date: Date, minutes: number): Date {
+  const d = new Date(date);
+  d.setMinutes(d.getMinutes() + minutes);
+  return d;
+}
+
+export function slotsInWeek(weekStart: Date): Date[] {
+  const slots: Date[] = [];
+  for (let day = 0; day < 7; day++) {
+    let cur = addDays(weekStart, day);
+    cur.setHours(WORK_START_HOUR, 0, 0, 0);
+    const end = addDays(weekStart, day);
+    end.setHours(WORK_END_HOUR, 0, 0, 0);
+    while (cur < end) {
+      slots.push(new Date(cur));
+      cur = addMinutes(cur, SLOT_MINUTES);
+    }
+  }
+  return slots;
+}
+
+function slotKey(d: Date): string {
+  return d.toISOString();
+}
+
+export function buildBusy(
+  fixed: FixedEvent[],
+  allSlots: Date[]
+): Set<string> {
+  const busy = new Set<string>();
+  for (const ev of fixed) {
+    if (ev.blocks_schedule === false) continue;
+    if (ev.is_all_day) continue;
+    const start = new Date(ev.start_time);
+    const end = new Date(ev.end_time);
+    for (const s of allSlots) {
+      if (start <= s && s < end) {
+        busy.add(slotKey(s));
+      }
+    }
+  }
+  return busy;
+}
+
+function isErrandTransition(a: ContextTag, b: ContextTag): boolean {
+  return (a === "errand" && b !== "errand") || (a !== "errand" && b === "errand");
+}
+
+interface PlacedContext {
+  start: Date;
+  end: Date;
+  context: ContextTag;
+}
+
+function findSlot(
+  busy: Set<string>,
+  allSlots: Date[],
+  durationMin: number,
+  searchStart: Date,
+  searchEnd: Date,
+  placedContexts: PlacedContext[],
+  itemContext: ContextTag
+): Date[] | null {
+  const needed = Math.max(1, Math.ceil(durationMin / SLOT_MINUTES));
+  const reservedSpanMs = needed * SLOT_MINUTES * 60 * 1000;
+  const bufferMs = ERRAND_TRAVEL_BUFFER_MIN * 60 * 1000;
+
+  for (let i = 0; i < allSlots.length; i++) {
+    const s = allSlots[i];
+    if (s < searchStart) continue;
+    if (s >= searchEnd) break;
+    if (busy.has(slotKey(s))) continue;
+
+    const window = allSlots.slice(i, i + needed);
+    if (window.length < needed) continue;
+    if (window.some((w) => busy.has(slotKey(w)))) continue;
+
+    const span = window[window.length - 1].getTime() + SLOT_MINUTES * 60 * 1000 - window[0].getTime();
+    if (span !== reservedSpanMs) continue;
+
+    if (addMinutes(window[0], durationMin) > searchEnd) continue;
+
+    const itemStart = window[0];
+    const itemEnd = addMinutes(window[0], durationMin);
+
+    let blocked = false;
+    for (const pc of placedContexts) {
+      if (pc.end <= itemStart) {
+        const gap = itemStart.getTime() - pc.end.getTime();
+        if (isErrandTransition(pc.context, itemContext) && gap < bufferMs) {
+          blocked = true;
+          break;
+        }
+      } else if (pc.start >= itemEnd) {
+        const gap = pc.start.getTime() - itemEnd.getTime();
+        if (isErrandTransition(pc.context, itemContext) && gap < bufferMs) {
+          blocked = true;
+          break;
+        }
+      }
+    }
+    if (blocked) continue;
+
+    return window;
+  }
+  return null;
+}
+
+interface BatchedTask {
+  name: string;
+  tier: number;
+  durationMin: number;
+  searchStart: Date;
+  searchEnd: Date;
+  context: ContextTag;
+  room: number;
+  isBatch: boolean;
+  memberNames?: string[];
+  memberIds?: string[];
+  memberId?: string;
+  pillar: LifePillar | null;
+}
+
+function batchShortTasks(taskList: Task[]): BatchedTask[] {
+  const short = taskList.filter((t) => t.duration_min <= SHORT_TASK_MAX);
+  const normal: BatchedTask[] = taskList
+    .filter((t) => t.duration_min > SHORT_TASK_MAX)
+    .map((t) => ({
+      name: t.name,
+      tier: t.tier,
+      durationMin: t.duration_min,
+      searchStart: new Date(t.search_start),
+      searchEnd: new Date(t.deadline),
+      context: t.context,
+      pillar: t.pillar ?? null,
+      room: 0,
+      isBatch: false,
+      memberId: t.id,
+    }));
+
+  const byContext = new Map<ContextTag, Task[]>();
+  for (const t of short) {
+    if (!byContext.has(t.context)) byContext.set(t.context, []);
+    byContext.get(t.context)!.push(t);
+  }
+
+  const batched: BatchedTask[] = [];
+  for (const [, items] of byContext) {
+    items.sort((a, b) => a.tier - b.tier || new Date(a.deadline).getTime() - new Date(b.deadline).getTime());
+    let i = 0;
+    while (i < items.length) {
+      const group: Task[] = [items[i]];
+      let total = items[i].duration_min;
+      let j = i + 1;
+      while (j < items.length && total + items[j].duration_min <= BATCH_TARGET) {
+        group.push(items[j]);
+        total += items[j].duration_min;
+        j++;
+      }
+
+      batched.push({
+        name: group.map((g) => g.name).join(" + "),
+        tier: Math.min(...group.map((g) => g.tier)),
+        searchStart: new Date(Math.max(...group.map((g) => new Date(g.search_start).getTime()))),
+        searchEnd: new Date(Math.min(...group.map((g) => new Date(g.deadline).getTime()))),
+        durationMin: total,
+        context: group[0].context,
+        pillar: group[0].pillar ?? null,
+        room: BATCH_TARGET - total,
+        isBatch: group.length > 1,
+        memberNames: group.length > 1 ? group.map((g) => g.name) : undefined,
+        memberIds: group.map((g) => g.id),
+      });
+      i = j;
+    }
+  }
+
+  return [...normal, ...batched];
+}
+
+interface Placeable {
+  id: string;
+  name: string;
+  tier: number;
+  durationMin: number;
+  searchStart: Date;
+  searchEnd: Date;
+  context: ContextTag;
+  room: number;
+  kind: "Habit" | "Task";
+  isBatch: boolean;
+  memberNames?: string[];
+  memberIds?: string[];
+  pillar: LifePillar | null;
+}
+
+export function runEngine(
+  weekStart: Date,
+  fixedEvents: FixedEvent[],
+  habits: Habit[],
+  tasks: Task[]
+): { placed: PlacedItem[]; unscheduled: UnscheduledItem[] } {
+  const allSlots = slotsInWeek(weekStart);
+  const busy = buildBusy(fixedEvents, allSlots);
+
+  const HOME_ONLY_PILLARS: LifePillar[] = ["family"];
+  const utaBusy = new Set<string>();
+  for (const ev of fixedEvents) {
+    if (ev.is_all_day && ev.name.trim().toUpperCase() === "UTA") {
+      const utaStart = new Date(ev.start_time);
+      const utaEnd = new Date(ev.end_time);
+      for (const s of allSlots) {
+        if (s >= utaStart && s < utaEnd) utaBusy.add(slotKey(s));
+      }
+    }
+  }
+
+  const placeables: Placeable[] = [];
+
+  for (const h of habits) {
+    placeables.push({
+      id: h.id,
+      name: h.name,
+      tier: h.tier,
+      durationMin: h.duration_min,
+      searchStart: new Date(h.search_start),
+      searchEnd: new Date(h.search_end),
+      context: h.context,
+      pillar: h.pillar ?? null,
+      room: 0,
+      kind: "Habit",
+      isBatch: false,
+    });
+  }
+
+  for (const b of batchShortTasks(tasks)) {
+    const stableId = b.isBatch && b.memberIds && b.memberIds.length > 0
+      ? `batch-${b.memberIds.join("--")}`
+      : b.memberId ?? crypto.randomUUID();
+    placeables.push({
+      id: stableId,
+      name: b.name,
+      tier: b.tier,
+      durationMin: b.durationMin,
+      searchStart: b.searchStart,
+      searchEnd: b.searchEnd,
+      context: b.context,
+      pillar: b.pillar,
+      room: b.room,
+      kind: "Task",
+      isBatch: b.isBatch,
+      memberNames: b.memberNames,
+      memberIds: b.memberIds,
+    });
+  }
+
+  placeables.sort((a, b) => a.tier - b.tier || a.searchEnd.getTime() - b.searchEnd.getTime());
+
+  const placed: PlacedItem[] = [];
+  const unscheduled: UnscheduledItem[] = [];
+  const placedContexts: PlacedContext[] = [];
+
+  for (const p of placeables) {
+    const isHomeOnly = !!p.pillar && HOME_ONLY_PILLARS.includes(p.pillar);
+    const effectiveBusy = isHomeOnly ? new Set([...busy, ...utaBusy]) : busy;
+    const window = findSlot(effectiveBusy, allSlots, p.durationMin, p.searchStart, p.searchEnd, placedContexts, p.context);
+    if (window) {
+      for (const w of window) busy.add(slotKey(w));
+      const itemStart = window[0];
+      const itemEnd = addMinutes(window[0], p.durationMin);
+      placedContexts.push({ start: itemStart, end: itemEnd, context: p.context });
+      placed.push({
+        id: p.id,
+        name: p.name,
+        kind: p.kind,
+        tier: p.tier,
+        context: p.context,
+        pillar: p.pillar,
+        start: window[0],
+        end: addMinutes(window[0], p.durationMin),
+        room: p.room,
+        isBatch: p.isBatch,
+        memberNames: p.memberNames,
+        memberIds: p.memberIds,
+      });
+    } else {
+      unscheduled.push({
+        id: p.id,
+        name: p.name,
+        kind: p.kind,
+        tier: p.tier,
+        deadline: p.searchEnd,
+      });
+    }
+  }
+
+  for (const ev of fixedEvents) {
+    const evStart = new Date(ev.start_time);
+    const evEnd = new Date(ev.end_time);
+    const weekEndDate = addDays(weekStart, 7);
+    if (evStart >= weekStart && evStart < weekEndDate) {
+      placed.push({
+        id: ev.id,
+        name: ev.name,
+        kind: "Fixed Event",
+        tier: 0,
+        context: "other",
+        pillar: ev.pillar ?? null,
+        start: evStart,
+        end: evEnd,
+        room: 0,
+        isBatch: false,
+        sourceCalendarId: ev.source_calendar_id,
+        blocksSchedule: ev.blocks_schedule !== false,
+        isAllDay: ev.is_all_day ?? false,
+      });
+    }
+  }
+
+  placed.sort((a, b) => a.start.getTime() - b.start.getTime());
+
+  return { placed, unscheduled };
+}

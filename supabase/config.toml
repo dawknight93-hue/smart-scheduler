@@ -1,0 +1,8 @@
+[functions.gcal-sync]
+verify_jwt = false
+
+[functions.smart-gate]
+verify_jwt = true
+
+[functions.goal-research]
+verify_jwt = true
