@@ -29,6 +29,9 @@ import {
   addDays,
   GRID_START_HOUR,
   GRID_END_HOUR,
+  utaRanges,
+  isUtaBlocked,
+  utaBlockLabel,
 } from "@/lib/schedulingEngine";
 import type {
   FixedEvent,
@@ -75,7 +78,6 @@ function minutesFromGridTop(d: Date): number {
 }
 const NIGHT_START_HOUR = 21;
 const NIGHT_END_HOUR = 9;
-const HOME_ONLY_PILLARS: LifePillar[] = ["family"];
 
 function snapToSlot(d: Date): Date {
   const m = d.getMinutes();
@@ -90,17 +92,9 @@ function isQuietTime(start: Date, end: Date): boolean {
   return false;
 }
 
-function isUTADay(date: Date, fixedEvents: FixedEvent[]): boolean {
-  const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
-  const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
-  for (const ev of fixedEvents) {
-    if (ev.is_all_day && ev.name.trim().toUpperCase() === "UTA") {
-      const evStart = new Date(ev.start_time);
-      const evEnd = new Date(ev.end_time);
-      if (dayStart < evEnd && dayEnd > evStart) return true;
-    }
-  }
-  return false;
+/** True if [start, end) touches a UTA day (same day boundaries the scheduler uses). */
+function overlapsUta(start: Date, end: Date, fixedEvents: FixedEvent[]): boolean {
+  return utaRanges(fixedEvents).some(([a, b]) => start < b && a < end);
 }
 
 function rangesOverlap(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date): boolean {
@@ -125,7 +119,7 @@ function findNextFreeSlot(
         const slotEnd = new Date(slotStart.getTime() + durationMs);
         if (slotEnd.getHours() >= 24 || (slotEnd.getDate() !== slotStart.getDate() && slotEnd.getHours() > 0)) continue;
         if (isQuietTime(slotStart, slotEnd)) continue;
-        if (itemToMove.pillar && HOME_ONLY_PILLARS.includes(itemToMove.pillar) && isUTADay(slotStart, fixedEvents)) continue;
+        if (isUtaBlocked(itemToMove.pillar, itemToMove.context) && overlapsUta(slotStart, slotEnd, fixedEvents)) continue;
         let conflict = false;
         for (const other of allItems) {
           if (other.id === itemToMove.id) continue;
@@ -178,7 +172,7 @@ function unscheduledReasonText(u: UnscheduledItem): string {
     case "outside_hours":
       return `Its window (${window}) doesn't overlap scheduling hours (6 AM–10 PM) long enough for ${formatDuration(u.durationMin)}.`;
     case "family_uta":
-      return `The only open time in its window is on a UTA day, and Family items can't go on UTA days.`;
+      return `The only open time in its window is on a UTA day, and Family, Desk, Home and Errand items can't go on UTA days.`;
     case "no_free_time":
       return `No free ${formatDuration(u.durationMin)} block in its window (${window}) — that time is already booked.`;
   }
@@ -945,8 +939,8 @@ export function CalendarView({
   function checkMove(item: PlacedItem, newStart: Date): { blocked?: string; overlaps: string[]; notes: string[] } {
     const newEnd = new Date(newStart.getTime() + (item.end.getTime() - item.start.getTime()));
     if (isQuietTime(newStart, newEnd)) return { blocked: "Can't schedule between 9 PM and 9 AM", overlaps: [], notes: [] };
-    if (item.pillar && HOME_ONLY_PILLARS.includes(item.pillar) && isUTADay(newStart, fixedEvents)) {
-      return { blocked: "Can't schedule Family-pillar items on UTA days", overlaps: [], notes: [] };
+    if (isUtaBlocked(item.pillar, item.context) && overlapsUta(newStart, newEnd, fixedEvents)) {
+      return { blocked: `${utaBlockLabel(item.pillar, item.context)} items can't go on UTA days`, overlaps: [], notes: [] };
     }
     if (placed.some((p) => p.kind === "Enroute" && rangesOverlap(newStart, newEnd, p.start, p.end))) {
       return { blocked: "Can't drop on an Enroute block", overlaps: [], notes: [] };
@@ -1170,7 +1164,7 @@ export function CalendarView({
       const hint = (h: string) => setResizeState((prev) => (prev && prev.hint !== h ? { ...prev, hint: h } : prev));
       if (snapped < minEnd) return hint("15 min minimum");
       if (isQuietTime(resizeState.item.start, snapped)) return hint("can't run into 9 PM – 9 AM");
-      if (resizeState.item.pillar && HOME_ONLY_PILLARS.includes(resizeState.item.pillar) && isUTADay(resizeState.item.start, fixedEvents)) return hint("Family items can't change on UTA days");
+      if (isUtaBlocked(resizeState.item.pillar, resizeState.item.context) && overlapsUta(resizeState.item.start, snapped, fixedEvents)) return hint(`${utaBlockLabel(resizeState.item.pillar, resizeState.item.context)} items can't go on UTA days`);
       setResizeState((prev) => (prev ? { ...prev, previewEnd: snapped, hint: undefined } : null));
     };
     const onUp = async () => {
