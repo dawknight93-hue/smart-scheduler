@@ -4,6 +4,7 @@ import { CalendarView } from "@/components/CalendarView";
 import { TasksView } from "@/components/TasksView";
 import { GoalsView } from "@/components/GoalsView";
 import { GoogleCallback } from "@/components/GoogleCallback";
+import { PrivacyPolicy } from "@/components/PrivacyPolicy";
 import { getWeekStart } from "@/lib/schedulingEngine";
 
 type View = "calendar" | "tasks" | "goals";
@@ -13,6 +14,7 @@ function App() {
   const [weekStart, setWeekStart] = useState(() => getWeekStart(new Date()));
 
   if (window.location.pathname === "/gcal-callback") return <GoogleCallback />;
+  if (window.location.pathname === "/privacy") return <PrivacyPolicy />;
 
   return (
     <div className="min-h-screen w-full overflow-x-hidden bg-slate-950 text-slate-100 flex flex-col">
