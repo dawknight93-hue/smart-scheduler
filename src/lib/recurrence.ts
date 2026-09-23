@@ -79,8 +79,6 @@ function getMondayOfWeek(d: Date): Date {
   return monday;
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
 export function expandRecurrence(
   rule: RecurrenceRule,
   startDate: Date,
@@ -105,13 +103,19 @@ export function expandRecurrence(
       if (cur >= rangeEnd) break;
       count++;
       if (cur >= rangeStart && cur < rangeEnd) result.push(new Date(cur));
-      cur = new Date(cur.getTime() + rule.interval * DAY_MS);
+      // Step by calendar days, not 24h blocks, so daylight-saving changes
+      // don't duplicate or shift a day.
+      cur = new Date(cur.getFullYear(), cur.getMonth(), cur.getDate() + rule.interval);
       iterations++;
     }
   } else if (rule.frequency === "weekly") {
     const startMonday = getMondayOfWeek(startDay);
+    // Weeks run Monday→Sunday, so order weekdays that way (Sunday last);
+    // otherwise Sunday is counted before Mon–Sat of the same week, which
+    // breaks "ends after N occurrences" and returns dates out of order.
+    const mondayFirst = (d: number) => (d + 6) % 7;
     const weekdays = rule.weekdays.length > 0
-      ? [...rule.weekdays].sort((a, b) => a - b)
+      ? [...rule.weekdays].sort((a, b) => mondayFirst(a) - mondayFirst(b))
       : [startDay.getDay()];
     let weekNum = 0;
     let stopped = false;

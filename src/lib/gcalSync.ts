@@ -1,6 +1,7 @@
 import type { PlacedItem, CalendarConnection, FixedEvent, Habit, Task } from "./types";
 import { supabase } from "./supabase";
 import { runEngine, getWeekStart, addDays } from "./schedulingEngine";
+import { buildMirrorItems, defaultMirrorWindowStart } from "./googleMirror";
 
 const FUNCTION_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/gcal-sync`;
 
@@ -33,6 +34,11 @@ export interface SyncStatus {
 
 export interface SyncResult {
   success: boolean;
+  created?: number;
+  updated?: number;
+  deleted?: number;
+  unchanged?: number;
+  errors?: string[];
   eventsPulled?: number;
   eventsPushed?: number;
   message?: string;
@@ -230,16 +236,29 @@ export async function buildMultiWeekPushItems(
   return pushable;
 }
 
+/**
+ * Make Google Calendar mirror Smart Scheduler: every app-created Fixed Event,
+ * Habit, Task (recurring ones as real repeating series) and Enroute block.
+ */
+export async function mirrorToGoogle(connections: CalendarConnection[]): Promise<SyncResult> {
+  const { items, windowStart } = await buildMirrorItems(defaultMirrorWindowStart());
+  const conns = connections.map((c) => ({
+    id: c.id,
+    calendar_id: c.calendar_id,
+    role: c.role,
+    enabled: c.enabled,
+    name: c.name,
+  }));
+  return callEdgeFunction({ action: "mirror", items, windowStart: windowStart.toISOString(), connections: conns });
+}
+
 export async function autoPushToGoogle(): Promise<void> {
   const status = await getSyncStatus();
   if (!status?.connected) return;
   const connections = status.connections as CalendarConnection[];
   const hasTarget = connections.some((c) => c.role === "schedule_target" && c.enabled);
   if (!hasTarget) return;
-
-  const rangeStart = addDays(getWeekStart(new Date()), -7);
-  const pushable = await buildMultiWeekPushItems(rangeStart, SYNC_WEEKS);
-  await pushToGoogle(pushable, connections);
+  await mirrorToGoogle(connections);
 }
 
 export function scheduleAutoPush(delay = 2000): void {
