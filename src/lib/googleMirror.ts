@@ -4,7 +4,7 @@
 // app itself owns (tagged with a private extended property).
 import type { FixedEvent, Habit, Task, LifePillar, PlacedItem } from "./types";
 import { supabase } from "./supabase";
-import { runEngine, getWeekStart, addDays } from "./schedulingEngine";
+import { runEngine, getWeekStart, addDays, HOME_TIME_ZONE, homeWallParts, homeDate } from "./schedulingEngine";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, type RecurrenceRule } from "./recurrence";
 
 export const MIRROR_WEEKS = 6;
@@ -67,8 +67,29 @@ function pad(n: number): string {
   return String(n).padStart(2, "0");
 }
 
+/** Wall-clock time of an instant in the home time zone, e.g. "2026-09-24T09:15:00". */
 export function localWall(d: Date): string {
-  return `${formatLocalDate(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const w = homeWallParts(d);
+  return `${w.y}-${pad(w.mo)}-${pad(w.d)}T${pad(w.h)}:${pad(w.mi)}:${pad(w.s)}`;
+}
+
+/**
+ * Re-express an instant as a device-local Date carrying the home time zone's
+ * calendar date and clock time. Recurrence math runs on these, so repeat days
+ * are the home-calendar days no matter what time zone the device is in.
+ */
+function toHomeCalendar(instant: Date): Date {
+  const w = homeWallParts(instant);
+  return new Date(w.y, w.mo - 1, w.d, w.h, w.mi, 0);
+}
+
+/** Home-time-zone instant for a home-calendar date (from toHomeCalendar/expandRecurrence) at h:m. */
+function homeInstant(day: Date, h: number, m: number): Date {
+  return homeDate(day.getFullYear(), day.getMonth(), day.getDate(), h, m);
+}
+
+function homeRule(rule: RecurrenceRule): RecurrenceRule {
+  return rule.endDate ? { ...rule, endDate: toHomeCalendar(new Date(rule.endDate)).toISOString() } : rule;
 }
 
 function compactUtc(d: Date): string {
@@ -114,12 +135,11 @@ export function buildRRule(rule: RecurrenceRule, allDay: boolean, timeOfDay: { h
     parts.push(`COUNT=${rule.count}`);
   } else if (rule.endMode === "on_date" && rule.endDate) {
     // The app treats the end date as inclusive (local calendar day).
-    const end = new Date(rule.endDate);
+    const end = toHomeCalendar(new Date(rule.endDate));
     if (allDay) {
       parts.push(`UNTIL=${formatLocalDate(end).replace(/-/g, "")}`);
     } else {
-      const lastStart = new Date(end.getFullYear(), end.getMonth(), end.getDate(), timeOfDay.h, timeOfDay.m, 0);
-      parts.push(`UNTIL=${compactUtc(lastStart)}`);
+      parts.push(`UNTIL=${compactUtc(homeInstant(end, timeOfDay.h, timeOfDay.m))}`);
     }
   }
   return `RRULE:${parts.join(";")}`;
@@ -150,11 +170,12 @@ interface SeriesInput {
 function buildSeries(s: SeriesInput): MirrorItem | null {
   const rule = parseRecurrenceFromItem(s.source);
   if (!rule.enabled) return null;
-  const anchorDay = new Date(s.anchor.getFullYear(), s.anchor.getMonth(), s.anchor.getDate());
+  const anchor = toHomeCalendar(s.anchor);
+  const anchorDay = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate());
   // Google counts the series from DTSTART, so start it on the app's actual first
   // occurrence (which may be after the anchor date, e.g. weekly on Mon/Wed
   // starting on a Saturday).
-  const upcoming = expandRecurrence(rule, s.anchor, anchorDay, addDays(anchorDay, 3 * 366));
+  const upcoming = expandRecurrence(homeRule(rule), anchor, anchorDay, addDays(anchorDay, 3 * 366));
   const first = upcoming[0];
   if (!first) return null;
   // A finite series whose every occurrence was deleted has nothing to show.
@@ -164,8 +185,8 @@ function buildSeries(s: SeriesInput): MirrorItem | null {
     const skipped = new Set(s.occurrences.filter((o) => o.skipped).map((o) => o.occurrence_date));
     if (upcoming.every((d) => skipped.has(formatLocalDate(d)))) return null;
   }
-  const h = s.anchor.getHours();
-  const m = s.anchor.getMinutes();
+  const h = anchor.getHours();
+  const m = anchor.getMinutes();
   let start: string;
   let end: string;
   if (s.allDay) {
@@ -173,7 +194,7 @@ function buildSeries(s: SeriesInput): MirrorItem | null {
     start = formatLocalDate(first);
     end = formatLocalDate(addDays(first, days));
   } else {
-    const st = new Date(first.getFullYear(), first.getMonth(), first.getDate(), h, m, 0);
+    const st = homeInstant(first, h, m);
     start = localWall(st);
     end = localWall(new Date(st.getTime() + s.durationMs));
   }
@@ -183,7 +204,7 @@ function buildSeries(s: SeriesInput): MirrorItem | null {
       const [y, mo, d] = o.occurrence_date.split("-").map(Number);
       const ex: MirrorException = { skipped: o.skipped, completed: o.completed };
       if (s.allDay) ex.originalDate = o.occurrence_date;
-      else ex.originalStart = new Date(y, mo - 1, d, h, m, 0).toISOString();
+      else ex.originalStart = homeDate(y, mo - 1, d, h, m).toISOString();
       if (!o.skipped && o.override_start && o.override_end) {
         ex.overrideStart = localWall(new Date(o.override_start));
         ex.overrideEnd = localWall(new Date(o.override_end));
@@ -222,9 +243,9 @@ function fixedOccurrencesInRange(
 ): FixedEvent[] {
   const out: FixedEvent[] = [];
   for (const fe of recurring) {
-    const rule = parseRecurrenceFromItem(fe);
-    const feStart = new Date(fe.start_time);
-    const durationMs = new Date(fe.end_time).getTime() - feStart.getTime();
+    const rule = homeRule(parseRecurrenceFromItem(fe));
+    const feStart = toHomeCalendar(new Date(fe.start_time));
+    const durationMs = new Date(fe.end_time).getTime() - new Date(fe.start_time).getTime();
     for (const occ of expandRecurrence(rule, feStart, rangeStart, rangeEnd)) {
       const dateStr = formatLocalDate(occ);
       const ex = occByKey.get(`${fe.id}|${dateStr}`);
@@ -235,8 +256,7 @@ function fixedOccurrencesInRange(
         s = new Date(ex.override_start);
         e = new Date(ex.override_end);
       } else {
-        s = new Date(occ);
-        s.setHours(feStart.getHours(), feStart.getMinutes(), 0, 0);
+        s = homeInstant(occ, feStart.getHours(), feStart.getMinutes());
         e = new Date(s.getTime() + durationMs);
       }
       out.push({ ...fe, id: `${fe.id}--${dateStr}`, start_time: s.toISOString(), end_time: e.toISOString(), recurrence_enabled: false });
@@ -250,7 +270,9 @@ export async function buildMirrorItems(
   weeks: number = MIRROR_WEEKS
 ): Promise<{ items: MirrorItem[]; windowStart: Date; windowEnd: Date }> {
   const windowEnd = addDays(windowStart, weeks * 7);
-  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  // Always describe events in the home time zone so every device produces the
+  // same result (a device on another time zone won't rewrite Google Calendar).
+  const timeZone = HOME_TIME_ZONE;
 
   const [feRes, habRes, taskRes, ebRes, mapRes, toRes, feoRes, hoRes] = await Promise.all([
     supabase.from("fixed_events").select("*"),

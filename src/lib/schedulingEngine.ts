@@ -38,13 +38,49 @@ export function addMinutes(date: Date, minutes: number): Date {
   return d;
 }
 
+/**
+ * The planner's home time zone (MIA). Scheduling hours are anchored here, so
+ * the same schedule is produced on every device — a phone that's switched to
+ * another time zone on a trip won't reshuffle the plan (or Google Calendar).
+ */
+export const HOME_TIME_ZONE = "America/New_York";
+
+const homeParts = new Intl.DateTimeFormat("en-US", {
+  timeZone: HOME_TIME_ZONE,
+  hourCycle: "h23",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+});
+
+/** Wall-clock parts of an instant in the home time zone. */
+export function homeWallParts(date: Date): { y: number; mo: number; d: number; h: number; mi: number; s: number } {
+  const p = Object.fromEntries(homeParts.formatToParts(date).map((x) => [x.type, x.value]));
+  return { y: +p.year, mo: +p.month, d: +p.day, h: +p.hour % 24, mi: +p.minute, s: +p.second };
+}
+
+function homeOffsetMs(date: Date): number {
+  const w = homeWallParts(date);
+  return Date.UTC(w.y, w.mo - 1, w.d, w.h, w.mi, w.s) - Math.floor(date.getTime() / 1000) * 1000;
+}
+
+/** The instant at a given wall-clock time in the home time zone (month is 0-based). */
+export function homeDate(y: number, month: number, day: number, h: number, mi: number): Date {
+  const guess = Date.UTC(y, month, day, h, mi);
+  let t = guess - homeOffsetMs(new Date(guess));
+  t = guess - homeOffsetMs(new Date(t)); // settle across a DST change
+  return new Date(t);
+}
+
 export function slotsInWeek(weekStart: Date): Date[] {
   const slots: Date[] = [];
   for (let day = 0; day < 7; day++) {
-    let cur = addDays(weekStart, day);
-    cur.setHours(WORK_START_HOUR, 0, 0, 0);
-    const end = addDays(weekStart, day);
-    end.setHours(WORK_END_HOUR, 0, 0, 0);
+    const date = addDays(weekStart, day);
+    let cur = homeDate(date.getFullYear(), date.getMonth(), date.getDate(), WORK_START_HOUR, 0);
+    const end = homeDate(date.getFullYear(), date.getMonth(), date.getDate(), WORK_END_HOUR, 0);
     while (cur < end) {
       slots.push(new Date(cur));
       cur = addMinutes(cur, SLOT_MINUTES);
