@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { X, CalendarClock, Repeat, CheckSquare } from "lucide-react";
+import { X, CalendarClock, Repeat, CheckSquare, Trash2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import type { ContextTag, LifePillar, Task, FixedEvent, Habit } from "@/lib/types";
 import { CONTEXT_COLORS, PILLARS, PILLAR_LABELS, PILLAR_COLORS } from "@/lib/types";
@@ -45,13 +45,37 @@ export function AddItemModal({
   onSaved,
   editTarget,
   prefillDate,
+  onDelete,
 }: {
   weekStart: Date;
   onClose: () => void;
   onSaved: () => void;
   editTarget?: EditTarget | null;
   prefillDate?: Date | null;
+  /** When provided (edit mode), shows a Delete button that asks for a second tap before running. */
+  onDelete?: () => Promise<void>;
 }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  async function runDelete() {
+    if (!onDelete) return;
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
+    setDeleting(true);
+    setError(null);
+    try {
+      await onDelete();
+      onClose();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Couldn't delete this item");
+      setDeleting(false);
+      setConfirmDelete(false);
+    }
+  }
+
   const [tab, setTab] = useState<Tab>(
     editTarget ? (editTarget.kind === "Fixed Event" ? "event" : editTarget.kind === "Habit" ? "habit" : "task") : "event"
   );
@@ -551,6 +575,21 @@ export function AddItemModal({
               {saving ? "Saving…" : editTarget ? "Save Changes" : "Add to Schedule"}
             </button>
           </div>
+
+          {editTarget && onDelete && (
+            <button
+              onClick={runDelete}
+              disabled={deleting || saving}
+              className={`w-full py-2.5 rounded-lg border text-sm font-medium transition-colors flex items-center justify-center gap-2 disabled:opacity-50 ${
+                confirmDelete
+                  ? "bg-rose-600 border-rose-600 text-white hover:bg-rose-500"
+                  : "bg-rose-500/10 border-rose-500/30 text-rose-400 hover:bg-rose-500/20"
+              }`}
+            >
+              <Trash2 className="w-4 h-4" />
+              {deleting ? "Deleting…" : confirmDelete ? `Tap again to delete this ${editTarget.kind.toLowerCase()}` : "Delete"}
+            </button>
+          )}
         </div>
       </div>
     </div>

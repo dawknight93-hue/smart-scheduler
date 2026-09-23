@@ -293,6 +293,8 @@ export function CalendarView({
   const [fixedEventOccurrences, setFixedEventOccurrences] = useState<FixedEventOccurrence[]>([]);
   const [habitOccurrences, setHabitOccurrences] = useState<HabitOccurrence[]>([]);
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
+  // True when the edit modal was opened from the "not on your calendar" panel, which also offers Delete.
+  const [editFromUnscheduled, setEditFromUnscheduled] = useState(false);
   const [scopeDialog, setScopeDialog] = useState<{ action: "delete" | "edit"; item: PlacedItem } | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
@@ -1085,7 +1087,19 @@ export function CalendarView({
   function editUnscheduled(u: UnscheduledItem) {
     if (u.isBatch) return;
     const data = u.kind === "Habit" ? habits.find((h) => h.id === u.id) : tasks.find((t) => t.id === u.id);
-    if (data) setEditTarget({ kind: u.kind as "Habit" | "Task", id: u.id, data });
+    if (data) {
+      setEditTarget({ kind: u.kind as "Habit" | "Task", id: u.id, data });
+      setEditFromUnscheduled(true);
+    }
+  }
+
+  async function deleteUnscheduled(target: EditTarget) {
+    const table = target.kind === "Habit" ? "habits" : "tasks";
+    const { error } = await supabase.from(table).delete().eq("id", target.id);
+    if (error) throw new Error(error.message);
+    await loadData();
+    // The Google mirror drops any copies of this item on its next run.
+    scheduleAutoPush();
   }
 
   const syncFreshness = getSyncFreshness(lastSyncedAt);
@@ -1727,7 +1741,7 @@ export function CalendarView({
             </span>
           </div>
           <p className="mt-1 mb-2 text-xs text-slate-400">
-            These don't appear here or in Google Calendar. Tap one to change its time window or duration.
+            These don't appear here or in Google Calendar. Tap one to change its time window or duration, or to delete it.
           </p>
           <div className="flex flex-col gap-2">
             {notScheduled.map((u) => {
@@ -1808,9 +1822,10 @@ export function CalendarView({
       {editTarget && (
         <AddItemModal
           weekStart={weekStart}
-          onClose={() => setEditTarget(null)}
+          onClose={() => { setEditTarget(null); setEditFromUnscheduled(false); }}
           onSaved={loadData}
           editTarget={editTarget}
+          onDelete={editFromUnscheduled ? () => deleteUnscheduled(editTarget) : undefined}
         />
       )}
 
