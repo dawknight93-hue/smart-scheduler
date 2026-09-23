@@ -240,7 +240,17 @@ export async function buildMultiWeekPushItems(
  * Make Google Calendar mirror Smart Scheduler: every app-created Fixed Event,
  * Habit, Task (recurring ones as real repeating series) and Enroute block.
  */
-export async function mirrorToGoogle(connections: CalendarConnection[]): Promise<SyncResult> {
+// Run mirrors one at a time: an edit-triggered push and a sync-on-open can
+// overlap, and two concurrent runs could both create the same event.
+let mirrorQueue: Promise<unknown> = Promise.resolve();
+
+export function mirrorToGoogle(connections: CalendarConnection[]): Promise<SyncResult> {
+  const run = mirrorQueue.then(() => runMirror(connections));
+  mirrorQueue = run.catch(() => undefined);
+  return run;
+}
+
+async function runMirror(connections: CalendarConnection[]): Promise<SyncResult> {
   const { items, windowStart } = await buildMirrorItems(defaultMirrorWindowStart());
   const conns = connections.map((c) => ({
     id: c.id,
