@@ -514,6 +514,10 @@ async function pullEvents(
   }
 
   let totalPulled = 0;
+  // Every Google event id seen in each calendar this run, so events that were
+  // deleted in Google or moved to another calendar can be removed afterwards.
+  const seenIds = new Set<string>();
+  const fullyListed = new Set<string>();
 
   for (const conn of sourceConnections) {
     const ownIds = new Set((await listMirrorEvents(accessToken, conn.calendar_id)).map((e) => e.id));
@@ -535,6 +539,8 @@ async function pullEvents(
 
     const data = await resp.json();
     const events: GoogleEvent[] = data.items ?? [];
+    for (const ev of events) seenIds.add(ev.id);
+    if (!data.nextPageToken) fullyListed.add(conn.calendar_id);
 
     for (const ev of events) {
       if (
@@ -592,6 +598,7 @@ async function pullEvents(
             start_time: evStart.toISOString(),
             end_time: evEnd.toISOString(),
             calendar_role: conn.role,
+            calendar_id: conn.calendar_id,
             synced_at: new Date().toISOString(),
           })
           .eq("id", existing.id);
@@ -633,7 +640,31 @@ async function pullEvents(
       .eq("calendar_id", conn.calendar_id);
   }
 
-  return { eventsPulled: totalPulled };
+  // Remove app copies of pulled events that are no longer in their Google
+  // calendar within this window (deleted there, or moved to a calendar that
+  // isn't connected). Only calendars listed completely this run are checked.
+  let totalRemoved = 0;
+  const checkedCalendars = [...new Set(sourceConnections.map((c) => c.calendar_id))].filter((id) => fullyListed.has(id));
+  if (checkedCalendars.length > 0) {
+    const { data: rows } = await supabase
+      .from("gcal_event_map")
+      .select("id, google_event_id, item_id, item_type, calendar_role")
+      .in("calendar_id", checkedCalendars)
+      .in("calendar_role", ["fixed_source", "display_only"])
+      .eq("item_type", "fixed_event")
+      // One-day margin at each edge: all-day events are stored at UTC midnight,
+      // which can sit just outside the range Google was asked about.
+      .gte("start_time", new Date(weekStartDt.getTime() + DAY_MS).toISOString())
+      .lt("start_time", new Date(weekEndDt.getTime() - DAY_MS).toISOString());
+    for (const row of rows ?? []) {
+      if (seenIds.has(row.google_event_id)) continue;
+      if (row.item_id) await supabase.from("fixed_events").delete().eq("id", row.item_id);
+      await supabase.from("gcal_event_map").delete().eq("id", row.id);
+      totalRemoved++;
+    }
+  }
+
+  return { eventsPulled: totalPulled, eventsRemoved: totalRemoved };
 }
 
 async function pushEvents(
