@@ -94,7 +94,7 @@ async function resolvePillarForNewEvent(title: string): Promise<LifePillar | nul
 
 
 interface SyncRequest {
-  action: "oauth-exchange" | "pull" | "push" | "status" | "disconnect" | "delete";
+  action: "oauth-exchange" | "pull" | "push" | "mirror" | "status" | "disconnect" | "delete";
   code?: string;
   weekStart?: string;
   rangeDays?: number;
@@ -102,6 +102,8 @@ interface SyncRequest {
   connections?: { id: string; calendar_id: string; role: string; enabled: boolean; name: string }[];
   itemType?: string;
   itemId?: string;
+  items?: MirrorItem[];
+  windowStart?: string;
 }
 
 interface PlacedItemForPush {
@@ -121,8 +123,273 @@ interface PlacedItemForPush {
 interface GoogleEvent {
   id: string;
   summary?: string;
+  status?: string;
   start?: { dateTime?: string; date?: string };
   end?: { dateTime?: string; date?: string };
+  recurringEventId?: string;
+  originalStartTime?: { dateTime?: string; date?: string };
+  extendedProperties?: { private?: Record<string, string> };
+}
+
+// ---- Google Calendar mirror -------------------------------------------------
+// Everything the app writes to Google is tagged with private extended
+// properties: ssMirror=1 (owned by Smart Scheduler), ssKey (stable identity of
+// the app item) and ssHash (content hash). The mirror action reconciles Google
+// against the full desired list sent by the app, and only ever touches events
+// carrying ssMirror=1 — events you create in Google are never modified.
+
+interface MirrorException {
+  originalStart?: string;
+  originalDate?: string;
+  skipped: boolean;
+  completed: boolean;
+  overrideStart?: string;
+  overrideEnd?: string;
+}
+
+interface MirrorItem {
+  key: string;
+  target: "personal" | "tasks" | "habits";
+  summary: string;
+  description: string;
+  colorId?: string;
+  allDay: boolean;
+  start: string;
+  end: string;
+  timeZone: string;
+  recurrence?: string[];
+  exceptions?: MirrorException[];
+  hash: string;
+}
+
+type MirrorConnection = { calendar_id: string; role: string; enabled: boolean; name: string };
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+async function googleJson(url: string, accessToken: string, init: RequestInit = {}): Promise<Response> {
+  return await fetch(url, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      ...(init.headers ?? {}),
+    },
+  });
+}
+
+async function listMirrorEvents(accessToken: string, calendarId: string): Promise<GoogleEvent[]> {
+  const out: GoogleEvent[] = [];
+  let pageToken: string | undefined;
+  do {
+    const url = new URL(GOOGLE_EVENTS_URL(calendarId));
+    url.searchParams.set("privateExtendedProperty", "ssMirror=1");
+    url.searchParams.set("singleEvents", "false");
+    url.searchParams.set("showDeleted", "false");
+    url.searchParams.set("maxResults", "2500");
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+    const resp = await googleJson(url.toString(), accessToken);
+    if (!resp.ok) {
+      throw new Error(`Failed to list Smart Scheduler events on ${calendarId} (${resp.status}): ${await resp.text()}`);
+    }
+    const data = await resp.json();
+    out.push(...((data.items ?? []) as GoogleEvent[]));
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+  return out;
+}
+
+function mirrorTime(allDay: boolean, value: string, timeZone: string) {
+  return allDay ? { date: value } : { dateTime: value, timeZone };
+}
+
+function mirrorBody(item: MirrorItem): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    summary: item.summary,
+    description: item.description,
+    start: mirrorTime(item.allDay, item.start, item.timeZone),
+    end: mirrorTime(item.allDay, item.end, item.timeZone),
+    extendedProperties: { private: { ssMirror: "1", ssKey: item.key, ssHash: item.hash } },
+  };
+  if (item.colorId) body.colorId = item.colorId;
+  if (item.recurrence && item.recurrence.length > 0) body.recurrence = item.recurrence;
+  return body;
+}
+
+async function deleteGoogleEvent(accessToken: string, calendarId: string, eventId: string): Promise<boolean> {
+  const resp = await googleJson(`${GOOGLE_EVENTS_URL(calendarId)}/${encodeURIComponent(eventId)}`, accessToken, {
+    method: "DELETE",
+  });
+  return resp.ok || resp.status === 404 || resp.status === 410;
+}
+
+async function applyMirrorExceptions(
+  accessToken: string,
+  calendarId: string,
+  masterId: string,
+  item: MirrorItem,
+  errors: string[]
+) {
+  const exceptions = item.exceptions ?? [];
+  if (exceptions.length === 0) return;
+  const times = exceptions.map((e) =>
+    e.originalStart ? new Date(e.originalStart).getTime() : new Date(`${e.originalDate}T00:00:00Z`).getTime()
+  );
+  const instances: GoogleEvent[] = [];
+  let pageToken: string | undefined;
+  do {
+    const url = new URL(`${GOOGLE_EVENTS_URL(calendarId)}/${encodeURIComponent(masterId)}/instances`);
+    url.searchParams.set("timeMin", new Date(Math.min(...times) - 2 * DAY_MS).toISOString());
+    url.searchParams.set("timeMax", new Date(Math.max(...times) + 2 * DAY_MS).toISOString());
+    url.searchParams.set("maxResults", "2500");
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+    const resp = await googleJson(url.toString(), accessToken);
+    if (!resp.ok) {
+      errors.push(`${item.summary}: could not read occurrences (${resp.status})`);
+      return;
+    }
+    const data = await resp.json();
+    instances.push(...((data.items ?? []) as GoogleEvent[]));
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+
+  for (const ex of exceptions) {
+    const inst = instances.find((i) =>
+      ex.originalStart
+        ? !!i.originalStartTime?.dateTime &&
+          new Date(i.originalStartTime.dateTime).getTime() === new Date(ex.originalStart).getTime()
+        : i.originalStartTime?.date === ex.originalDate
+    );
+    if (!inst) continue;
+    const instUrl = `${GOOGLE_EVENTS_URL(calendarId)}/${encodeURIComponent(inst.id)}`;
+    if (ex.skipped) {
+      await googleJson(instUrl, accessToken, { method: "DELETE" });
+      continue;
+    }
+    const patch: Record<string, unknown> = {};
+    if (ex.completed) patch.summary = `✓ ${item.summary}`;
+    if (ex.overrideStart && ex.overrideEnd) {
+      patch.start = { dateTime: ex.overrideStart, timeZone: item.timeZone };
+      patch.end = { dateTime: ex.overrideEnd, timeZone: item.timeZone };
+    }
+    if (Object.keys(patch).length === 0) continue;
+    const resp = await googleJson(instUrl, accessToken, { method: "PATCH", body: JSON.stringify(patch) });
+    if (!resp.ok) errors.push(`${item.summary}: could not update one occurrence (${resp.status})`);
+  }
+}
+
+async function mirrorEvents(connections: MirrorConnection[], items: MirrorItem[], windowStart: string) {
+  const accessToken = await getValidAccessToken();
+  const enabled = connections.filter((c) => c.enabled && c.calendar_id);
+  const targets = enabled.filter((c) => c.role === "schedule_target");
+  if (targets.length === 0) {
+    return { created: 0, updated: 0, deleted: 0, unchanged: 0, message: "No enabled Write target calendar configured." };
+  }
+  const tasksCal = targets.find((c) => /task/i.test(c.name)) ?? targets[0];
+  const habitsCal = targets.find((c) => /habit/i.test(c.name)) ?? targets[0];
+  const personalCal =
+    enabled.find((c) => c.role !== "schedule_target" && /personal|family/i.test(c.name)) ?? tasksCal;
+  const calFor = (t: MirrorItem["target"]) => (t === "personal" ? personalCal : t === "habits" ? habitsCal : tasksCal);
+  const windowStartDt = new Date(windowStart);
+  const errors: string[] = [];
+
+  // 1) Retire events written by the old one-way push (tracked only in
+  //    gcal_event_map, not tagged). Future ones are replaced by mirror events;
+  //    past ones are left alone as history.
+  let legacyRemoved = 0;
+  const { data: legacy } = await supabase
+    .from("gcal_event_map")
+    .select("id, google_event_id, calendar_id")
+    .eq("calendar_role", "schedule_target")
+    .gte("start_time", windowStartDt.toISOString());
+  for (const row of legacy ?? []) {
+    if (await deleteGoogleEvent(accessToken, row.calendar_id, row.google_event_id)) {
+      await supabase.from("gcal_event_map").delete().eq("id", row.id);
+      legacyRemoved++;
+    }
+  }
+
+  // 2) What the app already owns in Google, by key.
+  let deleted = 0;
+  const existing = new Map<string, { calendarId: string; ev: GoogleEvent }>();
+  const calendarIds = [...new Set([tasksCal, habitsCal, personalCal].map((c) => c.calendar_id))];
+  for (const calendarId of calendarIds) {
+    for (const ev of await listMirrorEvents(accessToken, calendarId)) {
+      const key = ev.extendedProperties?.private?.ssKey;
+      if (!key) continue;
+      if (existing.has(key)) {
+        if (await deleteGoogleEvent(accessToken, calendarId, ev.id)) deleted++;
+        continue;
+      }
+      existing.set(key, { calendarId, ev });
+    }
+  }
+
+  // 3) Create / update everything the app wants shown.
+  let created = 0;
+  let updated = 0;
+  let unchanged = 0;
+  const desiredKeys = new Set(items.map((i) => i.key));
+  for (const item of items) {
+    const cal = calFor(item.target);
+    const cur = existing.get(item.key);
+    if (cur && cur.calendarId === cal.calendar_id && cur.ev.extendedProperties?.private?.ssHash === item.hash) {
+      unchanged++;
+      continue;
+    }
+    if (cur && cur.calendarId === cal.calendar_id && !item.recurrence) {
+      const resp = await googleJson(
+        `${GOOGLE_EVENTS_URL(cal.calendar_id)}/${encodeURIComponent(cur.ev.id)}`,
+        accessToken,
+        { method: "PUT", body: JSON.stringify(mirrorBody(item)) }
+      );
+      if (resp.ok) updated++;
+      else errors.push(`${item.summary}: update failed (${resp.status}) ${(await resp.text()).slice(0, 200)}`);
+      continue;
+    }
+    // Series (or an item that moved calendars) are rebuilt from scratch so the
+    // rule and every one-off exception stay exactly in step with the app.
+    if (cur) {
+      if (await deleteGoogleEvent(accessToken, cur.calendarId, cur.ev.id)) deleted++;
+    }
+    const resp = await googleJson(GOOGLE_EVENTS_URL(cal.calendar_id), accessToken, {
+      method: "POST",
+      body: JSON.stringify(mirrorBody(item)),
+    });
+    if (!resp.ok) {
+      errors.push(`${item.summary}: create failed (${resp.status}) ${(await resp.text()).slice(0, 200)}`);
+      continue;
+    }
+    const createdEv = (await resp.json()) as GoogleEvent;
+    if (cur) updated++;
+    else created++;
+    if (item.recurrence) await applyMirrorExceptions(accessToken, cal.calendar_id, createdEv.id, item, errors);
+  }
+
+  // 4) Remove what the app no longer has. Past one-off events are kept as history.
+  for (const [key, { calendarId, ev }] of existing) {
+    if (desiredKeys.has(key)) continue;
+    const endRaw = ev.end?.dateTime ?? ev.end?.date;
+    if (!key.startsWith("series:") && endRaw && new Date(endRaw) < windowStartDt) continue;
+    if (await deleteGoogleEvent(accessToken, calendarId, ev.id)) deleted++;
+  }
+
+  for (const calendarId of calendarIds) {
+    await supabase
+      .from("calendar_connections")
+      .update({ last_synced_at: new Date().toISOString(), last_sync_error: errors.length ? errors[0] : null })
+      .eq("calendar_id", calendarId);
+  }
+
+  return {
+    created,
+    updated,
+    deleted,
+    unchanged,
+    legacyRemoved,
+    errors,
+    eventsPushed: created + updated,
+    calendars: { personal: personalCal.name, tasks: tasksCal.name, habits: habitsCal.name },
+  };
 }
 
 async function exchangeCodeForTokens(code: string) {
@@ -249,6 +516,7 @@ async function pullEvents(
   let totalPulled = 0;
 
   for (const conn of sourceConnections) {
+    const ownIds = new Set((await listMirrorEvents(accessToken, conn.calendar_id)).map((e) => e.id));
     const url = new URL(GOOGLE_EVENTS_URL(conn.calendar_id));
     url.searchParams.set("timeMin", weekStartDt.toISOString());
     url.searchParams.set("timeMax", weekEndDt.toISOString());
@@ -269,6 +537,13 @@ async function pullEvents(
     const events: GoogleEvent[] = data.items ?? [];
 
     for (const ev of events) {
+      if (
+        ev.extendedProperties?.private?.ssMirror === "1" ||
+        ownIds.has(ev.id) ||
+        (ev.recurringEventId && ownIds.has(ev.recurringEventId))
+      ) {
+        continue;
+      }
       const hasDateTime = ev.start?.dateTime && ev.end?.dateTime;
       const hasDate = ev.start?.date && ev.end?.date;
 
@@ -592,6 +867,21 @@ Deno.serve(async (req: Request) => {
           events_pushed: pushResult.eventsPushed,
         });
         result = { success: true, ...pushResult };
+        break;
+      }
+
+      case "mirror": {
+        if (!body.items) throw new Error("items is required.");
+        if (!body.windowStart) throw new Error("windowStart is required.");
+        if (!body.connections) throw new Error("connections is required.");
+        const mirrorResult = await mirrorEvents(body.connections, body.items, body.windowStart);
+        await supabase.from("gcal_sync_runs").insert({
+          direction: "push",
+          status: mirrorResult.errors && mirrorResult.errors.length ? "partial" : "success",
+          events_pushed: mirrorResult.eventsPushed ?? 0,
+          error_message: mirrorResult.errors && mirrorResult.errors.length ? mirrorResult.errors.slice(0, 3).join(" | ") : null,
+        });
+        result = { success: true, ...mirrorResult };
         break;
       }
 
