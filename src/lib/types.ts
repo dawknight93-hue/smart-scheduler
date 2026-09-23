@@ -146,12 +146,24 @@ export interface PlacedItem {
   recurrenceSummary?: string;
 }
 
+/** Why the engine couldn't place an item in the week being scheduled. */
+export type UnscheduledReason =
+  | "window_ended" // its whole window is before this week
+  | "window_too_short" // the window is shorter than the item's duration
+  | "outside_hours" // no part of the window falls inside scheduling hours (6 AM–10 PM)
+  | "family_uta" // the only open time is on a UTA day, which Family items can't use
+  | "no_free_time"; // scheduling hours in the window are already booked
+
 export interface UnscheduledItem {
   id: string;
   name: string;
   kind: ItemKind;
   tier: number;
   deadline: Date;
+  windowStart: Date;
+  durationMin: number;
+  reason: UnscheduledReason;
+  isBatch?: boolean;
 }
 
 export const CONTEXT_COLORS: Record<ContextTag, { bg: string; border: string; text: string; dot: string; soft: string }> = {

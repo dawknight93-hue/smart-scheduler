@@ -4,6 +4,7 @@ import type {
   Task,
   PlacedItem,
   UnscheduledItem,
+  UnscheduledReason,
   ContextTag,
   LifePillar,
 } from "./types";
@@ -354,12 +355,30 @@ export function runEngine(
         memberIds: p.memberIds,
       });
     } else {
+      // A window that starts after this week belongs to a later week's plan.
+      if (p.searchStart >= addDays(weekStart, 7)) continue;
+      let reason: UnscheduledReason;
+      if (p.searchEnd <= weekStart) {
+        reason = "window_ended";
+      } else if (p.searchEnd.getTime() - p.searchStart.getTime() < p.durationMin * 60 * 1000) {
+        reason = "window_too_short";
+      } else if (!findSlot(new Set(), allSlots, p.durationMin, p.searchStart, p.searchEnd, [], p.context)) {
+        reason = "outside_hours";
+      } else if (isHomeOnly && findSlot(busy, allSlots, p.durationMin, p.searchStart, p.searchEnd, placedContexts, p.context)) {
+        reason = "family_uta";
+      } else {
+        reason = "no_free_time";
+      }
       unscheduled.push({
         id: p.id,
         name: p.name,
         kind: p.kind,
         tier: p.tier,
         deadline: p.searchEnd,
+        windowStart: p.searchStart,
+        durationMin: p.durationMin,
+        reason,
+        isBatch: p.isBatch,
       });
     }
   }
