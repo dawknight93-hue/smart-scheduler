@@ -23,6 +23,29 @@ type Tab = "event" | "habit" | "task";
 
 const CONTEXTS: ContextTag[] = ["desk", "home", "phone", "errand", "other"];
 
+/** Now, rounded up to the next 15 minutes — the default "Search Start" for new habits/tasks. */
+function nextQuarterHour(from = new Date()): Date {
+  const d = new Date(from);
+  d.setSeconds(0, 0);
+  const m = d.getMinutes();
+  const up = Math.ceil(m / 15) * 15;
+  d.setMinutes(up);
+  return d;
+}
+
+/**
+ * Default window end: Saturday at the given hour of the week the window starts in,
+ * or a day after the start if that Saturday is already too close.
+ */
+function defaultWindowEnd(start: Date, hour: number): Date {
+  const sat = new Date(start);
+  const daysToSat = (6 - sat.getDay() + 7) % 7;
+  sat.setDate(sat.getDate() + daysToSat);
+  sat.setHours(hour, 0, 0, 0);
+  if (sat.getTime() - start.getTime() < 2 * 3600 * 1000) return new Date(start.getTime() + 24 * 3600 * 1000);
+  return sat;
+}
+
 function toLocalInput(d: Date): string {
   const off = d.getTimezoneOffset();
   const local = new Date(d.getTime() - off * 60000);
@@ -81,6 +104,8 @@ export function AddItemModal({
   );
 
   const defaultEventStart = prefillDate ?? new Date(weekStart.getTime() + 8 * 3600 * 1000);
+  // New habits/tasks start looking for time from right now (next quarter hour).
+  const [defaultSearchStart] = useState(() => nextQuarterHour());
   const defaultEventEnd = prefillDate
     ? new Date(prefillDate.getTime() + 60 * 60 * 1000)
     : new Date(weekStart.getTime() + 9 * 3600 * 1000);
@@ -118,11 +143,11 @@ export function AddItemModal({
   });
   const [habStart, setHabStart] = useState(() => {
     if (editTarget?.kind === "Habit") return toLocalInput(new Date((editTarget.data as Habit).search_start));
-    return toLocalInput(new Date(weekStart.getTime() + 7 * 3600 * 1000));
+    return toLocalInput(defaultSearchStart);
   });
   const [habEnd, setHabEnd] = useState(() => {
     if (editTarget?.kind === "Habit") return toLocalInput(new Date((editTarget.data as Habit).search_end));
-    return toLocalInput(new Date(weekStart.getTime() + 5 * 24 * 3600 * 1000 + 20 * 3600 * 1000));
+    return toLocalInput(defaultWindowEnd(defaultSearchStart, 20));
   });
   const [habContext, setHabContext] = useState<ContextTag>(() => {
     if (editTarget?.kind === "Habit") return (editTarget.data as Habit).context;
@@ -148,11 +173,11 @@ export function AddItemModal({
   });
   const [taskStart, setTaskStart] = useState(() => {
     if (editTarget?.kind === "Task") return toLocalInput(new Date((editTarget.data as Task).search_start));
-    return toLocalInput(new Date(weekStart.getTime() + 7 * 3600 * 1000));
+    return toLocalInput(defaultSearchStart);
   });
   const [taskDeadline, setTaskDeadline] = useState(() => {
     if (editTarget?.kind === "Task") return toLocalInput(new Date((editTarget.data as Task).deadline));
-    return toLocalInput(new Date(weekStart.getTime() + 5 * 24 * 3600 * 1000 + 18 * 3600 * 1000));
+    return toLocalInput(defaultWindowEnd(defaultSearchStart, 18));
   });
   const [taskContext, setTaskContext] = useState<ContextTag>(() => {
     if (editTarget?.kind === "Task") return (editTarget.data as Task).context;
