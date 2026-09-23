@@ -242,6 +242,12 @@ function useCalendarViewMode() {
   return { layout, isOverridden: override !== null, toggle };
 }
 
+// Module-level so switching to Tasks/Goals and back (which remounts this view)
+// doesn't trigger a fresh sync every time; opening the app always does.
+let lastAutoSyncAt = 0;
+let syncInFlight = false;
+const AUTO_SYNC_MIN_GAP_MS = 2 * 60 * 1000;
+
 export function CalendarView({
   weekStart,
   setWeekStart,
@@ -367,6 +373,25 @@ export function CalendarView({
     loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [weekStart, viewMode]);
+
+  // Sync with Google whenever the app is opened or brought back to the
+  // foreground, so what's on screen (and in Google Calendar) is current.
+  const syncRef = useRef<(opts?: { auto?: boolean }) => Promise<void>>(async () => {});
+  syncRef.current = syncGoogle;
+  useEffect(() => {
+    const maybeSync = () => {
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - lastAutoSyncAt < AUTO_SYNC_MIN_GAP_MS) return;
+      void syncRef.current({ auto: true });
+    };
+    maybeSync();
+    document.addEventListener("visibilitychange", maybeSync);
+    window.addEventListener("pageshow", maybeSync);
+    return () => {
+      document.removeEventListener("visibilitychange", maybeSync);
+      window.removeEventListener("pageshow", maybeSync);
+    };
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -632,12 +657,24 @@ export function CalendarView({
 
   const allDayLaneCount = Math.max(1, ...allDaySpans.map((s) => s.lane + 1));
 
-  async function syncGoogle() {
+  async function syncGoogle(opts: { auto?: boolean } = {}) {
+    if (syncInFlight) return;
+    syncInFlight = true;
+    lastAutoSyncAt = Date.now();
+    try {
+      await runSync(opts);
+    } finally {
+      syncInFlight = false;
+    }
+  }
+
+  async function runSync({ auto = false }: { auto?: boolean }) {
     setSyncing(true);
-    setSyncMessage(null);
+    if (!auto) setSyncMessage(null);
     const status = await getSyncStatus();
     if (!status?.connected) {
-      setSyncMessage("Connect Google Calendar in settings first.");
+      // Opening the app shouldn't nag when Google isn't connected.
+      if (!auto) setSyncMessage("Connect Google Calendar in settings first.");
       setSyncing(false);
       return;
     }
@@ -655,6 +692,8 @@ export function CalendarView({
       console.error("Enroute recheck after sync failed", err);
     }
     setLastSyncedAt(new Date());
+    // Show what was just pulled from Google (and any Enroute changes) right away.
+    await loadData();
     let pushResult: Awaited<ReturnType<typeof mirrorToGoogle>>;
     try {
       pushResult = await mirrorToGoogle(connections);
