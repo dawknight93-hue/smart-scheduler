@@ -959,8 +959,13 @@ export function CalendarView({
         return { blocked: "Runna workouts can only move within their Mon–Sun week", overlaps: [], notes: [] };
       }
       if (newStart.toDateString() !== item.start.toDateString()) {
+        // All-day events are stored at UTC midnight, so read their calendar day in UTC.
+        const dayKey = (p: PlacedItem) =>
+          p.isAllDay
+            ? new Date(p.start.getUTCFullYear(), p.start.getUTCMonth(), p.start.getUTCDate()).toDateString()
+            : p.start.toDateString();
         const sameDay = placed.find(
-          (p) => p !== item && p.id !== item.id && isRunnaEvent(p) && p.start.toDateString() === newStart.toDateString()
+          (p) => p !== item && p.id !== item.id && isRunnaEvent(p) && dayKey(p) === newStart.toDateString()
         );
         if (sameDay) {
           const day = item.start.toLocaleDateString("en-US", { weekday: "short" });
