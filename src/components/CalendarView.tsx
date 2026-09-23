@@ -140,6 +140,35 @@ const HOURS = Array.from(
   (_, i) => GRID_START_HOUR + i
 );
 
+function formatWhen(d: Date): string {
+  return d.toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function formatDuration(min: number): string {
+  if (min < 60) return `${min}-min`;
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m ? `${h}h ${m}m` : `${h}-hour`;
+}
+
+function unscheduledReasonText(u: UnscheduledItem): string {
+  const window = `${formatWhen(u.windowStart)} – ${formatWhen(u.deadline)}`;
+  switch (u.reason) {
+    case "window_ended":
+      return u.kind === "Task"
+        ? `Its window ended ${formatWhen(u.deadline)} and it isn't marked done. Give it a new window or mark it complete.`
+        : `Its window ended ${formatWhen(u.deadline)}. If it should happen every week, turn on Repeats.`;
+    case "window_too_short":
+      return `Its window (${window}) is shorter than the ${formatDuration(u.durationMin)} it needs.`;
+    case "outside_hours":
+      return `Its window (${window}) doesn't overlap scheduling hours (6 AM–10 PM) long enough for ${formatDuration(u.durationMin)}.`;
+    case "family_uta":
+      return `The only open time in its window is on a UTA day, and Family items can't go on UTA days.`;
+    case "no_free_time":
+      return `No free ${formatDuration(u.durationMin)} block in its window (${window}) — that time is already booked.`;
+  }
+}
+
 function formatTime(d: Date): string {
   return d.toLocaleTimeString("en-US", {
     hour: "numeric",
@@ -1042,12 +1071,22 @@ export function CalendarView({
   const weekEnd = addDays(weekStart, 6);
   const mobileDate = addDays(weekStart, mobileDayIndex);
   const mobileIsToday = mobileDate.toDateString() === new Date().toDateString();
+  // Completed tasks don't need a slot, so they're never "unscheduled".
+  const notScheduled = unscheduled.filter(
+    (u) => !(u.kind === "Task" && !u.isBatch && tasks.find((t) => t.id === u.id)?.completed_at)
+  );
   const stats = {
     fixed: placed.filter((p) => p.kind === "Fixed Event").length,
     habits: placed.filter((p) => p.kind === "Habit").length,
     tasks: placed.filter((p) => p.kind === "Task").length,
-    unscheduled: unscheduled.length,
+    unscheduled: notScheduled.length,
   };
+
+  function editUnscheduled(u: UnscheduledItem) {
+    if (u.isBatch) return;
+    const data = u.kind === "Habit" ? habits.find((h) => h.id === u.id) : tasks.find((t) => t.id === u.id);
+    if (data) setEditTarget({ kind: u.kind as "Habit" | "Task", id: u.id, data });
+  }
 
   const syncFreshness = getSyncFreshness(lastSyncedAt);
 
@@ -1678,27 +1717,44 @@ export function CalendarView({
           </div>
       </div>
 
-      {/* Unscheduled panel */}
-      {unscheduled.length > 0 && (
+      {/* Items the engine couldn't put on the calendar this week, with why */}
+      {notScheduled.length > 0 && (
         <div className="border-t border-slate-800 bg-slate-900/50 px-6 py-3">
-          <div className="flex items-center gap-2 mb-2">
+          <div className="flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 text-amber-400" />
             <span className="text-sm font-medium text-amber-400">
-              {unscheduled.length} item{unscheduled.length > 1 ? "s" : ""} couldn't fit
+              {notScheduled.length} item{notScheduled.length > 1 ? "s" : ""} not on your calendar this week
             </span>
           </div>
-          <div className="flex flex-wrap gap-2">
-            {unscheduled.map((u) => (
-              <div
-                key={u.id}
-                className="px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300 flex items-center gap-2"
-              >
-                <span className="font-medium">{u.name}</span>
-                <span className="text-amber-500/70">
-                  {TIER_LABELS[u.tier]} · due {formatTime(u.deadline)}
-                </span>
-              </div>
-            ))}
+          <p className="mt-1 mb-2 text-xs text-slate-400">
+            These don't appear here or in Google Calendar. Tap one to change its time window or duration.
+          </p>
+          <div className="flex flex-col gap-2">
+            {notScheduled.map((u) => {
+              const overdue = u.reason === "window_ended" && u.kind === "Task";
+              return (
+                <button
+                  key={u.id}
+                  type="button"
+                  onClick={() => editUnscheduled(u)}
+                  disabled={u.isBatch}
+                  className={`text-left px-3 py-2 rounded-lg border text-xs ${
+                    overdue
+                      ? "bg-red-500/10 border-red-500/30 text-red-300 hover:bg-red-500/15"
+                      : "bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/15"
+                  } disabled:cursor-default`}
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium">{u.name}</span>
+                    <span className="opacity-70">
+                      {u.kind} · {TIER_LABELS[u.tier]}
+                    </span>
+                    {overdue && <span className="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase">Overdue</span>}
+                  </div>
+                  <div className="mt-0.5 text-slate-300/80">{unscheduledReasonText(u)}</div>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
