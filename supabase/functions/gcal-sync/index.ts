@@ -94,7 +94,7 @@ async function resolvePillarForNewEvent(title: string): Promise<LifePillar | nul
 
 
 interface SyncRequest {
-  action: "oauth-exchange" | "pull" | "push" | "mirror" | "status" | "disconnect" | "delete";
+  action: "oauth-exchange" | "pull" | "push" | "mirror" | "status" | "disconnect" | "delete" | "update-source-event";
   code?: string;
   weekStart?: string;
   rangeDays?: number;
@@ -104,6 +104,10 @@ interface SyncRequest {
   itemId?: string;
   items?: MirrorItem[];
   windowStart?: string;
+  googleEventId?: string;
+  calendarId?: string;
+  start?: string;
+  end?: string;
 }
 
 interface PlacedItemForPush {
@@ -771,6 +775,42 @@ async function pushEvents(
   return { eventsPushed: totalPushed };
 }
 
+/**
+ * Move/resize an event that was pulled from one of the user's Google calendars,
+ * so a change made by dragging in the app is saved at the source (e.g. Runna,
+ * which syncs Google Calendar changes back into its own app).
+ */
+async function updateSourceEvent(googleEventId: string, calendarId: string, start: string, end: string) {
+  const accessToken = await getValidAccessToken();
+  const url = `${GOOGLE_EVENTS_URL(calendarId)}/${encodeURIComponent(googleEventId)}`;
+  const auth = { Authorization: `Bearer ${accessToken}` };
+  const cur = await fetch(url, { headers: auth });
+  if (!cur.ok) throw new Error(`Couldn't find this event in Google Calendar (${cur.status}).`);
+  const ev = await cur.json();
+  if (ev.start?.date) throw new Error("All-day events can't be moved from the app.");
+  const tz = ev.start?.timeZone ?? ev.end?.timeZone;
+  const body = {
+    start: { dateTime: start, ...(tz ? { timeZone: tz } : {}) },
+    end: { dateTime: end, ...(tz ? { timeZone: tz } : {}) },
+  };
+  const resp = await fetch(url, {
+    method: "PATCH",
+    headers: { ...auth, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    if (resp.status === 403) throw new Error("Google won't let the app change events on this calendar (it's read-only for your account).");
+    throw new Error(`Google rejected the change (${resp.status}): ${text.slice(0, 200)}`);
+  }
+  await supabase
+    .from("gcal_event_map")
+    .update({ start_time: start, end_time: end, synced_at: new Date().toISOString() })
+    .eq("google_event_id", googleEventId)
+    .eq("calendar_id", calendarId);
+  return { updated: true };
+}
+
 async function getSyncStatus() {
   const { data: tokenRow } = await supabase
     .from("gcal_oauth_tokens")
@@ -931,6 +971,14 @@ Deno.serve(async (req: Request) => {
         if (!body.itemId) throw new Error("itemId is required.");
         const delResult = await deleteEvent(body.itemType, body.itemId);
         result = { success: true, ...delResult };
+        break;
+      }
+
+      case "update-source-event": {
+        if (!body.googleEventId || !body.calendarId || !body.start || !body.end) {
+          throw new Error("googleEventId, calendarId, start and end are required.");
+        }
+        result = { success: true, ...(await updateSourceEvent(body.googleEventId, body.calendarId, body.start, body.end)) };
         break;
       }
 
