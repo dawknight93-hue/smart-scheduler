@@ -40,6 +40,8 @@ export interface SyncResult {
   unchanged?: number;
   errors?: string[];
   eventsPulled?: number;
+  /** App copies removed because the event was deleted in Google or moved to an unconnected calendar. */
+  eventsRemoved?: number;
   eventsPushed?: number;
   message?: string;
   email?: string;
