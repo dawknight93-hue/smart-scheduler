@@ -5,6 +5,7 @@ import type { ContextTag, LifePillar, Task, FixedEvent, Habit } from "@/lib/type
 import { CONTEXT_COLORS, PILLARS, PILLAR_LABELS, PILLAR_COLORS } from "@/lib/types";
 import { scheduleAutoPush } from "@/lib/gcalSync";
 import { formatLocalDate } from "@/lib/recurrence";
+import { DateTimeField, DateField } from "@/components/DateTimeField";
 
 type RecurrenceFrequency = "daily" | "weekly" | "monthly";
 type MonthlyMode = "day_of_month" | "weekday_of_month";
@@ -365,21 +366,19 @@ export function AddItemModal({
                   className="input"
                 />
               </Field>
-              <Field label="Start Time">
-                <input
-                  type="datetime-local"
+              <Field label="Start">
+                <DateTimeField
                   value={evStart}
-                  onChange={(e) => setEvStart(e.target.value)}
-                  className="input"
+                  onChange={(v) => {
+                    // Like Google Calendar: moving the start keeps the event's length.
+                    const len = new Date(evEnd).getTime() - new Date(evStart).getTime();
+                    setEvStart(v);
+                    if (len > 0) setEvEnd(toLocalInput(new Date(new Date(v).getTime() + len)));
+                  }}
                 />
               </Field>
-              <Field label="End Time">
-                <input
-                  type="datetime-local"
-                  value={evEnd}
-                  onChange={(e) => setEvEnd(e.target.value)}
-                  className="input"
-                />
+              <Field label="End">
+                <DateTimeField value={evEnd} onChange={setEvEnd} durationFrom={evStart} />
               </Field>
               <Field label="Pillar">
                 <PillarPicker value={evPillar} onChange={setEvPillar} />
@@ -447,20 +446,10 @@ export function AddItemModal({
                 </Field>
               </div>
               <Field label="Search Start (earliest)">
-                <input
-                  type="datetime-local"
-                  value={habStart}
-                  onChange={(e) => setHabStart(e.target.value)}
-                  className="input"
-                />
+                <DateTimeField value={habStart} onChange={setHabStart} />
               </Field>
               <Field label="Search End (latest)">
-                <input
-                  type="datetime-local"
-                  value={habEnd}
-                  onChange={(e) => setHabEnd(e.target.value)}
-                  className="input"
-                />
+                <DateTimeField value={habEnd} onChange={setHabEnd} />
               </Field>
               <Field label="Context">
                 <ContextPicker value={habContext} onChange={setHabContext} />
@@ -531,20 +520,10 @@ export function AddItemModal({
                 </Field>
               </div>
               <Field label="Search Start (earliest)">
-                <input
-                  type="datetime-local"
-                  value={taskStart}
-                  onChange={(e) => setTaskStart(e.target.value)}
-                  className="input"
-                />
+                <DateTimeField value={taskStart} onChange={setTaskStart} />
               </Field>
               <Field label="Deadline">
-                <input
-                  type="datetime-local"
-                  value={taskDeadline}
-                  onChange={(e) => setTaskDeadline(e.target.value)}
-                  className="input"
-                />
+                <DateTimeField value={taskDeadline} onChange={setTaskDeadline} />
               </Field>
               <Field label="Context">
                 <ContextPicker value={taskContext} onChange={setTaskContext} />
@@ -810,11 +789,12 @@ function RecurrenceSection({
                   className="accent-blue-600"
                 />
                 On
-                <input
-                  type="date"
+                <DateField
                   value={endDate}
-                  onChange={(e) => onEndDate(e.target.value)}
-                  className="input"
+                  onChange={(d) => {
+                    onEndDate(d);
+                    onEndMode("on_date");
+                  }}
                   disabled={endMode !== "on_date"}
                 />
               </label>
