@@ -48,7 +48,7 @@ import type {
 import { CONTEXT_COLORS, TIER_LABELS, PILLARS, PILLAR_LABELS, PILLAR_COLORS, getPillarColor } from "@/lib/types";
 import { AddItemModal, type EditTarget } from "@/components/AddItemModal";
 import { CalendarConnectionsPanel } from "@/components/CalendarConnectionsPanel";
-import { getSyncStatus, pullFromGoogle, mirrorToGoogle, deleteFromGoogle, scheduleAutoPush } from "@/lib/gcalSync";
+import { getSyncStatus, pullFromGoogle, mirrorToGoogle, deleteFromGoogle, scheduleAutoPush, updateGoogleSourceEvent } from "@/lib/gcalSync";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, formatRecurrenceSummary } from "@/lib/recurrence";
 import { mirrorCalendarNames, defaultMirrorWindowStart, MIRROR_WEEKS } from "@/lib/googleMirror";
 
@@ -942,33 +942,50 @@ export function CalendarView({
   }
 
   /** Same rules the drop enforces, so the preview tells the truth before release. */
-  function checkMove(item: PlacedItem, newStart: Date): { blocked?: string; overlaps: string[] } {
+  function checkMove(item: PlacedItem, newStart: Date): { blocked?: string; overlaps: string[]; notes: string[] } {
     const newEnd = new Date(newStart.getTime() + (item.end.getTime() - item.start.getTime()));
-    if (isQuietTime(newStart, newEnd)) return { blocked: "Can't schedule between 9 PM and 9 AM", overlaps: [] };
+    if (isQuietTime(newStart, newEnd)) return { blocked: "Can't schedule between 9 PM and 9 AM", overlaps: [], notes: [] };
     if (item.pillar && HOME_ONLY_PILLARS.includes(item.pillar) && isUTADay(newStart, fixedEvents)) {
-      return { blocked: "Can't schedule Family-pillar items on UTA days", overlaps: [] };
+      return { blocked: "Can't schedule Family-pillar items on UTA days", overlaps: [], notes: [] };
     }
     if (placed.some((p) => p.kind === "Enroute" && rangesOverlap(newStart, newEnd, p.start, p.end))) {
-      return { blocked: "Can't drop on an Enroute block", overlaps: [] };
+      return { blocked: "Can't drop on an Enroute block", overlaps: [], notes: [] };
+    }
+    const notes: string[] = [];
+    if (isRunnaEvent(item)) {
+      // Runna only accepts calendar moves within the workout's own (Mon–Sun) plan week,
+      // and swaps two workouts when one is moved onto the other's day.
+      if (getWeekStart(newStart).getTime() !== getWeekStart(item.start).getTime()) {
+        return { blocked: "Runna workouts can only move within their Mon–Sun week", overlaps: [], notes: [] };
+      }
+      if (newStart.toDateString() !== item.start.toDateString()) {
+        const sameDay = placed.find(
+          (p) => p !== item && p.id !== item.id && isRunnaEvent(p) && p.start.toDateString() === newStart.toDateString()
+        );
+        if (sameDay) {
+          const day = item.start.toLocaleDateString("en-US", { weekday: "short" });
+          notes.push(`Runna will swap it with ${sameDay.name} (that run moves to ${day})`);
+        }
+      }
     }
     const overlaps = placed
       .filter((p) => p.id !== item.id && p.kind !== "Enroute" && rangesOverlap(newStart, newEnd, p.start, p.end))
       .map((p) => p.name);
-    return { overlaps };
+    return { overlaps, notes };
   }
 
   function renderDragGhost(col: number) {
     if (!dragItem || !dragPreview || dragPreview.col !== col) return null;
     const start = dragPreview.start;
     const end = new Date(start.getTime() + (dragItem.end.getTime() - dragItem.start.getTime()));
-    const { blocked, overlaps } = checkMove(dragItem, start);
+    const { blocked, overlaps, notes } = checkMove(dragItem, start);
     const tone = blocked
       ? "border-rose-400 bg-rose-950/95"
-      : overlaps.length
+      : overlaps.length || notes.length
       ? "border-amber-400 bg-amber-950/95"
       : "border-blue-400 bg-blue-950/95";
-    const note = blocked || overlaps.length > 0;
-    const height = Math.max(note ? 38 : 22, ((end.getTime() - start.getTime()) / 60000) * PX_PER_MIN - 2);
+    const lines = blocked ? 1 : (overlaps.length ? 1 : 0) + notes.length;
+    const height = Math.max(22 + lines * 16, ((end.getTime() - start.getTime()) / 60000) * PX_PER_MIN - 2);
     return (
       <div
         className={`absolute left-1 right-1 z-30 rounded-md border-2 border-dashed px-2 py-1 pointer-events-none shadow-lg ${tone}`}
@@ -977,9 +994,16 @@ export function CalendarView({
         <div className="text-[11px] font-semibold text-white leading-tight">{formatTimeRange(start, end)}</div>
         {blocked ? (
           <div className="text-[10px] text-rose-200 leading-tight mt-0.5">{blocked}</div>
-        ) : overlaps.length > 0 ? (
-          <div className="text-[10px] text-amber-200 leading-tight mt-0.5 truncate">Overlaps {overlaps.join(", ")}</div>
-        ) : null}
+        ) : (
+          <>
+            {overlaps.length > 0 && (
+              <div className="text-[10px] text-amber-200 leading-tight mt-0.5 truncate">Overlaps {overlaps.join(", ")}</div>
+            )}
+            {notes.map((n) => (
+              <div key={n} className="text-[10px] text-amber-200 leading-tight mt-0.5">{n}</div>
+            ))}
+          </>
+        )}
       </div>
     );
   }
@@ -1006,15 +1030,40 @@ export function CalendarView({
   const [overlapConfirm, setOverlapConfirm] = useState<{ item: PlacedItem; newStart: Date; overlapNames: string[] } | null>(null);
   const dragMessageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  function showDragMessage(msg: string) {
+  function showDragMessage(msg: string, ms = 3000) {
     setDragMessage(msg);
     if (dragMessageTimer.current) clearTimeout(dragMessageTimer.current);
-    dragMessageTimer.current = setTimeout(() => setDragMessage(null), 3000);
+    dragMessageTimer.current = setTimeout(() => setDragMessage(null), ms);
   }
 
-  async function updateItemTime(item: PlacedItem, newStart: Date) {
+  /** Events pulled from one of your Google calendars (not ones the app itself writes). */
+  function isFromGoogle(item: PlacedItem): boolean {
+    return item.kind === "Fixed Event" && !!item.googleEventId && !!item.googleCalendarId && item.googleCalendarRole !== "schedule_target";
+  }
+
+  function isRunnaEvent(item: PlacedItem): boolean {
+    if (!isFromGoogle(item)) return false;
+    return calendarConnections.some((c) => c.calendar_id === item.googleCalendarId && /runna/i.test(c.name));
+  }
+
+  /**
+   * Save a move/resize of a Google-sourced event to its own Google calendar first,
+   * so the next sync doesn't put it back. Returns false (and says why) if Google refused.
+   */
+  async function writeBackToGoogle(item: PlacedItem, newStart: Date, newEnd: Date): Promise<boolean> {
+    if (!isFromGoogle(item)) return true;
+    const res = await updateGoogleSourceEvent(item.googleEventId!, item.googleCalendarId!, newStart, newEnd);
+    if (!res.success) {
+      showDragMessage(`Not moved — couldn't save it to Google Calendar: ${res.error ?? "unknown error"}`, 7000);
+      return false;
+    }
+    return true;
+  }
+
+  async function updateItemTime(item: PlacedItem, newStart: Date): Promise<boolean> {
     const durationMs = item.end.getTime() - item.start.getTime();
     const newEnd = new Date(newStart.getTime() + durationMs);
+    if (!(await writeBackToGoogle(item, newStart, newEnd))) return false;
     if (item.isRecurringOccurrence && item.recurringItemId && item.occurrenceDate) {
       const occTable = item.recurringItemKind === "Fixed Event" ? "fixed_event_occurrences"
         : item.recurringItemKind === "Habit" ? "habit_occurrences"
@@ -1037,7 +1086,7 @@ export function CalendarView({
           override_end: newEnd.toISOString(),
         });
       }
-      return;
+      return true;
     }
     const table =
       item.kind === "Fixed Event" ? "fixed_events" : item.kind === "Habit" ? "habits" : "tasks";
@@ -1059,9 +1108,11 @@ export function CalendarView({
         deadline: deadline.toISOString(),
       }).eq("id", item.id);
     }
+    return true;
   }
 
-  async function updateItemDuration(item: PlacedItem, newEnd: Date) {
+  async function updateItemDuration(item: PlacedItem, newEnd: Date): Promise<boolean> {
+    if (!(await writeBackToGoogle(item, item.start, newEnd))) return false;
     if (item.isRecurringOccurrence && item.recurringItemId && item.occurrenceDate) {
       const occTable = item.recurringItemKind === "Fixed Event" ? "fixed_event_occurrences"
         : item.recurringItemKind === "Habit" ? "habit_occurrences"
@@ -1081,7 +1132,7 @@ export function CalendarView({
           override_end: newEnd.toISOString(),
         });
       }
-      return;
+      return true;
     }
     const table = item.kind === "Fixed Event" ? "fixed_events" : item.kind === "Habit" ? "habits" : "tasks";
     if (item.kind === "Fixed Event") {
@@ -1092,6 +1143,7 @@ export function CalendarView({
     } else {
       await supabase.from(table).update({ deadline: newEnd.toISOString() }).eq("id", item.id);
     }
+    return true;
   }
 
   function handleResizeStart(e: React.MouseEvent, item: PlacedItem) {
@@ -1119,6 +1171,7 @@ export function CalendarView({
       const rs = resizeState;
       if (rs && rs.previewEnd.getTime() !== rs.originalEnd.getTime()) {
         await updateItemDuration(rs.item, rs.previewEnd);
+        // Reload either way: on success to show the change, on failure to snap back.
         loadData();
         scheduleAutoPush();
       }
@@ -1159,7 +1212,9 @@ export function CalendarView({
       return;
     }
 
-    await updateItemTime(item, newStart);
+    const saved = await updateItemTime(item, newStart);
+    if (!saved) return;
+    if (check.notes.length) showDragMessage(`Saved to Google Calendar. ${check.notes.join(". ")} on the next sync.`, 6000);
     loadData();
     scheduleAutoPush();
   }
@@ -1176,7 +1231,7 @@ export function CalendarView({
       rangesOverlap(newStart, new Date(newStart.getTime() + durationMin * 60000), p.start, p.end)
     );
 
-    await updateItemTime(item, newStart);
+    if (!(await updateItemTime(item, newStart))) return;
 
     for (const other of overlapping) {
       const nextSlot = findNextFreeSlot(other, newStart, Math.round((other.end.getTime() - other.start.getTime()) / 60000), placed, fixedEvents);
