@@ -47,7 +47,7 @@ import type {
 import { CONTEXT_COLORS, TIER_LABELS, PILLARS, PILLAR_LABELS, PILLAR_COLORS, getPillarColor } from "@/lib/types";
 import { AddItemModal, type EditTarget } from "@/components/AddItemModal";
 import { CalendarConnectionsPanel } from "@/components/CalendarConnectionsPanel";
-import { getSyncStatus, pullFromGoogle, pushToGoogle, deleteFromGoogle, scheduleAutoPush, buildMultiWeekPushItems, SYNC_WEEKS } from "@/lib/gcalSync";
+import { getSyncStatus, pullFromGoogle, mirrorToGoogle, deleteFromGoogle, scheduleAutoPush } from "@/lib/gcalSync";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, formatRecurrenceSummary } from "@/lib/recurrence";
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -451,7 +451,7 @@ export function CalendarView({
     const result = runEngine(
       displayStart,
       [...fixedEvents.filter((e) => !e.recurrence_enabled), ...fixedOccurrenceEvents],
-      habits,
+      habits.filter((h) => !h.recurrence_enabled),
       nonRecurringTasks
     );
     const mapByItemId = new Map<string, EventMapEntry>();
@@ -655,9 +655,19 @@ export function CalendarView({
       console.error("Enroute recheck after sync failed", err);
     }
     setLastSyncedAt(new Date());
-    const pushable = await buildMultiWeekPushItems(syncRangeStart, SYNC_WEEKS);
-    const pushResult = await pushToGoogle(pushable, connections);
-    setSyncMessage(pushResult.success ? `Synced ${pullResult.eventsPulled ?? 0} events in and ${pushResult.eventsPushed ?? 0} blocks out.` : "Google events were read, but scheduled blocks could not be written.");
+    let pushResult: Awaited<ReturnType<typeof mirrorToGoogle>>;
+    try {
+      pushResult = await mirrorToGoogle(connections);
+    } catch (err) {
+      pushResult = { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    if (!pushResult.success) {
+      setSyncMessage(`Google events were read, but Google Calendar could not be updated: ${pushResult.error ?? "unknown error"}`);
+    } else {
+      const changes = `${pushResult.created ?? 0} added, ${pushResult.updated ?? 0} updated, ${pushResult.deleted ?? 0} removed`;
+      const problems = pushResult.errors && pushResult.errors.length ? ` — ${pushResult.errors.length} item(s) failed: ${pushResult.errors[0]}` : "";
+      setSyncMessage(`Synced ${pullResult.eventsPulled ?? 0} events in. Google Calendar: ${changes}.${problems}`);
+    }
     setSyncing(false);
   }
 
