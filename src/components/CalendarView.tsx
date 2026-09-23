@@ -19,6 +19,7 @@ import {
   Plane,
   Pencil,
   Repeat,
+  ExternalLink,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { recheckEnrouteBlocks, type StoredEnrouteBlock } from "@/lib/calendarHygiene";
@@ -49,6 +50,7 @@ import { AddItemModal, type EditTarget } from "@/components/AddItemModal";
 import { CalendarConnectionsPanel } from "@/components/CalendarConnectionsPanel";
 import { getSyncStatus, pullFromGoogle, mirrorToGoogle, deleteFromGoogle, scheduleAutoPush } from "@/lib/gcalSync";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, formatRecurrenceSummary } from "@/lib/recurrence";
+import { mirrorCalendarNames, defaultMirrorWindowStart, MIRROR_WEEKS } from "@/lib/googleMirror";
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -287,6 +289,8 @@ export function CalendarView({
   const { layout, isOverridden, toggle: toggleViewMode } = useCalendarViewMode();
   const [fixedEvents, setFixedEvents] = useState<FixedEvent[]>([]);
   const [enrouteBlocks, setEnrouteBlocks] = useState<StoredEnrouteBlock[]>([]);
+  const [calendarConnections, setCalendarConnections] = useState<CalendarConnection[]>([]);
+  const [googleConnected, setGoogleConnected] = useState(true);
   const [habits, setHabits] = useState<Habit[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [occurrences, setOccurrences] = useState<TaskOccurrence[]>([]);
@@ -430,6 +434,8 @@ export function CalendarView({
     (async () => {
       const status = await getSyncStatus();
       const conns = (status?.connections ?? []) as CalendarConnection[];
+      setCalendarConnections(conns);
+      if (status) setGoogleConnected(!!status.connected);
       const timestamps = conns
         .map((c) => c.last_synced_at)
         .filter((t): t is string => !!t);
@@ -1802,6 +1808,7 @@ export function CalendarView({
       {selectedItem && (
         <ItemDetail
           item={selectedItem}
+          source={describeItemSource(selectedItem, calendarConnections, googleConnected)}
           onClose={() => setSelectedItem(null)}
           onDelete={() => {
             if (selectedItem.isRecurringOccurrence) {
@@ -1914,14 +1921,76 @@ export function CalendarView({
   );
 }
 
+/** Where an item on the calendar comes from, for the detail popup's "Calendar" box. */
+interface ItemSource {
+  title: string;
+  detail: string;
+  fromGoogle: boolean;
+  googleUrl?: string;
+}
+
+/** Google Calendar web link for one event (the "eid" is base64 of "<eventId> <calendarId>"). */
+function googleEventUrl(eventId: string, calendarId: string): string | undefined {
+  try {
+    const eid = btoa(`${eventId} ${calendarId}`).replace(/=+$/, "");
+    return `https://www.google.com/calendar/event?eid=${eid}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function describeItemSource(item: PlacedItem, connections: CalendarConnection[], googleConnected: boolean): ItemSource {
+  // Pulled from Google: the event map records which calendar it came from.
+  if (item.googleEventId && item.googleCalendarId && item.googleCalendarRole !== "schedule_target") {
+    const conn = connections.find((c) => c.calendar_id === item.googleCalendarId && c.role !== "schedule_target")
+      ?? connections.find((c) => c.calendar_id === item.googleCalendarId);
+    const blocks = item.googleCalendarRole !== "display_only";
+    return {
+      title: conn?.name ?? "Google Calendar",
+      detail: `Pulled from Google Calendar · ${blocks ? "blocks your schedule" : "display only, doesn't block scheduling"}`,
+      fromGoogle: true,
+      googleUrl: googleEventUrl(item.googleEventId, item.googleCalendarId),
+    };
+  }
+
+  const origin = item.kind === "Enroute" ? "Added automatically from your flights" : "Created in Smart Scheduler";
+  if (!googleConnected) {
+    return { title: "Smart Scheduler", detail: `${origin} · not in Google (Google Calendar isn't connected)`, fromGoogle: false };
+  }
+  const names = mirrorCalendarNames(connections);
+  if (!names) {
+    return {
+      title: "Smart Scheduler",
+      detail: connections.length === 0 ? origin : `${origin} · not sent to Google (no Write target calendar is set)`,
+      fromGoogle: false,
+    };
+  }
+  const kind = item.recurringItemKind ?? item.kind;
+  const target = kind === "Fixed Event" ? names.personal : kind === "Habit" ? names.habits : names.tasks;
+  // One-off habits/tasks and Enroute blocks are mirrored over a rolling window;
+  // repeating items go to Google as a whole series, and Fixed Events always go.
+  const windowEnd = new Date(defaultMirrorWindowStart().getTime() + (MIRROR_WEEKS * 7 + 1) * 24 * 60 * 60 * 1000);
+  const rolling = !item.isRecurringOccurrence && kind !== "Fixed Event";
+  const later = rolling && item.start >= windowEnd;
+  return {
+    title: "Smart Scheduler",
+    detail: later
+      ? `${origin} · goes to Google Calendar ("${target}") once it's within ${MIRROR_WEEKS} weeks`
+      : `${origin} · shown in Google Calendar on "${target}"`,
+    fromGoogle: false,
+  };
+}
+
 function ItemDetail({
   item,
+  source,
   onClose,
   onDelete,
   onEdit,
   onSetPillar,
 }: {
   item: PlacedItem;
+  source: ItemSource;
   onClose: () => void;
   onDelete: () => void;
   onEdit: () => void;
@@ -2019,11 +2088,27 @@ function ItemDetail({
             </div>
           )}
         </div>
-        {item.googleEventId && (
-          <div className="flex items-center gap-2 text-xs text-slate-500 pt-1">
-            <span className="text-blue-400">Linked to Google Calendar</span>
+        <div className="mt-4 rounded-xl border border-slate-800 bg-slate-800/40 px-3 py-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Calendar</span>
+            {source.googleUrl && (
+              <a
+                href={source.googleUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300"
+              >
+                Open in Google
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            )}
           </div>
-        )}
+          <div className="mt-1 flex items-center gap-2 min-w-0">
+            <CalendarDays className={`w-4 h-4 shrink-0 ${source.fromGoogle ? "text-blue-400" : "text-emerald-400"}`} />
+            <span className="text-sm font-medium text-slate-100 truncate">{source.title}</span>
+          </div>
+          <div className="mt-0.5 pl-6 text-xs text-slate-400">{source.detail}</div>
+        </div>
         <button
           onClick={onEdit}
           className="mt-4 w-full py-2 rounded-lg bg-blue-500/10 border border-blue-500/30 text-blue-400 text-sm font-medium hover:bg-blue-500/20 transition-colors flex items-center justify-center gap-2"
