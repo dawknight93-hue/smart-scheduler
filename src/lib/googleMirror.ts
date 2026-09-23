@@ -442,6 +442,24 @@ export async function buildMirrorItems(
   return { items, windowStart, windowEnd };
 }
 
+/**
+ * Names of the Google calendars the mirror writes to, by target. Must match
+ * the calendar selection in the gcal-sync edge function's mirrorEvents().
+ * Returns null when no enabled Write target calendar exists (nothing is mirrored).
+ */
+export function mirrorCalendarNames(
+  connections: { name: string; calendar_id: string; role: string; enabled: boolean }[]
+): Record<MirrorTarget, string> | null {
+  const enabled = connections.filter((c) => c.enabled && c.calendar_id);
+  const targets = enabled.filter((c) => c.role === "schedule_target");
+  if (targets.length === 0) return null;
+  const tasksCal = targets.find((c) => /task/i.test(c.name)) ?? targets[0];
+  const habitsCal = targets.find((c) => /habit/i.test(c.name)) ?? targets[0];
+  const personalCal =
+    enabled.find((c) => c.role !== "schedule_target" && /personal|family/i.test(c.name)) ?? tasksCal;
+  return { personal: personalCal.name, tasks: tasksCal.name, habits: habitsCal.name };
+}
+
 export function defaultMirrorWindowStart(): Date {
   return addDays(getWeekStart(new Date()), -7);
 }
