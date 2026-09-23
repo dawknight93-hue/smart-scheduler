@@ -154,8 +154,16 @@ function buildSeries(s: SeriesInput): MirrorItem | null {
   // Google counts the series from DTSTART, so start it on the app's actual first
   // occurrence (which may be after the anchor date, e.g. weekly on Mon/Wed
   // starting on a Saturday).
-  const first = expandRecurrence(rule, s.anchor, anchorDay, addDays(anchorDay, 3 * 366))[0];
+  const upcoming = expandRecurrence(rule, s.anchor, anchorDay, addDays(anchorDay, 3 * 366));
+  const first = upcoming[0];
   if (!first) return null;
+  // A finite series whose every occurrence was deleted has nothing to show.
+  // (Google drops a series once all of its instances are cancelled, so
+  // pushing it would just recreate it on every sync.)
+  if (rule.endMode !== "never") {
+    const skipped = new Set(s.occurrences.filter((o) => o.skipped).map((o) => o.occurrence_date));
+    if (upcoming.every((d) => skipped.has(formatLocalDate(d)))) return null;
+  }
   const h = s.anchor.getHours();
   const m = s.anchor.getMinutes();
   let start: string;
