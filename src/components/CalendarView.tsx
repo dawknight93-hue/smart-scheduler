@@ -974,7 +974,8 @@ export function CalendarView({
       }
     }
     const overlaps = placed
-      .filter((p) => p.id !== item.id && p.kind !== "Enroute" && rangesOverlap(newStart, newEnd, p.start, p.end))
+      // All-day items sit in their own row and don't conflict with timed ones.
+      .filter((p) => p.id !== item.id && p.kind !== "Enroute" && !p.isAllDay && rangesOverlap(newStart, newEnd, p.start, p.end))
       .map((p) => p.name);
     return { overlaps, notes };
   }
@@ -1233,6 +1234,7 @@ export function CalendarView({
     const overlapping = placed.filter((p) =>
       p.id !== item.id &&
       p.kind !== "Enroute" &&
+      !p.isAllDay &&
       rangesOverlap(newStart, new Date(newStart.getTime() + durationMin * 60000), p.start, p.end)
     );
 
