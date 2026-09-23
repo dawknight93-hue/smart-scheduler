@@ -882,6 +882,19 @@ export function CalendarView({
   }
 
   const [dragItem, setDragItem] = useState<PlacedItem | null>(null);
+  // Current time for the "now" line; ticks every 30 s so the line and label stay current.
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 30 * 1000);
+    return () => clearInterval(id);
+  }, []);
+  // Bring the now line into view once when the calendar first shows today.
+  const scrolledToNow = useRef(false);
+  const nowLineRef = (el: HTMLDivElement | null) => {
+    if (!el || scrolledToNow.current || el.offsetParent === null) return;
+    scrolledToNow.current = true;
+    requestAnimationFrame(() => el.scrollIntoView({ block: "center" }));
+  };
   // Where the dragged item would land if released now: which column (day index,
   // or -1 for the single-day view) and the snapped start time.
   const [dragPreview, setDragPreview] = useState<{ col: number; start: Date } | null>(null);
@@ -1004,6 +1017,22 @@ export function CalendarView({
             ))}
           </>
         )}
+      </div>
+    );
+  }
+
+  /** Red "now" line with the current time, drawn in today's column only. */
+  function renderNowLine(dayDate: Date) {
+    if (dayDate.toDateString() !== now.toDateString()) return null;
+    const top = minutesFromGridTop(now) * PX_PER_MIN;
+    return (
+      <div ref={nowLineRef} className="absolute left-0 right-0 z-20 pointer-events-none" style={{ top: `${top}px` }} aria-label={`Now, ${formatTime(now)}`}>
+        <div className="relative h-0.5 bg-red-500 shadow-[0_0_4px_rgba(239,68,68,0.6)]">
+          <span className="absolute -left-1.5 -top-[5px] w-3 h-3 rounded-full bg-red-500" />
+          <span className="absolute left-2.5 -top-[9px] rounded bg-red-500 px-1.5 py-px text-[10px] font-semibold leading-4 text-white shadow">
+            {formatTime(now)}
+          </span>
+        </div>
       </div>
     );
   }
@@ -1776,6 +1805,7 @@ export function CalendarView({
                       </div>
                     );
                   })}
+                  {renderNowLine(addDays(weekStart, dayIdx))}
                   {renderDragGhost(dayIdx)}
                   {renderResizeBadge(itemsByDay[dayIdx])}
                 </div>
@@ -1893,6 +1923,7 @@ export function CalendarView({
                     </div>
                   );
                 })}
+                {renderNowLine(mobileDate)}
                 {renderDragGhost(-1)}
                 {renderResizeBadge(itemsByDay[mobileDayIndex])}
               </div>
