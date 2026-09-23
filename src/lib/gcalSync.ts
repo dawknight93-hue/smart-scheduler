@@ -67,8 +67,13 @@ export function isGoogleConfigured(): boolean {
 const RECONNECT_MESSAGE =
   "Your Google Calendar connection has expired. Open Calendar Connections and tap Reconnect.";
 
+const SCOPE_MESSAGE =
+  "Google Calendar access wasn't granted. Open Calendar Connections, tap Reconnect, and on Google's screen tick the Google Calendar checkbox (or Select all).";
+
 function friendlyError(msg: string): string {
-  return msg.includes("invalid_grant") ? RECONNECT_MESSAGE : msg;
+  if (msg.includes("invalid_grant")) return RECONNECT_MESSAGE;
+  if (msg.includes("ACCESS_TOKEN_SCOPE_INSUFFICIENT") || msg.includes("insufficientPermissions")) return SCOPE_MESSAGE;
+  return msg;
 }
 
 async function callEdgeFunction(body: Record<string, unknown>): Promise<SyncResult> {
