@@ -151,7 +151,7 @@ export type UnscheduledReason =
   | "window_ended" // its whole window is before this week
   | "window_too_short" // the window is shorter than the item's duration
   | "outside_hours" // no part of the window falls inside scheduling hours (6 AM–10 PM)
-  | "family_uta" // the only open time is on a UTA day, which Family items can't use
+  | "family_uta" // the only open time is on a UTA day, which Family/Desk/Home/Errand items can't use
   | "no_free_time"; // scheduling hours in the window are already booked
 
 export interface UnscheduledItem {

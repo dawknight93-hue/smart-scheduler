@@ -68,6 +68,53 @@ function homeOffsetMs(date: Date): number {
   return Date.UTC(w.y, w.mo - 1, w.d, w.h, w.mi, w.s) - Math.floor(date.getTime() / 1000) * 1000;
 }
 
+// ---- UTA (Reserve drill) days ----
+// An all-day event titled exactly "UTA" marks a drill day. Items that need you
+// at home or around town can't be scheduled on those days.
+export const UTA_BLOCKED_PILLARS: LifePillar[] = ["family"];
+export const UTA_BLOCKED_CONTEXTS: ContextTag[] = ["desk", "home", "errand"];
+
+export function isUtaBlocked(pillar: LifePillar | null | undefined, context: ContextTag | null | undefined): boolean {
+  return (!!pillar && UTA_BLOCKED_PILLARS.includes(pillar)) || (!!context && UTA_BLOCKED_CONTEXTS.includes(context));
+}
+
+/** Short label for why an item is kept off UTA days, e.g. "Family" or "Home". */
+export function utaBlockLabel(pillar: LifePillar | null | undefined, context: ContextTag | null | undefined): string {
+  if (pillar && UTA_BLOCKED_PILLARS.includes(pillar)) return "Family";
+  if (context && UTA_BLOCKED_CONTEXTS.includes(context)) return context.charAt(0).toUpperCase() + context.slice(1);
+  return "This";
+}
+
+/**
+ * The UTA days as [start, end) instants in the home time zone. All-day events
+ * from Google are stored at UTC midnight of their date, so the calendar date is
+ * read in UTC and then turned into home-time midnights (otherwise a Saturday
+ * UTA would cover Fri 8 PM – Sat 8 PM Eastern).
+ */
+export function utaRanges(fixed: FixedEvent[]): [Date, Date][] {
+  const out: [Date, Date][] = [];
+  for (const ev of fixed) {
+    if (!ev.is_all_day || ev.name.trim().toUpperCase() !== "UTA") continue;
+    const s = new Date(ev.start_time);
+    const e = new Date(ev.end_time);
+    const dateOf = (d: Date) =>
+      d.getUTCHours() === 0 && d.getUTCMinutes() === 0
+        ? { y: d.getUTCFullYear(), mo: d.getUTCMonth(), d: d.getUTCDate() }
+        : (() => { const w = homeWallParts(d); return { y: w.y, mo: w.mo - 1, d: w.d }; })();
+    const a = dateOf(s);
+    const b = dateOf(e);
+    const start = homeDate(a.y, a.mo, a.d, 0, 0);
+    let end = homeDate(b.y, b.mo, b.d, 0, 0);
+    if (end <= start) end = homeDate(a.y, a.mo, a.d + 1, 0, 0);
+    out.push([start, end]);
+  }
+  return out;
+}
+
+export function isUtaTime(instant: Date, ranges: [Date, Date][]): boolean {
+  return ranges.some(([a, b]) => instant >= a && instant < b);
+}
+
 /** The instant at a given wall-clock time in the home time zone (month is 0-based). */
 export function homeDate(y: number, month: number, day: number, h: number, mi: number): Date {
   const guess = Date.UTC(y, month, day, h, mi);
@@ -274,16 +321,10 @@ export function runEngine(
   const allSlots = slotsInWeek(weekStart);
   const busy = buildBusy(fixedEvents, allSlots);
 
-  const HOME_ONLY_PILLARS: LifePillar[] = ["family"];
   const utaBusy = new Set<string>();
-  for (const ev of fixedEvents) {
-    if (ev.is_all_day && ev.name.trim().toUpperCase() === "UTA") {
-      const utaStart = new Date(ev.start_time);
-      const utaEnd = new Date(ev.end_time);
-      for (const s of allSlots) {
-        if (s >= utaStart && s < utaEnd) utaBusy.add(slotKey(s));
-      }
-    }
+  const uta = utaRanges(fixedEvents);
+  for (const s of allSlots) {
+    if (isUtaTime(s, uta)) utaBusy.add(slotKey(s));
   }
 
   const placeables: Placeable[] = [];
@@ -332,7 +373,7 @@ export function runEngine(
   const placedContexts: PlacedContext[] = [];
 
   for (const p of placeables) {
-    const isHomeOnly = !!p.pillar && HOME_ONLY_PILLARS.includes(p.pillar);
+    const isHomeOnly = isUtaBlocked(p.pillar, p.context);
     const effectiveBusy = isHomeOnly ? new Set([...busy, ...utaBusy]) : busy;
     const window = findSlot(effectiveBusy, allSlots, p.durationMin, p.searchStart, p.searchEnd, placedContexts, p.context);
     if (window) {
