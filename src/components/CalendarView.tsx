@@ -67,7 +67,12 @@ interface EventMapEntry {
 }
 
 const SLOT_MIN = 15;
-const SLOT_PX = 16;
+const PX_PER_MIN = 64 / 60; // one hour row is h-16 (64px)
+
+/** Minutes from the top of the day grid to this time. */
+function minutesFromGridTop(d: Date): number {
+  return (d.getHours() - GRID_START_HOUR) * 60 + d.getMinutes();
+}
 const NIGHT_START_HOUR = 21;
 const NIGHT_END_HOUR = 9;
 const HOME_ONLY_PILLARS: LifePillar[] = ["family"];
@@ -335,7 +340,7 @@ export function CalendarView({
   // Day view shows the single-day agenda (same layout as mobile) on desktop.
   const showDayView = layout === "mobile" || viewMode === "day";
   const [showMiniMonth, setShowMiniMonth] = useState(false);
-  const [resizeState, setResizeState] = useState<{ item: PlacedItem; startY: number; originalEnd: Date; previewEnd: Date } | null>(null);
+  const [resizeState, setResizeState] = useState<{ item: PlacedItem; startY: number; originalEnd: Date; previewEnd: Date; hint?: string } | null>(null);
 
   // Compute the display range used for data fetching and recurring expansion.
   // In week mode this is weekStart..weekStart+7. In month mode it spans the
@@ -875,6 +880,119 @@ export function CalendarView({
   }
 
   const [dragItem, setDragItem] = useState<PlacedItem | null>(null);
+  // Where the dragged item would land if released now: which column (day index,
+  // or -1 for the single-day view) and the snapped start time.
+  const [dragPreview, setDragPreview] = useState<{ col: number; start: Date } | null>(null);
+  // How far below the item's top edge it was grabbed, so it lands where it's drawn.
+  const dragGrabOffset = useRef(0);
+
+  function beginDrag(e: React.DragEvent, item: PlacedItem) {
+    dragGrabOffset.current = e.clientY - e.currentTarget.getBoundingClientRect().top;
+    setDragItem(item);
+    e.dataTransfer.effectAllowed = "move";
+  }
+
+  function endDrag() {
+    setDragItem(null);
+    setDragPreview(null);
+  }
+
+  /** Snapped start time under the pointer for a drag over a day column. */
+  function dropStartFromPointer(e: React.DragEvent, dayDate: Date): Date {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const y = e.clientY - rect.top - dragGrabOffset.current;
+    const durationMin = dragItem ? Math.round((dragItem.end.getTime() - dragItem.start.getTime()) / 60000) : SLOT_MIN;
+    let mins = Math.round(y / PX_PER_MIN / SLOT_MIN) * SLOT_MIN + GRID_START_HOUR * 60;
+    mins = Math.max(GRID_START_HOUR * 60, Math.min(mins, GRID_END_HOUR * 60 - Math.max(SLOT_MIN, durationMin)));
+    const start = new Date(dayDate);
+    start.setHours(0, mins, 0, 0);
+    return start;
+  }
+
+  function columnDragHandlers(col: number, dayDate: Date) {
+    return {
+      onDragOver: (e: React.DragEvent) => {
+        if (!dragItem) return;
+        e.preventDefault();
+        const start = dropStartFromPointer(e, dayDate);
+        setDragPreview((prev) =>
+          prev && prev.col === col && prev.start.getTime() === start.getTime() ? prev : { col, start }
+        );
+      },
+      onDragLeave: (e: React.DragEvent) => {
+        if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+        setDragPreview((prev) => (prev && prev.col === col ? null : prev));
+      },
+      onDrop: (e: React.DragEvent) => {
+        e.preventDefault();
+        if (!dragItem) return;
+        const start = dropStartFromPointer(e, dayDate);
+        setDragPreview(null);
+        handleDrop(start);
+      },
+    };
+  }
+
+  /** Same rules the drop enforces, so the preview tells the truth before release. */
+  function checkMove(item: PlacedItem, newStart: Date): { blocked?: string; overlaps: string[] } {
+    const newEnd = new Date(newStart.getTime() + (item.end.getTime() - item.start.getTime()));
+    if (isQuietTime(newStart, newEnd)) return { blocked: "Can't schedule between 9 PM and 9 AM", overlaps: [] };
+    if (item.pillar && HOME_ONLY_PILLARS.includes(item.pillar) && isUTADay(newStart, fixedEvents)) {
+      return { blocked: "Can't schedule Family-pillar items on UTA days", overlaps: [] };
+    }
+    if (placed.some((p) => p.kind === "Enroute" && rangesOverlap(newStart, newEnd, p.start, p.end))) {
+      return { blocked: "Can't drop on an Enroute block", overlaps: [] };
+    }
+    const overlaps = placed
+      .filter((p) => p.id !== item.id && p.kind !== "Enroute" && rangesOverlap(newStart, newEnd, p.start, p.end))
+      .map((p) => p.name);
+    return { overlaps };
+  }
+
+  function renderDragGhost(col: number) {
+    if (!dragItem || !dragPreview || dragPreview.col !== col) return null;
+    const start = dragPreview.start;
+    const end = new Date(start.getTime() + (dragItem.end.getTime() - dragItem.start.getTime()));
+    const { blocked, overlaps } = checkMove(dragItem, start);
+    const tone = blocked
+      ? "border-rose-400 bg-rose-500/20"
+      : overlaps.length
+      ? "border-amber-400 bg-amber-500/15"
+      : "border-blue-400 bg-blue-500/20";
+    const height = Math.max(24, ((end.getTime() - start.getTime()) / 60000) * PX_PER_MIN - 2);
+    return (
+      <div
+        className={`absolute left-1 right-1 z-30 rounded-md border-2 border-dashed px-2 py-1 pointer-events-none shadow-lg ${tone}`}
+        style={{ top: `${minutesFromGridTop(start) * PX_PER_MIN}px`, height: `${height}px` }}
+      >
+        <div className="text-[11px] font-semibold text-white leading-tight">{formatTimeRange(start, end)}</div>
+        {blocked ? (
+          <div className="text-[10px] text-rose-200 leading-tight mt-0.5">{blocked}</div>
+        ) : overlaps.length > 0 ? (
+          <div className="text-[10px] text-amber-200 leading-tight mt-0.5 truncate">Overlaps {overlaps.join(", ")}</div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderResizeBadge(dayItems: PlacedItem[]) {
+    if (!resizeState) return null;
+    const it = dayItems.find(
+      (i) => i.id === resizeState.item.id && i.start.getTime() === resizeState.item.start.getTime()
+    );
+    if (!it) return null;
+    const mins = Math.round((resizeState.previewEnd.getTime() - it.start.getTime()) / 60000);
+    const height = Math.max(20, mins * PX_PER_MIN - 2);
+    return (
+      <div
+        className="absolute left-1 z-30 pointer-events-none rounded-md bg-slate-900 border border-slate-600 px-2 py-0.5 text-[11px] text-white shadow-lg whitespace-nowrap"
+        style={{ top: `${minutesFromGridTop(it.start) * PX_PER_MIN + height + 4}px` }}
+      >
+        Ends {formatTime(resizeState.previewEnd)} · {formatDuration(mins)}
+        {resizeState.hint && <span className="text-rose-300"> · {resizeState.hint}</span>}
+      </div>
+    );
+  }
   const [dragMessage, setDragMessage] = useState<string | null>(null);
   const [overlapConfirm, setOverlapConfirm] = useState<{ item: PlacedItem; newStart: Date; overlapNames: string[] } | null>(null);
   const dragMessageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -976,14 +1094,16 @@ export function CalendarView({
   useEffect(() => {
     if (!resizeState) return;
     const onMove = (e: MouseEvent) => {
-      const deltaMs = (e.clientY - resizeState.startY) * (60 / SLOT_PX) * 60 * 1000;
+      // Pointer movement in pixels → minutes on the grid (64px per hour).
+      const deltaMs = ((e.clientY - resizeState.startY) / PX_PER_MIN) * 60 * 1000;
       const newEnd = new Date(resizeState.originalEnd.getTime() + deltaMs);
       const snapped = snapToSlot(newEnd);
       const minEnd = new Date(resizeState.item.start.getTime() + 15 * 60 * 1000);
-      if (snapped < minEnd) return;
-      if (isQuietTime(resizeState.item.start, snapped)) return;
-      if (resizeState.item.pillar && HOME_ONLY_PILLARS.includes(resizeState.item.pillar) && isUTADay(resizeState.item.start, fixedEvents)) return;
-      setResizeState((prev) => (prev ? { ...prev, previewEnd: snapped } : null));
+      const hint = (h: string) => setResizeState((prev) => (prev && prev.hint !== h ? { ...prev, hint: h } : prev));
+      if (snapped < minEnd) return hint("15 min minimum");
+      if (isQuietTime(resizeState.item.start, snapped)) return hint("can't run into 9 PM – 9 AM");
+      if (resizeState.item.pillar && HOME_ONLY_PILLARS.includes(resizeState.item.pillar) && isUTADay(resizeState.item.start, fixedEvents)) return hint("Family items can't change on UTA days");
+      setResizeState((prev) => (prev ? { ...prev, previewEnd: snapped, hint: undefined } : null));
     };
     const onUp = async () => {
       const rs = resizeState;
@@ -1005,46 +1125,26 @@ export function CalendarView({
 
   async function handleDrop(targetDate: Date) {
     const item = dragItem;
-    setDragItem(null);
+    endDrag();
     if (!item) return;
 
     const newStart = snapToSlot(targetDate);
-    const durationMs = item.end.getTime() - item.start.getTime();
-    const newEnd = new Date(newStart.getTime() + durationMs);
 
     if (newStart.getTime() === item.start.getTime() && newStart.getDate() === item.start.getDate()) {
       return;
     }
 
-    if (isQuietTime(newStart, newEnd)) {
-      showDragMessage("Can't schedule between 9 PM and 9 AM");
+    const check = checkMove(item, newStart);
+    if (check.blocked) {
+      showDragMessage(check.blocked);
       return;
     }
 
-    if (item.pillar && HOME_ONLY_PILLARS.includes(item.pillar) && isUTADay(newStart, fixedEvents)) {
-      showDragMessage("Can't schedule Family-pillar items on UTA days");
-      return;
-    }
-
-    const enrouteItems = placed.filter((p) => p.kind === "Enroute");
-    for (const er of enrouteItems) {
-      if (rangesOverlap(newStart, newEnd, er.start, er.end)) {
-        showDragMessage("Can't drop on an Enroute block");
-        return;
-      }
-    }
-
-    const overlaps = placed.filter((p) =>
-      p.id !== item.id &&
-      p.kind !== "Enroute" &&
-      rangesOverlap(newStart, newEnd, p.start, p.end)
-    );
-
-    if (overlaps.length > 0) {
+    if (check.overlaps.length > 0) {
       setOverlapConfirm({
         item,
         newStart,
-        overlapNames: overlaps.map((o) => o.name),
+        overlapNames: check.overlaps,
       });
       return;
     }
@@ -1515,6 +1615,7 @@ export function CalendarView({
                 <div
                   key={dayIdx}
                   className="flex-1 min-w-[140px] border-r border-slate-800 last:border-r-0 relative"
+                  {...columnDragHandlers(dayIdx, addDays(weekStart, dayIdx))}
                 >
                   {/* Hour rows */}
                   {HOURS.map((h) => (
@@ -1529,17 +1630,6 @@ export function CalendarView({
                         start.setHours(h, slot, 0, 0);
                         setAddPrefillDate(start);
                         setShowAdd(true);
-                      }}
-                      onDragOver={(e) => { if (dragItem) e.preventDefault(); }}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        if (!dragItem) return;
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        const y = e.clientY - rect.top;
-                        const slot = Math.floor(y / SLOT_PX) * SLOT_MIN;
-                        const start = new Date(addDays(weekStart, dayIdx));
-                        start.setHours(h, slot, 0, 0);
-                        handleDrop(start);
                       }}
                     />
                   ))}
@@ -1567,8 +1657,8 @@ export function CalendarView({
                       <div
                         key={`${item.id}-${idx}`}
                         draggable={!isEnroute}
-                        onDragStart={(e) => { if (!isEnroute) { setDragItem(item); e.dataTransfer.effectAllowed = "move"; } }}
-                        onDragEnd={() => setDragItem(null)}
+                        onDragStart={(e) => { if (!isEnroute) beginDrag(e, item); }}
+                        onDragEnd={endDrag}
                         className={`absolute left-1 right-1 rounded-md ${colors.soft} ${colors.border} border-l-2 px-2 py-1 text-left overflow-hidden group ${isEnroute ? "border-dashed" : "hover:z-10 hover:scale-[1.02] transition-transform cursor-pointer"} ${isDisplayOnly ? "opacity-60 border-dashed" : ""}`}
                         style={{ top: `${topOffset}px`, height: `${height}px`}}
                       >
@@ -1620,6 +1710,8 @@ export function CalendarView({
                       </div>
                     );
                   })}
+                  {renderDragGhost(dayIdx)}
+                  {renderResizeBadge(itemsByDay[dayIdx])}
                 </div>
               ))}
             </div>
@@ -1666,7 +1758,7 @@ export function CalendarView({
                   </div>
                 ))}
               </div>
-              <div className="flex-1 relative">
+              <div className="flex-1 relative" {...columnDragHandlers(-1, mobileDate)}>
                 {HOURS.map((h) => (
                   <div
                     key={h}
@@ -1679,17 +1771,6 @@ export function CalendarView({
                       start.setHours(h, slot, 0, 0);
                       setAddPrefillDate(start);
                       setShowAdd(true);
-                    }}
-                    onDragOver={(e) => { if (dragItem) e.preventDefault(); }}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      if (!dragItem) return;
-                      const rect = e.currentTarget.getBoundingClientRect();
-                      const y = e.clientY - rect.top;
-                      const slot = Math.floor(y / SLOT_PX) * SLOT_MIN;
-                      const start = new Date(mobileDate);
-                      start.setHours(h, slot, 0, 0);
-                      handleDrop(start);
                     }}
                   />
                 ))}
@@ -1713,8 +1794,8 @@ export function CalendarView({
                     <div
                       key={`${item.id}-${idx}`}
                       draggable
-                      onDragStart={(e) => { setDragItem(item); e.dataTransfer.effectAllowed = "move"; }}
-                      onDragEnd={() => setDragItem(null)}
+                      onDragStart={(e) => beginDrag(e, item)}
+                      onDragEnd={endDrag}
                       className={`absolute left-1 right-1 rounded-md ${colors.soft} ${colors.border} border-l-2 overflow-hidden ${isDisplayOnly ? "opacity-60 border-dashed" : ""}`}
                       style={{ top: `${topOffset}px`, height: `${height}px` }}
                     >
@@ -1746,6 +1827,8 @@ export function CalendarView({
                     </div>
                   );
                 })}
+                {renderDragGhost(-1)}
+                {renderResizeBadge(itemsByDay[mobileDayIndex])}
               </div>
             </div>
           </div>
