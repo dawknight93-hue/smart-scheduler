@@ -104,12 +104,10 @@ export function AddItemModal({
     editTarget ? (editTarget.kind === "Fixed Event" ? "event" : editTarget.kind === "Habit" ? "habit" : "task") : "event"
   );
 
-  const defaultEventStart = prefillDate ?? new Date(weekStart.getTime() + 8 * 3600 * 1000);
-  // New habits/tasks start looking for time from right now (next quarter hour).
+  // New items start from right now (next quarter hour) unless a calendar slot was clicked.
   const [defaultSearchStart] = useState(() => nextQuarterHour());
-  const defaultEventEnd = prefillDate
-    ? new Date(prefillDate.getTime() + 60 * 60 * 1000)
-    : new Date(weekStart.getTime() + 9 * 3600 * 1000);
+  const defaultEventStart = prefillDate ?? defaultSearchStart;
+  const defaultEventEnd = new Date(defaultEventStart.getTime() + 60 * 60 * 1000);
 
   // Event state
   const [evName, setEvName] = useState(() => {
