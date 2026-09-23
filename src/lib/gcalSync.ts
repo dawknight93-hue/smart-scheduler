@@ -166,6 +166,22 @@ export async function getSyncStatus(): Promise<SyncStatus | null> {
   return resp.json();
 }
 
+/** Save a moved/resized pulled event back to its own Google calendar. */
+export async function updateGoogleSourceEvent(
+  googleEventId: string,
+  calendarId: string,
+  start: Date,
+  end: Date
+): Promise<SyncResult> {
+  return callEdgeFunction({
+    action: "update-source-event",
+    googleEventId,
+    calendarId,
+    start: start.toISOString(),
+    end: end.toISOString(),
+  });
+}
+
 export async function disconnectGoogle(): Promise<SyncResult> {
   return callEdgeFunction({ action: "disconnect" });
 }
