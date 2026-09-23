@@ -64,6 +64,13 @@ export function isGoogleConfigured(): boolean {
   return !!import.meta.env.VITE_GOOGLE_CLIENT_ID;
 }
 
+const RECONNECT_MESSAGE =
+  "Your Google Calendar connection has expired. Open Calendar Connections and tap Reconnect.";
+
+function friendlyError(msg: string): string {
+  return msg.includes("invalid_grant") ? RECONNECT_MESSAGE : msg;
+}
+
 async function callEdgeFunction(body: Record<string, unknown>): Promise<SyncResult> {
   const resp = await fetch(FUNCTION_URL, {
     method: "POST",
@@ -79,11 +86,11 @@ async function callEdgeFunction(body: Record<string, unknown>): Promise<SyncResu
     } catch {
       // response wasn't JSON
     }
-    return { success: false, error: errorMsg };
+    return { success: false, error: friendlyError(errorMsg) };
   }
 
   const data = await resp.json();
-  if (data.error) return { success: false, error: data.error };
+  if (data.error) return { success: false, error: friendlyError(data.error) };
   return { success: true, ...data };
 }
 
