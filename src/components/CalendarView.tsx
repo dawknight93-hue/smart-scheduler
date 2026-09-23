@@ -158,6 +158,14 @@ function formatDuration(min: number): string {
   return m ? `${h}h ${m}m` : `${h}-hour`;
 }
 
+/** "45 min", "1 hr", "1 hr 30 min" */
+function formatSpan(min: number): string {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  if (!h) return `${m} min`;
+  return m ? `${h} hr ${m} min` : `${h} hr`;
+}
+
 function unscheduledReasonText(u: UnscheduledItem): string {
   const window = `${formatWhen(u.windowStart)} – ${formatWhen(u.deadline)}`;
   switch (u.reason) {
@@ -955,11 +963,12 @@ export function CalendarView({
     const end = new Date(start.getTime() + (dragItem.end.getTime() - dragItem.start.getTime()));
     const { blocked, overlaps } = checkMove(dragItem, start);
     const tone = blocked
-      ? "border-rose-400 bg-rose-500/20"
+      ? "border-rose-400 bg-rose-950/95"
       : overlaps.length
-      ? "border-amber-400 bg-amber-500/15"
-      : "border-blue-400 bg-blue-500/20";
-    const height = Math.max(24, ((end.getTime() - start.getTime()) / 60000) * PX_PER_MIN - 2);
+      ? "border-amber-400 bg-amber-950/95"
+      : "border-blue-400 bg-blue-950/95";
+    const note = blocked || overlaps.length > 0;
+    const height = Math.max(note ? 38 : 22, ((end.getTime() - start.getTime()) / 60000) * PX_PER_MIN - 2);
     return (
       <div
         className={`absolute left-1 right-1 z-30 rounded-md border-2 border-dashed px-2 py-1 pointer-events-none shadow-lg ${tone}`}
@@ -988,7 +997,7 @@ export function CalendarView({
         className="absolute left-1 z-30 pointer-events-none rounded-md bg-slate-900 border border-slate-600 px-2 py-0.5 text-[11px] text-white shadow-lg whitespace-nowrap"
         style={{ top: `${minutesFromGridTop(it.start) * PX_PER_MIN + height + 4}px` }}
       >
-        Ends {formatTime(resizeState.previewEnd)} · {formatDuration(mins)}
+        Ends {formatTime(resizeState.previewEnd)} · {formatSpan(mins)}
         {resizeState.hint && <span className="text-rose-300"> · {resizeState.hint}</span>}
       </div>
     );
@@ -1095,9 +1104,10 @@ export function CalendarView({
     if (!resizeState) return;
     const onMove = (e: MouseEvent) => {
       // Pointer movement in pixels → minutes on the grid (64px per hour).
-      const deltaMs = ((e.clientY - resizeState.startY) / PX_PER_MIN) * 60 * 1000;
-      const newEnd = new Date(resizeState.originalEnd.getTime() + deltaMs);
-      const snapped = snapToSlot(newEnd);
+      // Move the end in whole 15-minute steps from where it started, so a tiny
+      // wiggle (or dragging back) leaves the original end time untouched.
+      const deltaMin = Math.round((e.clientY - resizeState.startY) / PX_PER_MIN / SLOT_MIN) * SLOT_MIN;
+      const snapped = new Date(resizeState.originalEnd.getTime() + deltaMin * 60 * 1000);
       const minEnd = new Date(resizeState.item.start.getTime() + 15 * 60 * 1000);
       const hint = (h: string) => setResizeState((prev) => (prev && prev.hint !== h ? { ...prev, hint: h } : prev));
       if (snapped < minEnd) return hint("15 min minimum");
@@ -1659,7 +1669,7 @@ export function CalendarView({
                         draggable={!isEnroute}
                         onDragStart={(e) => { if (!isEnroute) beginDrag(e, item); }}
                         onDragEnd={endDrag}
-                        className={`absolute left-1 right-1 rounded-md ${colors.soft} ${colors.border} border-l-2 px-2 py-1 text-left overflow-hidden group ${isEnroute ? "border-dashed" : "hover:z-10 hover:scale-[1.02] transition-transform cursor-pointer"} ${isDisplayOnly ? "opacity-60 border-dashed" : ""}`}
+                        className={`absolute left-1 right-1 rounded-md ${colors.soft} ${colors.border} border-l-2 px-2 py-1 text-left overflow-hidden group ${isEnroute ? "border-dashed" : "hover:z-10 hover:scale-[1.02] transition-transform cursor-pointer"} ${isDisplayOnly ? "opacity-60 border-dashed" : ""} ${dragItem && dragItem.id === item.id && dragItem.start.getTime() === item.start.getTime() ? "opacity-40" : ""}`}
                         style={{ top: `${topOffset}px`, height: `${height}px`}}
                       >
                         <button
@@ -1796,7 +1806,7 @@ export function CalendarView({
                       draggable
                       onDragStart={(e) => beginDrag(e, item)}
                       onDragEnd={endDrag}
-                      className={`absolute left-1 right-1 rounded-md ${colors.soft} ${colors.border} border-l-2 overflow-hidden ${isDisplayOnly ? "opacity-60 border-dashed" : ""}`}
+                      className={`absolute left-1 right-1 rounded-md ${colors.soft} ${colors.border} border-l-2 overflow-hidden ${isDisplayOnly ? "opacity-60 border-dashed" : ""} ${dragItem && dragItem.id === item.id && dragItem.start.getTime() === item.start.getTime() ? "opacity-40" : ""}`}
                       style={{ top: `${topOffset}px`, height: `${height}px` }}
                     >
                       <button
