@@ -744,7 +744,8 @@ export function CalendarView({
     } else {
       const changes = `${pushResult.created ?? 0} added, ${pushResult.updated ?? 0} updated, ${pushResult.deleted ?? 0} removed`;
       const problems = pushResult.errors && pushResult.errors.length ? ` — ${pushResult.errors.length} item(s) failed: ${pushResult.errors[0]}` : "";
-      setSyncMessage(`Synced ${pullResult.eventsPulled ?? 0} events in. Google Calendar: ${changes}.${problems}`);
+      const removedIn = pullResult.eventsRemoved ? ` (${pullResult.eventsRemoved} removed that are no longer in Google)` : "";
+      setSyncMessage(`Synced ${pullResult.eventsPulled ?? 0} events in${removedIn}. Google Calendar: ${changes}.${problems}`);
     }
     setSyncing(false);
   }
@@ -1932,7 +1933,9 @@ interface ItemSource {
 /** Google Calendar web link for one event (the "eid" is base64 of "<eventId> <calendarId>"). */
 function googleEventUrl(eventId: string, calendarId: string): string | undefined {
   try {
-    const eid = btoa(`${eventId} ${calendarId}`).replace(/=+$/, "");
+    // Same encoding Google uses for an event's htmlLink (group/gmail suffixes shortened).
+    const cal = calendarId.replace(/@group\.calendar\.google\.com$/, "@g").replace(/@gmail\.com$/, "@m");
+    const eid = btoa(`${eventId} ${cal}`).replace(/=+$/, "");
     return `https://www.google.com/calendar/event?eid=${eid}`;
   } catch {
     return undefined;
