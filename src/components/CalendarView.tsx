@@ -327,7 +327,9 @@ export function CalendarView({
     const diff = Math.floor((new Date().setHours(0, 0, 0, 0) - weekStart.getTime()) / (24 * 60 * 60 * 1000));
     return diff >= 0 && diff < 7 ? diff : 0;
   });
-  const [viewMode, setViewMode] = useState<"week" | "month">("week");
+  const [viewMode, setViewMode] = useState<"day" | "week" | "month">("week");
+  // Day view shows the single-day agenda (same layout as mobile) on desktop.
+  const showDayView = layout === "mobile" || viewMode === "day";
   const [showMiniMonth, setShowMiniMonth] = useState(false);
   const [resizeState, setResizeState] = useState<{ item: PlacedItem; startY: number; originalEnd: Date; previewEnd: Date } | null>(null);
 
@@ -1124,7 +1126,7 @@ export function CalendarView({
           <div className="flex-1 flex flex-wrap items-center justify-end gap-2 gap-y-2 min-w-0">
 
           {/* Week/month navigation (tablet/desktop) */}
-          <div className={layout === "desktop" ? "flex items-center gap-1 shrink-0" : "hidden"}>
+          <div className={!showDayView ? "flex items-center gap-1 shrink-0" : "hidden"}>
             <button
               onClick={() => {
                 if (viewMode === "month") {
@@ -1158,8 +1160,8 @@ export function CalendarView({
             </button>
           </div>
 
-          {/* Day navigation (mobile) */}
-          <div className={layout === "mobile" ? "flex items-center gap-1 shrink-0" : "hidden"}>
+          {/* Day navigation (mobile, and desktop Day view) */}
+          <div className={showDayView ? "flex items-center gap-1 shrink-0" : "hidden"}>
             <button
               onClick={() => {
                 if (mobileDayIndex === 0) {
@@ -1199,14 +1201,24 @@ export function CalendarView({
               onClick={() => {
                 setWeekStart(getWeekStart(new Date()));
                 setMobileDayIndex((new Date().getDay() + 6) % 7);
+                if (layout === "desktop") setViewMode("day");
               }}
               className="px-2.5 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 transition-colors"
+              title="Show today's agenda"
             >
               Today
             </button>
             {/* Week/Month view toggle (desktop only) */}
             {layout === "desktop" && (
               <div className="flex items-center rounded-lg bg-slate-800 overflow-hidden">
+                <button
+                  onClick={() => setViewMode("day")}
+                  className={`px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                    viewMode === "day" ? "bg-blue-600 text-white" : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  Day
+                </button>
                 <button
                   onClick={() => setViewMode("week")}
                   className={`px-2.5 py-1.5 text-xs font-medium transition-colors ${
@@ -1238,7 +1250,8 @@ export function CalendarView({
               {showMiniMonth && (
                 <MiniMonthNavigator
                   weekStart={weekStart}
-                  viewMode={viewMode}
+                  viewMode={showDayView ? "day" : viewMode}
+                  selectedDay={mobileDate}
                   onPick={(date) => {
                     setWeekStart(getWeekStart(date));
                     setMobileDayIndex((date.getDay() + 6) % 7);
@@ -1370,7 +1383,7 @@ export function CalendarView({
             <div className="animate-pulse">Loading schedule…</div>
           </div>
         ) : (
-          <div className={layout === "desktop" ? "inline-flex flex-col min-w-full" : "hidden"}>
+          <div className={!showDayView ? "inline-flex flex-col min-w-full" : "hidden"}>
             {viewMode === "month" ? (
               /* Month grid view */
               <MonthGrid
@@ -1607,8 +1620,8 @@ export function CalendarView({
             )}
           </div>
         )}
-          {/* Mobile single-day view */}
-          <div className={layout === "mobile" ? "flex flex-col" : "hidden"}>
+          {/* Single-day view (mobile, and desktop Day view) */}
+          <div className={showDayView ? "flex flex-col" : "hidden"}>
             {allDaySpans.filter((s) => mobileDayIndex >= s.startIdx && mobileDayIndex <= s.endIdx).length > 0 && (
               <div className="border-b border-slate-800 bg-slate-900/50 px-3 py-2 space-y-1">
                 {allDaySpans
@@ -2237,11 +2250,13 @@ function MonthGrid({
 function MiniMonthNavigator({
   weekStart,
   viewMode,
+  selectedDay,
   onPick,
   onClose,
 }: {
   weekStart: Date;
-  viewMode: "week" | "month";
+  viewMode: "day" | "week" | "month";
+  selectedDay: Date;
   onPick: (d: Date) => void;
   onClose: () => void;
 }) {
@@ -2255,10 +2270,12 @@ function MiniMonthNavigator({
   // Highlight the current view's range
   const rangeStart = viewMode === "month"
     ? getWeekStart(new Date(navDate.getFullYear(), navDate.getMonth(), 1))
+    : viewMode === "day"
+    ? selectedDay
     : weekStart;
   const rangeEnd = viewMode === "month"
     ? addDays(getWeekStart(new Date(navDate.getFullYear(), navDate.getMonth() + 1, 1)), 7)
-    : addDays(weekStart, 7);
+    : addDays(rangeStart, viewMode === "day" ? 1 : 7);
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center pt-20" onClick={onClose}>
