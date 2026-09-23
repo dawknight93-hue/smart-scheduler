@@ -310,13 +310,22 @@ export function CalendarView({
     const rangeStart = viewMode === "month" ? monthGridStart : weekStart;
     const rangeEnd = viewMode === "month" ? monthGridEnd : addDays(weekStart, 7);
 
-    const [evRes, habRes, taskRes, mapRes, ebRes, occRes, feoccRes, hoccRes] = await Promise.all([
+    const [evRes, recEvRes, habRes, taskRes, mapRes, ebRes, occRes, feoccRes, hoccRes] = await Promise.all([
       supabase
         .from("fixed_events")
         .select("*")
         .gte("end_time", rangeStart.toISOString())
         .lt("start_time", rangeEnd.toISOString())
         .order("start_time"),
+      // A recurring event's row only stores its FIRST instance, so the range
+      // filter above drops it once you navigate past that first week. Fetch
+      // every recurring parent that starts before the range ends; the
+      // recurrence expansion below decides which occurrences are visible.
+      supabase
+        .from("fixed_events")
+        .select("*")
+        .eq("recurrence_enabled", true)
+        .lt("start_time", rangeEnd.toISOString()),
       supabase.from("habits").select("*").order("tier"),
       supabase.from("tasks").select("*").order("tier"),
       supabase.from("gcal_event_map").select("*"),
@@ -326,7 +335,13 @@ export function CalendarView({
       supabase.from("habit_occurrences").select("*").gte("occurrence_date", formatLocalDate(rangeStart)).lte("occurrence_date", formatLocalDate(addDays(rangeEnd, -1))),
     ]);
 
-    const fe = (evRes.data as FixedEvent[]) ?? [];
+    const feById = new Map<string, FixedEvent>();
+    for (const e of [...((evRes.data as FixedEvent[]) ?? []), ...((recEvRes.data as FixedEvent[]) ?? [])]) {
+      feById.set(e.id, e);
+    }
+    const fe = [...feById.values()].sort(
+      (a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime()
+    );
     const ha = (habRes.data as Habit[]) ?? [];
     const ta = (taskRes.data as Task[]) ?? [];
     const em = (mapRes.data as EventMapEntry[]) ?? [];
@@ -370,12 +385,80 @@ export function CalendarView({
   const { placed, unscheduled } = useMemo(() => {
     const recurringTasks = tasks.filter((t) => t.recurrence_enabled);
     const nonRecurringTasks = tasks.filter((t) => !t.recurrence_enabled);
-    const result = runEngine(displayStart, fixedEvents, habits, nonRecurringTasks);
+    const rangeStart = displayStart;
+    const rangeEnd = displayEnd;
+    const occByFeDate = new Map<string, FixedEventOccurrence>();
+    for (const o of fixedEventOccurrences) {
+      occByFeDate.set(`${o.item_id}|${o.occurrence_date}`, o);
+    }
+    const recurringFixedEvents = fixedEvents.filter((e) => e.recurrence_enabled);
+    const fixedOccurrenceItems: PlacedItem[] = [];
+    const fixedOccurrenceEvents: FixedEvent[] = [];
+
+    // Expand recurring Fixed Events into individual occurrences
+    for (const fe of recurringFixedEvents) {
+      const rule = parseRecurrenceFromItem(fe);
+      const startDate = new Date(fe.start_time);
+      const occDates = expandRecurrence(rule, startDate, rangeStart, rangeEnd);
+      for (const occDate of occDates) {
+        const dateStr = formatLocalDate(occDate);
+        const existing = occByFeDate.get(`${fe.id}|${dateStr}`);
+        if (existing?.skipped) continue;
+        const feStart = new Date(fe.start_time);
+        const feEnd = new Date(fe.end_time);
+        const durationMs = feEnd.getTime() - feStart.getTime();
+        let itemStart: Date;
+        let itemEnd: Date;
+        if (existing?.override_start && existing?.override_end) {
+          itemStart = new Date(existing.override_start);
+          itemEnd = new Date(existing.override_end);
+        } else {
+          itemStart = new Date(occDate);
+          itemStart.setHours(feStart.getHours(), feStart.getMinutes(), 0, 0);
+          itemEnd = new Date(itemStart.getTime() + durationMs);
+        }
+        const occId = `${fe.id}--${dateStr}`;
+        fixedOccurrenceEvents.push({
+          ...fe,
+          id: occId,
+          start_time: itemStart.toISOString(),
+          end_time: itemEnd.toISOString(),
+          recurrence_enabled: false,
+        });
+        fixedOccurrenceItems.push({
+          id: occId,
+          name: fe.name,
+          kind: "Fixed Event" as ItemKind,
+          tier: 0,
+          context: "other" as ContextTag,
+          start: itemStart,
+          end: itemEnd,
+          pillar: fe.pillar ?? null,
+          room: 0,
+          isBatch: false,
+          isAllDay: false,
+          isRecurringOccurrence: true,
+          recurringItemId: fe.id,
+          recurringItemKind: "Fixed Event",
+          occurrenceDate: dateStr,
+          occurrenceCompleted: existing?.completed ?? false,
+          recurrenceSummary: formatRecurrenceSummary(rule),
+        });
+      }
+    }
+
+    const fixedOccurrenceIds = new Set(fixedOccurrenceEvents.map((e) => e.id));
+    const result = runEngine(
+      displayStart,
+      [...fixedEvents.filter((e) => !e.recurrence_enabled), ...fixedOccurrenceEvents],
+      habits,
+      nonRecurringTasks
+    );
     const mapByItemId = new Map<string, EventMapEntry>();
     for (const m of eventMap) {
       if (m.item_id) mapByItemId.set(m.item_id, m);
     }
-    const enriched = result.placed.map((p) => {
+    const enriched = result.placed.filter((p) => !fixedOccurrenceIds.has(p.id)).map((p) => {
       const m = mapByItemId.get(p.id);
       if (!m) return p;
       return {
@@ -400,15 +483,9 @@ export function CalendarView({
     }));
 
     // Expand recurring tasks into individual occurrences
-    const rangeStart = displayStart;
-    const rangeEnd = displayEnd;
     const occByTaskDate = new Map<string, TaskOccurrence>();
     for (const o of occurrences) {
       occByTaskDate.set(`${o.task_id}|${o.occurrence_date}`, o);
-    }
-    const occByFeDate = new Map<string, FixedEventOccurrence>();
-    for (const o of fixedEventOccurrences) {
-      occByFeDate.set(`${o.item_id}|${o.occurrence_date}`, o);
     }
     const occByHabitDate = new Map<string, HabitOccurrence>();
     for (const o of habitOccurrences) {
@@ -455,50 +532,7 @@ export function CalendarView({
       }
     }
 
-    // Expand recurring Fixed Events into individual occurrences
-    const recurringFixedEvents = fixedEvents.filter((e) => e.recurrence_enabled);
-    for (const fe of recurringFixedEvents) {
-      const rule = parseRecurrenceFromItem(fe);
-      const startDate = new Date(fe.start_time);
-      const occDates = expandRecurrence(rule, startDate, rangeStart, rangeEnd);
-      for (const occDate of occDates) {
-        const dateStr = formatLocalDate(occDate);
-        const existing = occByFeDate.get(`${fe.id}|${dateStr}`);
-        if (existing?.skipped) continue;
-        const feStart = new Date(fe.start_time);
-        const feEnd = new Date(fe.end_time);
-        const durationMs = feEnd.getTime() - feStart.getTime();
-        let itemStart: Date;
-        let itemEnd: Date;
-        if (existing?.override_start && existing?.override_end) {
-          itemStart = new Date(existing.override_start);
-          itemEnd = new Date(existing.override_end);
-        } else {
-          itemStart = new Date(occDate);
-          itemStart.setHours(feStart.getHours(), feStart.getMinutes(), 0, 0);
-          itemEnd = new Date(itemStart.getTime() + durationMs);
-        }
-        recurringItems.push({
-          id: `${fe.id}--${dateStr}`,
-          name: fe.name,
-          kind: "Fixed Event" as ItemKind,
-          tier: 0,
-          context: "other" as ContextTag,
-          start: itemStart,
-          end: itemEnd,
-          pillar: fe.pillar ?? null,
-          room: 0,
-          isBatch: false,
-          isAllDay: false,
-          isRecurringOccurrence: true,
-          recurringItemId: fe.id,
-          recurringItemKind: "Fixed Event",
-          occurrenceDate: dateStr,
-          occurrenceCompleted: existing?.completed ?? false,
-          recurrenceSummary: formatRecurrenceSummary(rule),
-        });
-      }
-    }
+    recurringItems.push(...fixedOccurrenceItems);
 
     // Expand recurring Habits into individual occurrences
     const recurringHabits = habits.filter((h) => h.recurrence_enabled);
