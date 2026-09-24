@@ -94,7 +94,7 @@ export function BriefingView({ onOpenReview }: { onOpenReview: () => void }) {
           setDaily(null);
           setWeather([]);
           setLoading(false);
-          await writeSummary(kind, periodFacts(b), force);
+          await writeSummary(kind, periodFacts(b, new Date()), force);
         }
       } catch (e) {
         setError(e instanceof Error ? e.message : "Couldn't build the briefing");
