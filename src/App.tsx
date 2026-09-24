@@ -1,17 +1,20 @@
 import { useState } from "react";
-import { CalendarDays, CheckSquare, CalendarClock, Target } from "lucide-react";
+import { CalendarDays, CheckSquare, Target, ClipboardCheck } from "lucide-react";
 import { CalendarView } from "@/components/CalendarView";
 import { TasksView } from "@/components/TasksView";
 import { GoalsView } from "@/components/GoalsView";
+import { WeeklyReview } from "@/components/WeeklyReview";
+import { useReviewDue } from "@/lib/useReviewDue";
 import { GoogleCallback } from "@/components/GoogleCallback";
 import { PrivacyPolicy } from "@/components/PrivacyPolicy";
 import { getWeekStart } from "@/lib/schedulingEngine";
 
-type View = "calendar" | "tasks" | "goals";
+type View = "calendar" | "tasks" | "goals" | "review";
 
 function App() {
   const [view, setView] = useState<View>("calendar");
   const [weekStart, setWeekStart] = useState(() => getWeekStart(new Date()));
+  const reviewDue = useReviewDue(view);
 
   if (window.location.pathname === "/gcal-callback") return <GoogleCallback />;
   if (window.location.pathname === "/privacy") return <PrivacyPolicy />;
@@ -54,6 +57,20 @@ function App() {
             <Target className="w-4 h-4" />
             Goals
           </button>
+          <button
+            onClick={() => setView("review")}
+            className={`relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+              view === "review"
+                ? "bg-blue-600 text-white"
+                : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+            }`}
+          >
+            <ClipboardCheck className="w-4 h-4" />
+            Review
+            {reviewDue && view !== "review" && (
+              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-400" aria-label="Weekly Review due" />
+            )}
+          </button>
         </div>
       </nav>
 
@@ -64,6 +81,8 @@ function App() {
         />
       ) : view === "tasks" ? (
         <TasksView weekStart={weekStart} />
+      ) : view === "review" ? (
+        <WeeklyReview onOpenGoals={() => setView("goals")} />
       ) : (
         <GoalsView />
       )}
