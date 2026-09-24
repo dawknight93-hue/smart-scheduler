@@ -19,6 +19,7 @@ import {
   type WeekReviewRow,
 } from "./goalPlanning";
 import { goalDayEntries, loadDailyItems, type DailyItem, type DayEntry } from "./goalDaily";
+import { dailyAwareness, dutySentence, dutyStats, periodMarkers, type DailyAwareness, type DutyStats } from "./awareness";
 import type { LifePillar, Task, UnscheduledItem } from "./types";
 
 export type BriefingKind = "daily" | "weekly" | "monthly";
@@ -56,6 +57,8 @@ export interface BriefItem {
   flight?: { origin: string; destination: string };
   enroute?: "to" | "from";
   goalSession?: boolean;
+  /** Name of the Google calendar it came from, if pulled. */
+  source?: string;
 }
 
 interface RangeData {
@@ -68,16 +71,22 @@ interface RangeData {
 async function loadRange(start: Date, end: Date): Promise<RangeData> {
   const weekStarts: Date[] = [];
   for (let w = getWeekStart(start); w < end; w = addDays(w, 7)) weekStarts.push(w);
-  const [weeks, eb, tk] = await Promise.all([
+  const [weeks, eb, tk, cc] = await Promise.all([
     Promise.all(weekStarts.map((w) => loadWeekData(w))),
     supabase.from("enroute_blocks").select("*").lt("start_time", end.toISOString()).gt("end_time", start.toISOString()),
     supabase.from("tasks").select("*"),
+    supabase.from("calendar_connections").select("calendar_id, name, role"),
   ]);
+  const calName = new Map<string, string>();
+  for (const c of (cc.data as { calendar_id: string; name: string; role: string }[]) ?? []) {
+    if (c.role !== "schedule_target" || !calName.has(c.calendar_id)) calName.set(c.calendar_id, c.name);
+  }
   const items: BriefItem[] = [];
   const unscheduled: UnscheduledItem[] = [];
   const seenAllDay = new Set<string>();
   for (const week of weeks) {
     const goalHabitIds = new Set(week.habits.filter((h) => h.goal_id).map((h) => h.id));
+    const sourceOf = new Map(week.map.filter((m) => m.item_id).map((m) => [m.item_id as string, calName.get(m.calendar_id)]));
     const r = runEngine(week.weekStart, week.busy, week.habits, week.tasks);
     unscheduled.push(...r.unscheduled);
     for (const p of r.placed) {
@@ -96,6 +105,7 @@ async function loadRange(start: Date, end: Date): Promise<RangeData> {
         flight: leg ? { origin: leg.origin, destination: leg.destination } : undefined,
         goalSession: goalHabitIds.has(p.id),
         blocks: p.blocksSchedule !== false,
+        source: sourceOf.get(p.id),
       });
     }
     for (const e of week.busy.filter((x) => x.is_all_day)) {
@@ -104,7 +114,7 @@ async function loadRange(start: Date, end: Date): Promise<RangeData> {
       const en = allDayDate(e.end_time);
       if (en <= start || s >= end) continue;
       seenAllDay.add(e.id);
-      items.push({ id: e.id, name: e.name, kind: "Fixed Event", start: s, end: en, allDay: true, pillar: e.pillar ?? null });
+      items.push({ id: e.id, name: e.name, kind: "Fixed Event", start: s, end: en, allDay: true, pillar: e.pillar ?? null, blocks: e.blocks_schedule !== false, source: sourceOf.get(e.id) });
     }
   }
   for (const b of (eb.data as StoredEnrouteBlock[]) ?? []) {
@@ -274,6 +284,8 @@ export interface DailyBriefing {
   weatherStops: WeatherStop[];
   goals: GoalProgress[];
   headsUp: string[];
+  /** Info-only calendars turned into notes (reserve, proffer, pay, bills, Jatara…). */
+  awareness: DailyAwareness;
   tomorrow: { first: BriefItem | null; leaveBy: BriefItem | null; firstFlight: BriefItem | null; flights: BriefItem[]; earlyStart: boolean };
 }
 
@@ -285,7 +297,7 @@ export async function buildDaily(now = new Date()): Promise<DailyBriefing> {
   const tomorrow = addDays(today, 1);
   const weekStart = getWeekStart(today);
   const [range, goalRows, dailyItems] = await Promise.all([
-    loadRange(today, addDays(today, 2)),
+    loadRange(today, addDays(today, 8)),
     loadGoals(),
     loadDailyItems(weekStart, addDays(weekStart, 7)).catch(() => [] as DailyItem[]),
   ]);
@@ -340,8 +352,9 @@ export async function buildDaily(now = new Date()): Promise<DailyBriefing> {
   return {
     kind: "daily",
     date: today,
-    agenda: todayItems.filter((i) => !i.allDay),
-    allDay: todayItems.filter((i) => i.allDay),
+    agenda: todayItems.filter((i) => !i.allDay && holdsTime(i)),
+    allDay: todayItems.filter((i) => i.allDay && holdsTime(i)),
+    awareness: dailyAwareness(range.items, now),
     utaToday: isUta(today),
     utaTomorrow: isUta(tomorrow),
     flightsToday: todayItems.filter((i) => i.flight),
@@ -362,6 +375,8 @@ export interface PeriodLookBack {
   tasksCompleted: string[];
   checkpointsHit: string[];
   checkpointsMissed: string[];
+  /** Flying / reserve / UTA / off days in the period, and month-to-date for weekly. */
+  duty: { stats: DutyStats; sentence: string; month?: { label: string; stats: DutyStats; sentence: string } };
 }
 
 export interface PeriodLookAhead {
@@ -371,6 +386,9 @@ export interface PeriodLookAhead {
   utaDays: Date[];
   busiest: { date: Date; hours: number } | null;
   deadlines: { date: Date; text: string }[];
+  duty: { stats: DutyStats; sentence: string };
+  /** Paydays, bills, bid and open-time windows from info-only calendars. */
+  markers: { date: Date; text: string }[];
 }
 
 export interface PeriodBriefing {
@@ -421,7 +439,18 @@ async function lookAhead(label: string, start: Date, end: Date, goals: PlanGoal[
     }
   }
   deadlines.sort((a, b) => a.date.getTime() - b.date.getTime());
-  return { label, start, flightDays, utaDays, busiest: busiest && busiest.hours > 0 ? busiest : null, deadlines };
+  const isUtaDay = (d: Date) => uta.some(([a, b]) => d.getTime() + 12 * 3600000 >= a.getTime() && d.getTime() + 12 * 3600000 < b.getTime());
+  const stats = dutyStats(range.items, start, end, isUtaDay);
+  return {
+    label,
+    start,
+    flightDays,
+    utaDays,
+    busiest: busiest && busiest.hours > 0 ? busiest : null,
+    deadlines,
+    duty: { stats, sentence: dutySentence(stats, false) },
+    markers: periodMarkers(range.items, start, end),
+  };
 }
 
 async function lookBack(label: string, start: Date, end: Date, goals: PlanGoal[], weekly: boolean): Promise<PeriodLookBack> {
@@ -431,6 +460,23 @@ async function lookBack(label: string, start: Date, end: Date, goals: PlanGoal[]
   ]);
   const reviews = (rv.data as WeekReviewRow[]) ?? [];
   const active = sortByPriority(goals.filter((g) => g.status === "active" && g.plan_mode));
+
+  // Duty days: this period, plus month-to-date for the weekly look-back.
+  const lastDay = addDays(end, -1);
+  const monthStart = new Date(lastDay.getFullYear(), lastDay.getMonth(), 1);
+  const dutyRange = await loadRange(weekly && monthStart < start ? monthStart : start, end);
+  const utaR = utaRanges(dutyRange.weeks.flatMap((w) => w.busy));
+  const isUtaDay = (d: Date) => utaR.some(([a, b]) => d.getTime() + 12 * 3600000 >= a.getTime() && d.getTime() + 12 * 3600000 < b.getTime());
+  const periodStats = dutyStats(dutyRange.items, start, end, isUtaDay);
+  const duty: PeriodLookBack["duty"] = { stats: periodStats, sentence: dutySentence(periodStats, true) };
+  if (weekly) {
+    const mtd = dutyStats(dutyRange.items, monthStart, end, isUtaDay);
+    duty.month = {
+      label: `${monthStart.toLocaleDateString("en-US", { month: "long" })} so far (through ${dayLabel(lastDay)})`,
+      stats: mtd,
+      sentence: dutySentence(mtd, true),
+    };
+  }
   let goalLines: PeriodLookBack["goalLines"] = [];
   if (weekly) {
     const [week, items] = await Promise.all([loadWeekData(start), loadDailyItems(start, end).catch(() => [] as DailyItem[])]);
@@ -465,6 +511,7 @@ async function lookBack(label: string, start: Date, end: Date, goals: PlanGoal[]
     tasksCompleted: ((tk.data as { name: string }[]) ?? []).map((t) => t.name),
     checkpointsHit: hit,
     checkpointsMissed: missed,
+    duty,
   };
 }
 
@@ -544,6 +591,15 @@ export function dailyFacts(b: DailyBriefing, wx: WeatherResult[], now = new Date
           .join("; ")}`
       );
   }
+  const aw = b.awareness;
+  if (aw.notes.length || aw.fyi.length || aw.comingUp.length) {
+    lines.push(
+      `SITUATIONAL AWARENESS (from info-only calendars — context and actions, not booked time): ${[
+        ...aw.notes.map((n) => `${n.text}${n.action ? ` Action: ${n.action}` : ""}`),
+        ...aw.fyi.map((i) => `FYI: ${i.name.replace(/^[\s,]+/, "")}${i.allDay ? " (all day)" : ` ${hhmm(i.start)}–${hhmm(i.end)}`}`),
+      ].join(" | ")}${aw.comingUp.length ? ` | Coming up: ${aw.comingUp.join("; ")}` : ""}`
+    );
+  }
   lines.push(b.headsUp.length ? `Heads-up: ${b.headsUp.join("; ")}` : "Heads-up: none.");
   const t = b.tomorrow;
   lines.push(
@@ -563,12 +619,16 @@ export function periodFacts(b: PeriodBriefing, now = new Date()): string {
     );
   if (b.kind === "monthly")
     lines.push(`Weekly reviews: ${b.back.reviewsByGoal.map((r) => `${goalShortName(r.goal)} ${r.approved} on target, ${r.short} short, ${r.skipped} skipped`).join("; ") || "none"}`);
+  lines.push(`Duty days in ${b.back.label}: ${b.back.duty.sentence}.`);
+  if (b.back.duty.month) lines.push(`${b.back.duty.month.label}: ${b.back.duty.month.sentence}. (He counts reserve days with no flying toward his days off.)`);
   lines.push(`Tasks completed: ${b.back.tasksCompleted.length}${b.back.tasksCompleted.length ? ` (${b.back.tasksCompleted.slice(0, 8).join(", ")})` : ""}`);
   if (b.back.checkpointsHit.length) lines.push(`Checkpoints hit: ${b.back.checkpointsHit.join("; ")}`);
   if (b.back.checkpointsMissed.length) lines.push(`Checkpoints missed: ${b.back.checkpointsMissed.join("; ")}`);
   const a = b.ahead;
   lines.push(`Flying days ahead: ${a.flightDays.length}${a.flightDays.length ? ` (${a.flightDays.map((f) => `${dayLabel(f.date)} ${f.route}`).join("; ")})` : ""}`);
   lines.push(`UTA days ahead: ${a.utaDays.length ? a.utaDays.map(dayLabel).join(", ") : "none"}`);
+  lines.push(`Duty days ahead (${a.label}): ${a.duty.sentence}.`);
+  if (a.markers.length) lines.push(`Situational awareness ahead (info only): ${a.markers.map((m) => `${dayLabel(m.date)} ${m.text}`).join("; ")}`);
   if (a.busiest) lines.push(`Busiest day: ${dayLabel(a.busiest.date)} with ${a.busiest.hours} hours of scheduled items (appointments, tasks and habits — not flight duty unless a flying day is listed above)`);
   lines.push("Weather is not part of this briefing; do not mention weather.");
   lines.push(`Deadlines and checkpoints ahead: ${a.deadlines.length ? a.deadlines.map((d) => `${dayLabel(d.date)} ${d.text}`).join("; ") : "none"}`);
