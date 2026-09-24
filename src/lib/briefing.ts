@@ -219,8 +219,35 @@ export async function fetchWeather(stops: WeatherStop[]): Promise<WeatherResult[
 
 export async function fetchSummary(kind: BriefingKind, facts: string): Promise<string> {
   const { summary } = await callBriefing<{ summary: string }>({ action: "summary", kind, facts });
-  return summary;
+  return stripResultClaims(summary);
 }
+
+/**
+ * The app records sessions (runs done), never results (weight, times). A summary
+ * sentence that claims a current result — "you're at 190 lb", "comfortably under
+ * the 208.5 lb checkpoint" — can only be invented, so it's removed.
+ */
+export function stripResultClaims(text: string): string {
+  const unit = /\d{2,3}(?:\.\d)?\s*(?:lb|lbs|pounds)\b/i;
+  const claim =
+    /\b(you(?:'|\u2019)?re|you are|you(?:'|\u2019)?ve|currently|now at|down to|you weigh|weighing|weighed in|reached|hit (?:your|the)|already (?:under|below|at)|comfortably (?:under|below)|(?:under|below) (?:the|your)|lost \d)/i;
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  const kept = sentences.filter((s) => !(unit.test(s) && claim.test(s)));
+  return kept.join(" ").trim();
+}
+
+/** What one session of a goal is called, e.g. "runs" for a goal whose session is "Run". */
+export function sessionNoun(g: PlanGoal, plural = true): string {
+  const base = (g.weekly_target ?? "session").replace(/^🎯\s*/, "").trim().toLowerCase() || "session";
+  if (!plural) return base;
+  return /s$/.test(base) ? base : /(ch|sh|x)$/.test(base) ? `${base}es` : `${base}s`;
+}
+
+/** Done-ticks exist from the week of 21 Sep 2026; earlier weeks were never tracked. */
+export const TICKS_TRACKED_FROM = new Date(2026, 8, 21);
+
+const NO_RESULTS_RULE =
+  "The app records goal SESSIONS only (e.g. runs done). It has NO weight, time or other result readings: never state or imply a current weight, pounds lost, or being under/over a checkpoint number.";
 
 // ---------------------------------------------------------------------------
 // Goal progress
@@ -372,7 +399,7 @@ export async function buildDaily(now = new Date()): Promise<DailyBriefing> {
 
 export interface PeriodLookBack {
   label: string;
-  goalLines: { goal: PlanGoal; held: number; done: number; target: number; status: WeekReviewRow["status"] | null }[];
+  goalLines: { goal: PlanGoal; held: number; done: number; tracked: boolean; target: number; status: WeekReviewRow["status"] | null }[];
   reviewsByGoal: { goal: PlanGoal; approved: number; short: number; skipped: number }[];
   tasksCompleted: string[];
   checkpointsHit: string[];
@@ -386,7 +413,7 @@ export interface PeriodLookAhead {
   start: Date;
   flightDays: { date: Date; route: string }[];
   utaDays: Date[];
-  busiest: { date: Date; hours: number } | null;
+  busiest: { date: Date; hours: number; items: { name: string; start: Date; end: Date }[] } | null;
   deadlines: { date: Date; text: string }[];
   duty: { stats: DutyStats; sentence: string };
   /** Paydays, bills, bid and open-time windows from info-only calendars. */
@@ -410,7 +437,7 @@ async function lookAhead(label: string, start: Date, end: Date, goals: PlanGoal[
   const flightDays: { date: Date; route: string }[] = [];
   const utaDays: Date[] = [];
   const uta = utaRanges(range.weeks.flatMap((w) => w.busy));
-  let busiest: { date: Date; hours: number } | null = null;
+  let busiest: PeriodLookAhead["busiest"] = null;
   for (let d = new Date(start); d < end; d = addDays(d, 1)) {
     const items = dayItems(range.items, d);
     const route = routeOfDay(items);
@@ -419,10 +446,21 @@ async function lookAhead(label: string, start: Date, end: Date, goals: PlanGoal[
     if (withBusiest) {
       const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), WORK_START_HOUR);
       const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), WORK_END_HOUR);
-      const mins = items
-        .filter((i) => !i.allDay && holdsTime(i))
-        .reduce((acc, i) => acc + Math.max(0, Math.min(i.end.getTime(), dayEnd.getTime()) - Math.max(i.start.getTime(), dayStart.getTime())) / 60000, 0);
-      if (!busiest || mins / 60 > busiest.hours) busiest = { date: new Date(d), hours: Math.round((mins / 60) * 10) / 10 };
+      const counted = items.filter((i) => !i.allDay && holdsTime(i) && !i.enroute);
+      const minsOf = (i: BriefItem) => Math.max(0, Math.min(i.end.getTime(), dayEnd.getTime()) - Math.max(i.start.getTime(), dayStart.getTime())) / 60000;
+      const mins = counted.reduce((acc, i) => acc + minsOf(i), 0);
+      if (!busiest || mins / 60 > busiest.hours) {
+        busiest = {
+          date: new Date(d),
+          hours: Math.round((mins / 60) * 10) / 10,
+          // What makes it busy: the biggest items, in time order.
+          items: [...counted]
+            .sort((a, b) => minsOf(b) - minsOf(a))
+            .slice(0, 4)
+            .sort((a, b) => a.start.getTime() - b.start.getTime())
+            .map((i) => ({ name: i.name, start: i.start, end: i.end })),
+        };
+      }
     }
   }
   const deadlines: { date: Date; text: string }[] = [];
@@ -487,7 +525,7 @@ async function lookBack(label: string, start: Date, end: Date, goals: PlanGoal[]
     goalLines = results.map((r) => {
       const goal = active.find((g) => g.id === r.goalId)!;
       const done = items.filter((i) => i.goal_id === r.goalId && i.done).length;
-      return { goal, held: r.held, done, target: r.target, status: reviews.find((x) => x.goal_id === r.goalId)?.status ?? null };
+      return { goal, held: r.held, done, tracked: end > TICKS_TRACKED_FROM, target: r.target, status: reviews.find((x) => x.goal_id === r.goalId)?.status ?? null };
     });
   }
   const reviewsByGoal = active.map((goal) => {
@@ -571,7 +609,8 @@ function relDay(d: Date, now: Date): string {
 
 export function dailyFacts(b: DailyBriefing, wx: WeatherResult[], now = new Date()): string {
   const lines = [
-    `DAILY BRIEFING for ${dayLabel(b.date)}. Current time: ${hhmm(now)} on ${dayLabel(now)}. Items marked [done] are already over; only talk about what's still ahead unless something was missed.`,
+    `DAILY BRIEFING for ${dayLabel(b.date)}. Briefing generated at ${hhmm(now)} on ${dayLabel(now)} — that is the time now, NOT an event time; always use the times listed next to each item. Items marked [done] are already over; only talk about what's still ahead unless something was missed.`,
+    NO_RESULTS_RULE,
   ];
   if (b.allDay.length) lines.push(`All-day: ${b.allDay.map((i) => i.name).join("; ")}`);
   lines.push(
@@ -582,8 +621,8 @@ export function dailyFacts(b: DailyBriefing, wx: WeatherResult[], now = new Date
   if (wx.length) lines.push(`Airport weather: ${wx.map(wxLine).join(" | ")}`);
   if (b.goals.length) {
     lines.push(
-      `Goals (session counts are sessions, NOT the goal's result; "ticked done" means he confirmed it happened): ${b.goals
-        .map((g) => `goal "${goalShortName(g.goal)}": ${g.done} of ${g.target} weekly sessions ticked done (${g.past} of ${g.scheduled} on the calendar are already past)${g.nextCheckpoint ? `, next checkpoint "${g.nextCheckpoint.title}" in ${g.nextCheckpoint.daysLeft} days` : ""}`)
+      `Goals ("ticked done" means he confirmed the session happened): ${b.goals
+        .map((g) => `goal "${goalShortName(g.goal)}" — its sessions are ${sessionNoun(g.goal)}${g.goal.plan_mode === "count" ? " (counted from his calendar)" : ""}: ${g.done} of ${g.target} ${sessionNoun(g.goal)} ticked done this week (${g.past} of ${g.scheduled} on the calendar are already past)${g.nextCheckpoint ? `, next checkpoint "${g.nextCheckpoint.title}" in ${g.nextCheckpoint.daysLeft} days (not yet measured)` : ""}`)
         .join("; ")}`
     );
     const focus = b.goals.flatMap((g) => g.today.map((e) => ({ g, e })));
@@ -613,11 +652,19 @@ export function dailyFacts(b: DailyBriefing, wx: WeatherResult[], now = new Date
 
 export function periodFacts(b: PeriodBriefing, now = new Date()): string {
   const k = b.kind === "weekly" ? "WEEKLY" : "MONTHLY";
-  const lines = [`${k} BRIEFING. Current time: ${hhmm(now)} on ${dayLabel(now)}. Looking back at ${b.back.label}; looking ahead to ${b.ahead.label}.`];
+  const lines = [
+    `${k} BRIEFING. Briefing generated at ${hhmm(now)} on ${dayLabel(now)} (the time now, not an event). Looking back at ${b.back.label}; looking ahead to ${b.ahead.label}.`,
+    NO_RESULTS_RULE,
+  ];
   if (b.back.goalLines.length)
     lines.push(
-      `Goal sessions held last week (session counts, NOT the goal's result — e.g. runs done, not pounds lost): ${b.back.goalLines
-        .map((g) => `goal "${goalShortName(g.goal)}": ${g.held} of ${g.target} sessions on the calendar, ${g.done} ticked done${g.status ? ` (review ${g.status})` : " (week not reviewed)"}`)
+      `Goal sessions in ${b.back.label}: ${b.back.goalLines
+        .map(
+          (g) =>
+            `goal "${goalShortName(g.goal)}" — ${g.held} of ${g.target} ${sessionNoun(g.goal)} on the calendar, ${
+              g.tracked ? `${g.done} ticked done` : "done-ticks weren't tracked yet that week (don't say none were done)"
+            }${g.status ? ` (review ${g.status})` : " (week not reviewed)"}`
+        )
         .join("; ")}`
     );
   if (b.kind === "monthly")
@@ -632,7 +679,12 @@ export function periodFacts(b: PeriodBriefing, now = new Date()): string {
   lines.push(`UTA days ahead: ${a.utaDays.length ? a.utaDays.map(dayLabel).join(", ") : "none"}`);
   lines.push(`Duty days ahead (${a.label}): ${a.duty.sentence}.`);
   if (a.markers.length) lines.push(`Situational awareness ahead (info only): ${a.markers.map((m) => `${dayLabel(m.date)} ${m.text}`).join("; ")}`);
-  if (a.busiest) lines.push(`Busiest day: ${dayLabel(a.busiest.date)} with ${a.busiest.hours} hours of scheduled items (appointments, tasks and habits — not flight duty unless a flying day is listed above)`);
+  if (a.busiest)
+    lines.push(
+      `Busiest day: ${dayLabel(a.busiest.date)} with ${a.busiest.hours} hours of scheduled items (not flight duty unless a flying day is listed above), mainly ${a.busiest.items
+        .map((i) => `${i.name} ${hhmm(i.start)}–${hhmm(i.end)}`)
+        .join(", ")}`
+    );
   lines.push("Weather is not part of this briefing; do not mention weather.");
   lines.push(`Deadlines and checkpoints ahead: ${a.deadlines.length ? a.deadlines.map((d) => `${dayLabel(d.date)} ${d.text}`).join("; ") : "none"}`);
   return lines.join("\n");
