@@ -7,6 +7,7 @@ import {
   Plus,
   Clock,
   Layers,
+  Lock,
   AlertTriangle,
   Trash2,
   X,
@@ -1138,6 +1139,10 @@ export function CalendarView({
    */
   async function writeBackToGoogle(item: PlacedItem, newStart: Date, newEnd: Date): Promise<boolean> {
     if (!isFromGoogle(item)) return true;
+    if (item.readOnly) {
+      showDragMessage("Locked — Google doesn't let you change events on this calendar", 5000);
+      return false;
+    }
     const res = await updateGoogleSourceEvent(item.googleEventId!, item.googleCalendarId!, newStart, newEnd);
     if (!res.success) {
       showDragMessage(`Not moved — couldn't save it to Google Calendar: ${res.error ?? "unknown error"}`, 7000);
@@ -1809,8 +1814,8 @@ export function CalendarView({
                     return (
                       <div
                         key={`${item.id}-${idx}`}
-                        draggable={!isEnroute}
-                        onDragStart={(e) => { if (!isEnroute) beginDrag(e, item); }}
+                        draggable={!isEnroute && !item.readOnly}
+                        onDragStart={(e) => { if (!isEnroute && !item.readOnly) beginDrag(e, item); }}
                         onDragEnd={endDrag}
                         className={`absolute rounded-md ${colors.soft} ${colors.border} border-l-2 px-2 py-1 text-left overflow-hidden group ${isEnroute ? "border-dashed" : "hover:z-10 hover:scale-[1.02] transition-transform cursor-pointer"} ${isDisplayOnly ? "opacity-60 border-dashed" : ""} ${dragItem && dragItem.id === item.id && dragItem.start.getTime() === item.start.getTime() ? "opacity-40" : ""}`}
                         style={{ top: `${topOffset}px`, height: `${height}px`, ...layoutStyle(layoutByDay[dayIdx][idx]) }}
@@ -1828,6 +1833,7 @@ export function CalendarView({
                             >
                               {item.name}
                             </span>
+                            {item.readOnly && <Lock className="w-2.5 h-2.5 text-slate-500 shrink-0" aria-label="Locked" />}
                           </div>
                           <div className="text-[10px] text-slate-400 mt-0.5 truncate">
                             {formatTimeRange(item.start, effectiveEnd)}
@@ -1841,7 +1847,7 @@ export function CalendarView({
                             </div>
                           )}
                         </button>
-                        {!isEnroute && (
+                        {!isEnroute && !item.readOnly && (
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -1853,7 +1859,7 @@ export function CalendarView({
                           <Trash2 className="w-3 h-3" />
                         </button>
                         )}
-                        {!isEnroute && !isDisplayOnly && (
+                        {!isEnroute && !isDisplayOnly && !item.readOnly && (
                           <div
                             onMouseDown={(e) => handleResizeStart(e, item)}
                             className="absolute bottom-0 left-0 right-0 h-1.5 cursor-ns-resize hover:bg-slate-400/40 transition-colors"
@@ -1941,8 +1947,8 @@ export function CalendarView({
                   return (
                     <div
                       key={`${item.id}-${idx}`}
-                      draggable
-                      onDragStart={(e) => beginDrag(e, item)}
+                      draggable={!item.readOnly}
+                      onDragStart={(e) => { if (!item.readOnly) beginDrag(e, item); }}
                       onDragEnd={endDrag}
                       className={`absolute rounded-md ${colors.soft} ${colors.border} border-l-2 overflow-hidden ${isDisplayOnly ? "opacity-60 border-dashed" : ""} ${dragItem && dragItem.id === item.id && dragItem.start.getTime() === item.start.getTime() ? "opacity-40" : ""}`}
                       style={{ top: `${topOffset}px`, height: `${height}px`, ...layoutStyle(layoutByDay[mobileDayIndex]?.[idx]) }}
@@ -1960,12 +1966,13 @@ export function CalendarView({
                           >
                             {item.name}
                           </span>
+                          {item.readOnly && <Lock className="w-3 h-3 text-slate-500 shrink-0" aria-label="Locked" />}
                         </div>
                         <div className="text-[11px] text-slate-400 mt-0.5 truncate">
                           {formatTimeRange(item.start, effectiveEnd)}
                         </div>
                       </button>
-                      {!isDisplayOnly && (
+                      {!isDisplayOnly && !item.readOnly && (
                         <div
                           onMouseDown={(e) => handleResizeStart(e, item)}
                           className="absolute bottom-0 left-0 right-0 h-1.5 cursor-ns-resize hover:bg-slate-400/40 transition-colors"
@@ -2397,6 +2404,13 @@ function ItemDetail({
           </div>
           <div className="mt-0.5 pl-6 text-xs text-slate-400">{source.detail}</div>
         </div>
+        {item.readOnly ? (
+          <div className="mt-4 flex items-start gap-2 rounded-lg bg-slate-800/70 px-3 py-2 text-xs text-slate-400">
+            <Lock className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <span>Locked. You can only view this calendar in Google, so it can't be moved, edited or deleted here either. You can still set its pillar.</span>
+          </div>
+        ) : (
+        <>
         <button
           onClick={onEdit}
           className="mt-4 w-full py-2 rounded-lg bg-blue-500/10 border border-blue-500/30 text-blue-400 text-sm font-medium hover:bg-blue-500/20 transition-colors flex items-center justify-center gap-2"
@@ -2411,6 +2425,8 @@ function ItemDetail({
           <Trash2 className="w-4 h-4" />
           Delete
         </button>
+        </>
+        )}
       </div>
     </div>
   );
