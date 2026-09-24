@@ -21,6 +21,8 @@ export interface FixedEvent {
   start_time: string;
   end_time: string;
   blocks_schedule?: boolean;
+  /** False when Google doesn't let you change this event (e.g. a calendar you can only view). */
+  google_can_edit?: boolean;
   source_calendar_id?: string;
   is_all_day?: boolean;
   pillar?: LifePillar | null;
@@ -136,6 +138,8 @@ export interface PlacedItem {
   memberIds?: string[];
   sourceCalendarId?: string;
   blocksSchedule?: boolean;
+  /** Locked because Google doesn't let you change it: no drag, resize, edit or delete. */
+  readOnly?: boolean;
   googleEventId?: string;
   googleCalendarId?: string;
   googleCalendarRole?: string;

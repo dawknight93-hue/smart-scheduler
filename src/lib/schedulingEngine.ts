@@ -442,6 +442,7 @@ export function runEngine(
         isBatch: false,
         sourceCalendarId: ev.source_calendar_id,
         blocksSchedule: ev.blocks_schedule !== false,
+        readOnly: ev.google_can_edit === false,
         isAllDay: ev.is_all_day ?? false,
       });
     }
