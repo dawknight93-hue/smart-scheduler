@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, CalendarRange, ClipboardCheck, CloudLightning, Loader2, Plane, RefreshCw, Sparkles, Sunrise, Target } from "lucide-react";
 import { getPillarColor } from "@/lib/types";
 import { goalShortName } from "@/lib/goalPlanning";
+import { getWeekStart } from "@/lib/schedulingEngine";
+import { setCountedDone, setSessionDone, type DayEntry } from "@/lib/goalDaily";
 import {
   buildDaily,
   buildMonthly,
@@ -147,7 +149,7 @@ export function BriefingView({ onOpenReview }: { onOpenReview: () => void }) {
       </div>
 
       {loading ? null : daily ? (
-        <Daily b={daily} weather={weather} wxState={wxState} />
+        <Daily b={daily} weather={weather} wxState={wxState} onChange={setDaily} />
       ) : period ? (
         <Period b={period} onOpenReview={onOpenReview} />
       ) : null}
@@ -167,7 +169,29 @@ function Section({ icon, title, children }: { icon: React.ReactNode; title: stri
   );
 }
 
-function Daily({ b, weather, wxState }: { b: DailyBriefing; weather: WeatherResult[]; wxState: string }) {
+function Daily({ b, weather, wxState, onChange }: { b: DailyBriefing; weather: WeatherResult[]; wxState: string; onChange: (b: DailyBriefing) => void }) {
+  const [tickError, setTickError] = useState<string | null>(null);
+  async function tick(goalId: string, e: DayEntry, done: boolean) {
+    const g = b.goals.find((x) => x.goal.id === goalId);
+    if (!g) return;
+    setTickError(null);
+    try {
+      const weekStart = getWeekStart(b.date);
+      if (e.counted) await setCountedDone(g.goal, e.counted, weekStart, done);
+      else if (e.habitId && e.start) await setSessionDone(g.goal, { item: e.item, habitId: e.habitId, start: e.start, minutes: e.minutes }, weekStart, done);
+      // Update in place; the written summary refreshes next time the briefing opens.
+      onChange({
+        ...b,
+        goals: b.goals.map((x) =>
+          x.goal.id !== goalId
+            ? x
+            : { ...x, done: x.done + (done === e.done ? 0 : done ? 1 : -1), today: x.today.map((t) => (t.key === e.key ? { ...t, done } : t)) }
+        ),
+      });
+    } catch (err) {
+      setTickError(err instanceof Error ? err.message : "Couldn't save");
+    }
+  }
   return (
     <>
       <Section icon={<CalendarRange className="w-4 h-4 text-blue-400" />} title={`Today · ${dayLabel(b.date)}`}>
@@ -215,6 +239,7 @@ function Daily({ b, weather, wxState }: { b: DailyBriefing; weather: WeatherResu
 
       {b.goals.length > 0 && (
         <Section icon={<Target className="w-4 h-4 text-blue-300" />} title="Goals this week">
+          {tickError && <p className="mb-2 text-xs text-rose-300">{tickError}</p>}
           <ul className="space-y-3">
             {b.goals.map((g) => {
               const c = getPillarColor(g.goal.pillar);
@@ -229,8 +254,28 @@ function Daily({ b, weather, wxState }: { b: DailyBriefing; weather: WeatherResu
                   <div className="mt-1 h-1.5 rounded-full bg-slate-800">
                     <div className="h-1.5 rounded-full bg-blue-500" style={{ width: `${pct}%` }} />
                   </div>
+                  {g.today.length > 0 && (
+                    <ul className="mt-1.5 space-y-1">
+                      {g.today.map((e) => (
+                        <li key={e.key} className="flex items-start gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={e.done}
+                            onChange={(ev) => tick(g.goal.id, e, ev.target.checked)}
+                            className="mt-1 accent-emerald-500"
+                            aria-label={`Mark ${e.focus ?? e.title} done`}
+                          />
+                          <span className="w-12 shrink-0 tabular-nums text-slate-400">{e.start ? hhmm(e.start) : "all day"}</span>
+                          <span className="min-w-0">
+                            <span className={e.done ? "text-slate-500 line-through" : "text-slate-100"}>{e.focus ?? e.title}</span>
+                            {e.steps.length > 0 && !e.done && <span className="block text-xs text-slate-500">{e.steps.join(" · ")}</span>}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                   <p className="mt-1 text-xs text-slate-400">
-                    {g.scheduled} on the calendar this week
+                    {g.done} ticked done · {g.scheduled} on the calendar this week
                     {g.nextCheckpoint ? ` · next checkpoint: ${g.nextCheckpoint.title} in ${g.nextCheckpoint.daysLeft} day${g.nextCheckpoint.daysLeft === 1 ? "" : "s"}` : ""}
                     {g.deadlineDays !== null ? ` · deadline in ${g.deadlineDays} days` : ""}
                   </p>
@@ -340,7 +385,8 @@ function Period({ b, onOpenReview }: { b: PeriodBriefing; onOpenReview: () => vo
               <li key={g.goal.id} className="flex items-center gap-2 text-sm">
                 <span className={`w-2 h-2 rounded-full ${getPillarColor(g.goal.pillar).dot}`} />
                 <span className="truncate text-slate-200">{goalShortName(g.goal)}</span>
-                <span className={`ml-auto tabular-nums ${g.held >= g.target ? "text-emerald-300" : "text-amber-300"}`}>{g.held}/{g.target}</span>
+                <span className="ml-auto tabular-nums text-xs text-slate-400" title="Sessions on the calendar">{g.held}/{g.target} planned</span>
+                <span className={`tabular-nums ${g.done >= g.target ? "text-emerald-300" : "text-amber-300"}`} title="Sessions ticked done">{g.done} done</span>
                 <span className="w-24 text-right text-xs text-slate-500">{g.status ? `review ${g.status}` : "not reviewed"}</span>
               </li>
             ))}

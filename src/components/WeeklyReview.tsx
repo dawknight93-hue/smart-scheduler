@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, Loader2, X, Flag, Hourglass } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, Loader2, X, Flag, Hourglass, RefreshCw } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { addDays, getWeekStart } from "@/lib/schedulingEngine";
 import { scheduleAutoPush } from "@/lib/gcalSync";
@@ -22,6 +22,7 @@ import {
   type VerifyResult,
   type WeekReviewRow,
 } from "@/lib/goalPlanning";
+import { goalDayEntries, loadDailyItems, setCountedDone, setSessionDone, writeDailyPlan, type DailyItem, type DayEntry } from "@/lib/goalDaily";
 
 const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 const dayLabel = (d: Date) => d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
@@ -37,6 +38,8 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [verify, setVerify] = useState<VerifyResult[] | null>(null);
   const [verifying, setVerifying] = useState(false);
+  const [items, setItems] = useState<DailyItem[]>([]);
+  const [rewriting, setRewriting] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -51,6 +54,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
       const ready = all.filter((g) => g.status === "active" && g.plan_mode && (g.cadence_sessions_per_week ?? 0) > 0);
       setPlans(planWeek(ready, week));
       setReviews(await loadReviews(weekStart));
+      setItems(await loadDailyItems(weekStart, addDays(weekStart, 7)));
       setRemoved(new Set());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't load the review");
@@ -107,8 +111,14 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
   async function runVerify() {
     setVerifying(true);
     try {
-      const week = await loadWeekData(weekStart);
-      setVerify(verifyWeek(plans.map((p) => p.goal), week));
+      const [week, fresh] = await Promise.all([loadWeekData(weekStart), loadDailyItems(weekStart, addDays(weekStart, 7))]);
+      setItems(fresh);
+      const doneByGoal = new Map<string, number>();
+      for (const p of plans) {
+        const n = goalDayEntries(p.goal, sessionsOf(p), p.counted, fresh).filter((e) => e.done).length;
+        doneByGoal.set(p.goal.id, n);
+      }
+      setVerify(verifyWeek(plans.map((p) => p.goal), week, doneByGoal));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't check the week");
     } finally {
@@ -134,6 +144,35 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
       setError(e instanceof Error ? e.message : "Couldn't update the goal");
     } finally {
       setBusyGoal(null);
+    }
+  }
+
+  async function toggleDone(plan: GoalWeekPlan, entry: DayEntry, done: boolean) {
+    setError(null);
+    try {
+      if (entry.counted) {
+        const saved = await setCountedDone(plan.goal, entry.counted, weekStart, done);
+        setItems((xs) => [...xs.filter((x) => x.id !== saved.id), saved]);
+      } else if (entry.habitId && entry.start) {
+        await setSessionDone(plan.goal, { item: entry.item, habitId: entry.habitId, start: entry.start, minutes: entry.minutes }, weekStart, done);
+        setItems(await loadDailyItems(weekStart, addDays(weekStart, 7)));
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't save");
+    }
+  }
+
+  async function rewriteFocus(plan: GoalWeekPlan) {
+    setRewriting(plan.goal.id);
+    setError(null);
+    try {
+      const sessions = sessionsOf(plan).map((s) => ({ habitId: s.id, start: s.start, end: s.end }));
+      await writeDailyPlan(plan.goal, sessions, weekStart, items);
+      setItems(await loadDailyItems(weekStart, addDays(weekStart, 7)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't write the daily plan");
+    } finally {
+      setRewriting(null);
     }
   }
 
@@ -217,6 +256,10 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
               onApprove={() => approve(plan)}
               onSkip={() => skip(plan)}
               onMilestone={(id, done) => toggleMilestone(plan.goal, id, done)}
+              entries={goalDayEntries(plan.goal, sessionsOf(plan), plan.counted, items)}
+              onDone={(e, done) => toggleDone(plan, e, done)}
+              onRewrite={() => rewriteFocus(plan)}
+              rewriting={rewriting === plan.goal.id}
             />
           ))}
 
@@ -247,6 +290,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
                         <span className="text-slate-200 truncate">{g ? goalShortName(g) : v.goalId}</span>
                         <span className="ml-auto tabular-nums text-slate-400">
                           {v.held}/{v.target}
+                          <span className={v.done >= v.target ? "text-emerald-300" : ""}> · {v.done} done</span>
                           {v.offCalendar > 0 && <span className="text-amber-300"> · {v.offCalendar} bumped to the tray</span>}
                         </span>
                       </li>
@@ -272,6 +316,10 @@ function GoalCard({
   onApprove,
   onSkip,
   onMilestone,
+  entries,
+  onDone,
+  onRewrite,
+  rewriting,
 }: {
   plan: GoalWeekPlan;
   weekStart: Date;
@@ -282,6 +330,10 @@ function GoalCard({
   onApprove: () => void;
   onSkip: () => void;
   onMilestone: (id: string, done: boolean) => void;
+  entries: DayEntry[];
+  onDone: (e: DayEntry, done: boolean) => void;
+  onRewrite: () => void;
+  rewriting: boolean;
 }) {
   const g = plan.goal;
   const colors = getPillarColor(g.pillar);
@@ -320,21 +372,23 @@ function GoalCard({
           <p className={`text-xs mb-1.5 ${have >= plan.target ? "text-emerald-300" : "text-amber-300"}`}>
             {have} of {plan.target} on the calendar this week
           </p>
-          <ul className="space-y-1">
-            {plan.counted.map((c) => (
-              <li key={c.id} className="text-xs text-slate-300 tabular-nums">
-                {dayLabel(c.start)} {c.allDay ? "all day" : hhmm(c.start)} · {c.name}
-              </li>
-            ))}
-          </ul>
+          <DayList entries={entries} onDone={onDone} />
           {have < plan.target && (
             <p className="text-xs text-slate-500 mt-1.5">Short — add or move sessions at the source (e.g. the Runna app), then reopen the review.</p>
           )}
         </div>
       ) : (
         <div className="mt-3">
-          {plan.existing.length > 0 && (
-            <p className="text-xs text-slate-400 mb-1.5">{plan.existing.length} already on the calendar this week.</p>
+          {entries.length > 0 && (
+            <div className="mb-2">
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-[11px] uppercase tracking-wide text-slate-500">Day by day · {entries.filter((e) => e.done).length}/{entries.length} done</p>
+                <button onClick={onRewrite} disabled={rewriting} className="flex items-center gap-1 text-[11px] text-blue-400 hover:underline disabled:opacity-50" title="Write a fresh focus for every session not yet done">
+                  <RefreshCw className={`w-3 h-3 ${rewriting ? "animate-spin" : ""}`} /> {rewriting ? "Writing…" : entries.some((e) => !e.focus) ? "Write focus" : "Rewrite focus"}
+                </button>
+              </div>
+              <DayList entries={entries} onDone={onDone} />
+            </div>
           )}
           {!review && plan.proposed.length > 0 && (
             <ul className="space-y-1">
@@ -389,5 +443,40 @@ function GoalCard({
         <p className="mt-1.5 text-[11px] text-slate-500">Approving now records this week as short ({afterApproval}/{plan.target}).</p>
       )}
     </div>
+  );
+}
+
+function sessionsOf(plan: GoalWeekPlan) {
+  return plan.existing.map((h) => ({ id: h.id, start: new Date(h.search_start), end: new Date(h.search_end) }));
+}
+
+function DayList({ entries, onDone }: { entries: DayEntry[]; onDone: (e: DayEntry, done: boolean) => void }) {
+  const now = new Date();
+  return (
+    <ul className="space-y-1.5">
+      {entries.map((e) => {
+        const past = (e.start ?? new Date(e.day.getTime() + 86400000)) < now;
+        return (
+          <li key={e.key} className="flex items-start gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={e.done}
+              onChange={(ev) => onDone(e, ev.target.checked)}
+              className="mt-0.5 accent-emerald-500"
+              aria-label={`Mark ${e.focus ?? e.title} done`}
+            />
+            <span className={`w-24 shrink-0 tabular-nums ${e.done ? "text-slate-500" : "text-slate-400"}`}>
+              {e.day.toLocaleDateString("en-US", { weekday: "short", day: "numeric" })} {e.start ? hhmm(e.start) : "all day"}
+            </span>
+            <span className="min-w-0">
+              <span className={e.done ? "text-slate-500 line-through" : past ? "text-amber-200/90" : "text-slate-200"}>{e.focus ?? e.title}</span>
+              {e.steps.length > 0 && !e.done && (
+                <span className="block text-slate-500">{e.steps.join(" · ")}</span>
+              )}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
