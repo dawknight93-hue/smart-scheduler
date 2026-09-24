@@ -611,6 +611,7 @@ export function dailyFacts(b: DailyBriefing, wx: WeatherResult[], now = new Date
   const lines = [
     `DAILY BRIEFING for ${dayLabel(b.date)}. Briefing generated at ${hhmm(now)} on ${dayLabel(now)} — that is the time now, NOT an event time; always use the times listed next to each item. Items marked [done] are already over; only talk about what's still ahead unless something was missed.`,
     NO_RESULTS_RULE,
+    "SCOPE: this is the DAILY briefing — cover today and tomorrow morning only. Do not list things later in the week (paydays, open-time windows, reserve blocks or deadlines beyond tomorrow); the weekly briefing covers those. Keep actions exactly as given (proffer or RAP; confirm the assignment by the stated time).",
   ];
   if (b.allDay.length) lines.push(`All-day: ${b.allDay.map((i) => i.name).join("; ")}`);
   lines.push(
@@ -622,7 +623,7 @@ export function dailyFacts(b: DailyBriefing, wx: WeatherResult[], now = new Date
   if (b.goals.length) {
     lines.push(
       `Goals ("ticked done" means he confirmed the session happened): ${b.goals
-        .map((g) => `goal "${goalShortName(g.goal)}" — its sessions are ${sessionNoun(g.goal)}${g.goal.plan_mode === "count" ? " (counted from his calendar)" : ""}: ${g.done} of ${g.target} ${sessionNoun(g.goal)} ticked done this week (${g.past} of ${g.scheduled} on the calendar are already past)${g.nextCheckpoint ? `, next checkpoint "${g.nextCheckpoint.title}" in ${g.nextCheckpoint.daysLeft} days (not yet measured)` : ""}`)
+        .map((g) => `goal "${goalShortName(g.goal)}" — its sessions are ${sessionNoun(g.goal)}${g.goal.plan_mode === "count" ? " (counted from his calendar)" : ""}: ${g.done} of ${g.target} ${sessionNoun(g.goal)} ticked done so far this week${g.nextCheckpoint ? `, next checkpoint "${g.nextCheckpoint.title}" in ${g.nextCheckpoint.daysLeft} days (not yet measured)` : ""}`)
         .join("; ")}`
     );
     const focus = b.goals.flatMap((g) => g.today.map((e) => ({ g, e })));
@@ -639,7 +640,7 @@ export function dailyFacts(b: DailyBriefing, wx: WeatherResult[], now = new Date
       `SITUATIONAL AWARENESS (from info-only calendars — context and actions, not booked time): ${[
         ...aw.notes.map((n) => `${n.text}${n.action ? ` Action: ${n.action}` : ""}`),
         ...aw.fyi.map(({ item: i }) => `FYI: ${i.name.replace(/^[\s,]+/, "")}${i.allDay ? " (all day)" : ` ${hhmm(i.start)}–${hhmm(i.end)}`}`),
-      ].join(" | ")}${aw.comingUp.length ? ` | Coming up: ${aw.comingUp.join("; ")}` : ""}`
+      ].join(" | ")}`
     );
   }
   lines.push(b.headsUp.length ? `Heads-up: ${b.headsUp.join("; ")}` : "Heads-up: none.");
