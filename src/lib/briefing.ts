@@ -611,7 +611,7 @@ export function dailyFacts(b: DailyBriefing, wx: WeatherResult[], now = new Date
   const lines = [
     `DAILY BRIEFING for ${dayLabel(b.date)}. Briefing generated at ${hhmm(now)} on ${dayLabel(now)} — that is the time now, NOT an event time; always use the times listed next to each item. Items marked [done] are already over; only talk about what's still ahead unless something was missed.`,
     NO_RESULTS_RULE,
-    "SCOPE: this is the DAILY briefing — cover today and tomorrow morning only. Do not list things later in the week (paydays, open-time windows, reserve blocks or deadlines beyond tomorrow); the weekly briefing covers those. Keep actions exactly as given (proffer or RAP; confirm the assignment by the stated time).",
+    "SCOPE: this is the DAILY briefing — cover today and tomorrow morning only. Do not list things later in the week (paydays, open-time windows, reserve blocks or deadlines beyond tomorrow); the weekly briefing covers those. Keep actions exactly as given (proffer or RAP; confirm the assignment by the stated time). Situational-awareness items are not his appointments — e.g. 'Jatara: …' is Jatara's own event — so never call them his first or scheduled item.",
   ];
   if (b.allDay.length) lines.push(`All-day: ${b.allDay.map((i) => i.name).join("; ")}`);
   lines.push(
