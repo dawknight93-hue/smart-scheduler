@@ -1394,7 +1394,7 @@ export function CalendarView({
   return (
     <>
       {/* Header */}
-      <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur-sm sticky top-0 z-30">
+      <header className="shrink-0 border-b border-slate-800 bg-slate-900/80 backdrop-blur-sm z-30">
         <div className="px-4 sm:px-6 py-3 flex items-center gap-3">
           {/* Logo + title */}
           <div className="flex items-center gap-2.5 shrink-0">
@@ -1661,8 +1661,8 @@ export function CalendarView({
         </div>
       </header>
 
-      {/* Calendar */}
-      <div className="flex-1 overflow-auto">
+      {/* Calendar — the only part that scrolls; everything above it stays put */}
+      <div className="flex-1 min-h-0 overflow-auto">
         {loading ? (
           <div className="flex items-center justify-center h-96 text-slate-500">
             <div className="animate-pulse">Loading schedule…</div>
@@ -1683,8 +1683,10 @@ export function CalendarView({
               />
             ) : (
               <>
+            {/* Day headers + all-day row, frozen at the top while the hours scroll */}
+            <div className="sticky top-0 z-30 bg-slate-900 shadow-[0_1px_0_0_rgb(30_41_59)]">
             {/* Day headers */}
-            <div className="flex sticky top-0 z-20 bg-slate-900 border-b border-slate-800">
+            <div className="flex bg-slate-900 border-b border-slate-800">
               <div className="w-14 shrink-0 border-r border-slate-800" />
               {DAYS.map((day, i) => {
                 const date = addDays(weekStart, i);
@@ -1713,7 +1715,7 @@ export function CalendarView({
             </div>
 
             {/* All-day events row */}
-            <div className="flex border-b border-slate-800 bg-slate-900/50">
+            <div className="flex border-b border-slate-800 bg-slate-900">
               <div className="w-14 shrink-0 border-r border-slate-800 flex items-center justify-end pr-2 py-1">
                 <span className="text-[10px] text-slate-500 uppercase tracking-wide">All day</span>
               </div>
@@ -1768,7 +1770,9 @@ export function CalendarView({
                   );
                 })}
               </div>
-            </div>{/* Time grid */}
+            </div>
+            </div>
+            {/* Time grid */}
             <div className="flex">
               {/* Hour labels */}
               <div className="w-14 shrink-0 border-r border-slate-800">
@@ -1896,7 +1900,7 @@ export function CalendarView({
           {/* Single-day view (mobile, and desktop Day view) */}
           <div className={showDayView ? "flex flex-col" : "hidden"}>
             {allDaySpans.filter((s) => mobileDayIndex >= s.startIdx && mobileDayIndex <= s.endIdx).length > 0 && (
-              <div className="border-b border-slate-800 bg-slate-900/50 px-3 py-2 space-y-1">
+              <div className="sticky top-0 z-30 border-b border-slate-800 bg-slate-900 px-3 py-2 space-y-1">
                 {allDaySpans
                   .filter((s) => mobileDayIndex >= s.startIdx && mobileDayIndex <= s.endIdx)
                   .map((span, idx) => {
@@ -2002,51 +2006,50 @@ export function CalendarView({
               </div>
             </div>
           </div>
+        {/* Items the engine couldn't put on the calendar this week, with why */}
+        {notScheduled.length > 0 && (
+          <div className="border-t border-slate-800 bg-slate-900/50 px-6 py-3">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-400" />
+              <span className="text-sm font-medium text-amber-400">
+                {notScheduled.length} item{notScheduled.length > 1 ? "s" : ""} not on your calendar this week
+              </span>
+            </div>
+            <p className="mt-1 mb-2 text-xs text-slate-400">
+              These don't appear here or in Google Calendar. Tap one to change its time window or duration, or to delete it.
+            </p>
+            <div className="flex flex-col gap-2">
+              {notScheduled.map((u) => {
+                const overdue = u.reason === "window_ended" && u.kind === "Task";
+                return (
+                  <button
+                    key={u.id}
+                    type="button"
+                    onClick={() => editUnscheduled(u)}
+                    disabled={u.isBatch}
+                    className={`text-left px-3 py-2 rounded-lg border text-xs ${
+                      overdue
+                        ? "bg-red-500/10 border-red-500/30 text-red-300 hover:bg-red-500/15"
+                        : "bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/15"
+                    } disabled:cursor-default`}
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{u.name}</span>
+                      <span className="opacity-70">
+                        {u.kind} · {TIER_LABELS[u.tier]}
+                      </span>
+                      {overdue && <span className="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase">Overdue</span>}
+                    </div>
+                    <div className="mt-0.5 text-slate-300/80">{unscheduledReasonText(u)}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {showConnections && <CalendarConnectionsPanel onClose={() => setShowConnections(false)} />}
       </div>
-
-      {/* Items the engine couldn't put on the calendar this week, with why */}
-      {notScheduled.length > 0 && (
-        <div className="border-t border-slate-800 bg-slate-900/50 px-6 py-3">
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-amber-400" />
-            <span className="text-sm font-medium text-amber-400">
-              {notScheduled.length} item{notScheduled.length > 1 ? "s" : ""} not on your calendar this week
-            </span>
-          </div>
-          <p className="mt-1 mb-2 text-xs text-slate-400">
-            These don't appear here or in Google Calendar. Tap one to change its time window or duration, or to delete it.
-          </p>
-          <div className="flex flex-col gap-2">
-            {notScheduled.map((u) => {
-              const overdue = u.reason === "window_ended" && u.kind === "Task";
-              return (
-                <button
-                  key={u.id}
-                  type="button"
-                  onClick={() => editUnscheduled(u)}
-                  disabled={u.isBatch}
-                  className={`text-left px-3 py-2 rounded-lg border text-xs ${
-                    overdue
-                      ? "bg-red-500/10 border-red-500/30 text-red-300 hover:bg-red-500/15"
-                      : "bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/15"
-                  } disabled:cursor-default`}
-                >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-medium">{u.name}</span>
-                    <span className="opacity-70">
-                      {u.kind} · {TIER_LABELS[u.tier]}
-                    </span>
-                    {overdue && <span className="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase">Overdue</span>}
-                  </div>
-                  <div className="mt-0.5 text-slate-300/80">{unscheduledReasonText(u)}</div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {showConnections && <CalendarConnectionsPanel onClose={() => setShowConnections(false)} />}
 
       {/* Add modal */}
       {showAdd && (
