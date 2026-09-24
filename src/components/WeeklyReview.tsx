@@ -370,7 +370,7 @@ function GoalCard({
       {isCount ? (
         <div className="mt-3">
           <p className={`text-xs mb-1.5 ${have >= plan.target ? "text-emerald-300" : "text-amber-300"}`}>
-            {have} of {plan.target} on the calendar this week
+            {have} of {plan.target} on the calendar this week · {entries.filter((e) => e.done).length} ticked done
           </p>
           <DayList entries={entries} onDone={onDone} />
           {have < plan.target && (
