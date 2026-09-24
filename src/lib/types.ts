@@ -40,6 +40,8 @@ export interface FixedEvent {
 export interface Habit {
   id: string;
   name: string;
+  /** Set when the Weekly Review created this habit as a session for a goal. */
+  goal_id?: string | null;
   tier: number;
   duration_min: number;
   search_start: string;
