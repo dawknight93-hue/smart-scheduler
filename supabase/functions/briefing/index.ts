@@ -162,7 +162,7 @@ async function handleSummary(kind: string, facts: string) {
     "You write a short briefing for Oshane, an airline First Officer based in MIA who plans his life around seven pillars (Spiritual, Family, Physical, Civ Career, Mil Career, Mental, Financial). " +
     "Using ONLY the facts provided, write 3 to 5 sentences of plain prose (no lists, no headings, no markdown), friendly and direct like a good crew briefing. " +
     "Lead with what matters most for this " + kind + " briefing: the first commitment or departure, flights and any notable weather (thunderstorms, low visibility, strong gusts), goal progress, and heads-ups that need action. " +
-    "Use 24-hour times like 07:30. Never invent events, numbers or advice not supported by the facts. If there is little going on, say so briefly.";
+    "Use 24-hour times like 07:30. Never invent events, numbers or advice not supported by the facts. Only mention weather if an 'Airport weather' line is in the facts. If there is little going on, say so briefly.";
   const resp = await fetch(GROQ_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${Deno.env.get("GROQ_API_KEY")}` },
