@@ -23,6 +23,8 @@ export interface FixedEvent {
   blocks_schedule?: boolean;
   /** False when Google doesn't let you change this event (e.g. a calendar you can only view). */
   google_can_edit?: boolean;
+  /** Busy time the engine must respect but not draw (e.g. Enroute drive blocks, drawn separately). */
+  engine_only?: boolean;
   source_calendar_id?: string;
   is_all_day?: boolean;
   pillar?: LifePillar | null;
@@ -50,6 +52,10 @@ export interface Habit {
   search_end: string;
   context: ContextTag;
   pillar?: LifePillar | null;
+  /** Focus / Routine / Light. Null = guess from the title, context and length. */
+  effort?: "focus" | "routine" | "light" | null;
+  /** True when the effort was guessed, false when you set it. */
+  effort_auto?: boolean;
   recurrence_enabled?: boolean;
   recurrence_frequency?: "daily" | "weekly" | "monthly" | null;
   recurrence_interval?: number | null;
@@ -72,6 +78,10 @@ export interface Task {
   deadline: string;
   context: ContextTag;
   pillar?: LifePillar | null;
+  /** Focus / Routine / Light. Null = guess from the title, context and length. */
+  effort?: "focus" | "routine" | "light" | null;
+  /** True when the effort was guessed, false when you set it. */
+  effort_auto?: boolean;
   completed_at: string | null;
   recurrence_enabled?: boolean;
   recurrence_frequency?: "daily" | "weekly" | "monthly" | null;
@@ -140,6 +150,10 @@ export interface PlacedItem {
   blocksSchedule?: boolean;
   /** Locked because Google doesn't let you change it: no drag, resize, edit or delete. */
   readOnly?: boolean;
+  effort?: "focus" | "routine" | "light";
+  effortAuto?: boolean;
+  /** Why the scheduler put it here, in plain words. */
+  placementReason?: string;
   googleEventId?: string;
   googleCalendarId?: string;
   googleCalendarRole?: string;

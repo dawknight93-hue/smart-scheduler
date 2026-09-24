@@ -8,6 +8,7 @@ import type {
   ContextTag,
   LifePillar,
 } from "./types";
+import { BAND_FIT, BAND_LABELS, EFFORT_LABELS, energyBand, guessEffort, maxEffort, type Effort } from "./effort";
 
 export const WORK_START_HOUR = 6;
 export const WORK_END_HOUR = 22;
@@ -141,6 +142,11 @@ function slotKey(d: Date): string {
   return d.toISOString();
 }
 
+/** Enroute drive blocks as busy time for the engine (they're drawn separately). */
+export function enrouteAsBusy(blocks: { id: string; name: string; start_time: string; end_time: string }[]): FixedEvent[] {
+  return blocks.map((b) => ({ id: `enroute-${b.id}`, name: b.name, start_time: b.start_time, end_time: b.end_time, blocks_schedule: true, engine_only: true }));
+}
+
 export function buildBusy(
   fixed: FixedEvent[],
   allSlots: Date[]
@@ -170,6 +176,10 @@ interface PlacedContext {
   context: ContextTag;
 }
 
+/**
+ * A free run of slots for the item. Without a scorer it's the earliest one
+ * that fits; with a scorer it's the best-scoring one (ties go to the earlier).
+ */
 function findSlot(
   busy: Set<string>,
   allSlots: Date[],
@@ -177,8 +187,11 @@ function findSlot(
   searchStart: Date,
   searchEnd: Date,
   placedContexts: PlacedContext[],
-  itemContext: ContextTag
+  itemContext: ContextTag,
+  scorer?: (start: Date, end: Date) => number
 ): Date[] | null {
+  let best: Date[] | null = null;
+  let bestScore = -Infinity;
   const needed = Math.max(1, Math.ceil(durationMin / SLOT_MINUTES));
   const reservedSpanMs = needed * SLOT_MINUTES * 60 * 1000;
   const bufferMs = ERRAND_TRAVEL_BUFFER_MIN * 60 * 1000;
@@ -219,9 +232,139 @@ function findSlot(
     }
     if (blocked) continue;
 
-    return window;
+    if (!scorer) return window;
+    const score = scorer(itemStart, itemEnd);
+    if (score > bestScore) {
+      bestScore = score;
+      best = window;
+    }
   }
-  return null;
+  return best;
+}
+
+// ---------------------------------------------------------------------------
+// Energy-aware placement
+//
+// Hard rules (calendars, UTA, quiet hours, errand gaps, the item's own window)
+// decide where an item CAN go. Among those slots, the scheduler picks the one
+// that scores best: effort vs. time-of-day energy, how soon, how full the day
+// already is, a short gap after meetings, and trip rules. A slot a trip rule
+// rules out is only used when nothing else fits, and the reason says so.
+
+/** Hours after landing at home during which no focus work is scheduled. */
+export const RECOVERY_HOURS = 8;
+/** A departure from home before this time (minutes after midnight) is an early report. */
+export const EARLY_REPORT_BEFORE_MIN = 9 * 60;
+/** The evening before an early report goes light from this time on. */
+export const EARLY_NIGHT_FROM_MIN = 19 * 60;
+const TRIP_RULE_PENALTY = 500;
+/** Minutes before a departure you're reporting / at the gate. */
+export const REPORT_BUFFER_MIN = 45;
+/** Ground time away from home shorter than this is a connection (on duty), not a layover. */
+export const CONNECTION_MAX_HOURS = 3;
+const AWAY_BLOCKED_CONTEXTS: ContextTag[] = ["home", "errand"];
+const FLIGHT_TITLE = /([A-Z]{3})\u200b?\u2192\u200b?([A-Z]{3})\s*\u2022/;
+const HOME_BASE = "MIA";
+const HOUR_MS = 3600000;
+const DAY_MS = 24 * HOUR_MS;
+
+interface PlanContext {
+  /** Booked minutes per home date ("y-m-d"). */
+  load: Map<string, number>;
+  meetingEnds: number[];
+  recovery: [number, number][];
+  earlyNights: Set<string>;
+  reserveDays: Set<string>;
+}
+
+function homeDayKey(d: Date): string {
+  const w = homeWallParts(d);
+  return `${w.y}-${w.mo}-${w.d}`;
+}
+
+/** Calendar dates covered by an all-day event (stored at UTC midnight), as home-date keys. */
+function allDayKeys(ev: FixedEvent): string[] {
+  const keys: string[] = [];
+  const s = new Date(ev.start_time);
+  const e = new Date(ev.end_time);
+  for (let t = Date.UTC(s.getUTCFullYear(), s.getUTCMonth(), s.getUTCDate()); t < e.getTime(); t += DAY_MS) {
+    const d = new Date(t);
+    keys.push(`${d.getUTCFullYear()}-${d.getUTCMonth() + 1}-${d.getUTCDate()}`);
+    if (keys.length > 60) break;
+  }
+  if (!keys.length) keys.push(`${s.getUTCFullYear()}-${s.getUTCMonth() + 1}-${s.getUTCDate()}`);
+  return keys;
+}
+
+function buildPlanContext(fixed: FixedEvent[]): PlanContext {
+  const ctx: PlanContext = { load: new Map(), meetingEnds: [], recovery: [], earlyNights: new Set(), reserveDays: new Set() };
+  for (const ev of fixed) {
+    if (ev.is_all_day) {
+      if (/\breserve\b/i.test(ev.name)) for (const k of allDayKeys(ev)) ctx.reserveDays.add(k);
+      continue;
+    }
+    const s = new Date(ev.start_time);
+    const e = new Date(ev.end_time);
+    if (ev.blocks_schedule !== false) {
+      const k = homeDayKey(s);
+      ctx.load.set(k, (ctx.load.get(k) ?? 0) + Math.max(0, (e.getTime() - s.getTime()) / 60000));
+      ctx.meetingEnds.push(e.getTime());
+    }
+    const leg = FLIGHT_TITLE.exec(ev.name);
+    if (leg) {
+      if (leg[2] === HOME_BASE) ctx.recovery.push([e.getTime(), e.getTime() + RECOVERY_HOURS * HOUR_MS]);
+      if (leg[1] === HOME_BASE) {
+        const w = homeWallParts(s);
+        if (w.h * 60 + w.mi < EARLY_REPORT_BEFORE_MIN) ctx.earlyNights.add(homeDayKey(new Date(s.getTime() - 12 * HOUR_MS)));
+      }
+    }
+  }
+  return ctx;
+}
+
+interface SlotScore {
+  score: number;
+  reason: string;
+}
+
+function scoreSlot(ctx: PlanContext, effort: Effort, tier: number, earliest: Date, start: Date, end: Date): SlotScore {
+  const ws = homeWallParts(start);
+  const we = homeWallParts(new Date(end.getTime() - 60000));
+  const startMin = ws.h * 60 + ws.mi;
+  const bandStart = energyBand(startMin);
+  const bandEnd = energyBand(we.h * 60 + we.mi);
+  let score = Math.min(BAND_FIT[effort][bandStart], BAND_FIT[effort][bandEnd]);
+
+  // Sooner is better, more so for top-tier items.
+  const wait = Math.max(0, start.getTime() - earliest.getTime());
+  score -= (wait / DAY_MS) * (tier <= 1 ? 6 : 3) + (wait / HOUR_MS) * 0.05;
+
+  // Spread the week: every hour already booked that day costs a little.
+  const dayKey = homeDayKey(start);
+  const bookedH = (ctx.load.get(dayKey) ?? 0) / 60;
+  score -= bookedH * 2.5;
+
+  // A short breather after meetings and flights.
+  if (ctx.meetingEnds.some((t) => start.getTime() >= t && start.getTime() - t < 10 * 60000)) score -= 5;
+
+  const notes: string[] = [];
+  const inRecovery = ctx.recovery.some(([a, b]) => start.getTime() < b && end.getTime() > a);
+  const earlyNight = ctx.earlyNights.has(dayKey) && startMin + (end.getTime() - start.getTime()) / 60000 > EARLY_NIGHT_FROM_MIN;
+  const reserveMorning = ctx.reserveDays.has(dayKey) && bandStart === "morning";
+  if (effort === "focus") {
+    if (inRecovery) { score -= TRIP_RULE_PENALTY; notes.push("inside post-trip recovery"); }
+    if (earlyNight) { score -= TRIP_RULE_PENALTY; notes.push("the evening before an early report"); }
+    if (reserveMorning) { score -= TRIP_RULE_PENALTY; notes.push("a reserve-day morning"); }
+  } else if (effort === "routine") {
+    if (inRecovery) score -= 15;
+    if (earlyNight) score -= 30;
+  }
+
+  const load = bookedH > 0 ? ` · ${Math.round(bookedH * 10) / 10} h already booked that day` : " · open day";
+  const reason = notes.length
+    ? `Only slot that fit: ${notes.join(", ")}`
+    : `${EFFORT_LABELS[effort]} task in your ${BAND_LABELS[bandStart]}${load}`;
+  return { score, reason };
 }
 
 interface BatchedTask {
@@ -237,6 +380,13 @@ interface BatchedTask {
   memberIds?: string[];
   memberId?: string;
   pillar: LifePillar | null;
+  effort: Effort;
+  effortAuto: boolean;
+}
+
+function taskEffort(t: Task): { effort: Effort; auto: boolean } {
+  if (t.effort) return { effort: t.effort, auto: t.effort_auto !== false };
+  return { effort: guessEffort({ name: t.name, context: t.context, durationMin: t.duration_min, pillar: t.pillar }).effort, auto: true };
 }
 
 function batchShortTasks(taskList: Task[]): BatchedTask[] {
@@ -254,6 +404,8 @@ function batchShortTasks(taskList: Task[]): BatchedTask[] {
       room: 0,
       isBatch: false,
       memberId: t.id,
+      effort: taskEffort(t).effort,
+      effortAuto: taskEffort(t).auto,
     }));
 
   const byContext = new Map<ContextTag, Task[]>();
@@ -288,6 +440,8 @@ function batchShortTasks(taskList: Task[]): BatchedTask[] {
         isBatch: group.length > 1,
         memberNames: group.length > 1 ? group.map((g) => g.name) : undefined,
         memberIds: group.map((g) => g.id),
+        effort: maxEffort(group.map((g) => taskEffort(g).effort)),
+        effortAuto: group.length > 1 || taskEffort(group[0]).auto,
       });
       i = j;
     }
@@ -310,6 +464,8 @@ interface Placeable {
   memberNames?: string[];
   memberIds?: string[];
   pillar: LifePillar | null;
+  effort: Effort;
+  effortAuto: boolean;
 }
 
 export function runEngine(
@@ -320,6 +476,27 @@ export function runEngine(
 ): { placed: PlacedItem[]; unscheduled: UnscheduledItem[] } {
   const allSlots = slotsInWeek(weekStart);
   const busy = buildBusy(fixedEvents, allSlots);
+  // Report time: nothing in the 45 minutes before a flight leg departs.
+  const legs = fixedEvents
+    .filter((ev) => !ev.is_all_day)
+    .map((ev) => ({ ev, m: FLIGHT_TITLE.exec(ev.name) }))
+    .filter((x): x is { ev: FixedEvent; m: RegExpExecArray } => !!x.m)
+    .map(({ ev, m }) => ({ origin: m[1], dest: m[2], dep: new Date(ev.start_time).getTime(), arr: new Date(ev.end_time).getTime() }))
+    .sort((a, b) => a.dep - b.dep);
+  const markBusy = (set: Set<string>, from: number, to: number) => {
+    for (const sl of allSlots) if (sl.getTime() >= from && sl.getTime() < to) set.add(slotKey(sl));
+  };
+  for (const leg of legs) markBusy(busy, leg.dep - REPORT_BUFFER_MIN * 60000, leg.dep);
+  // Between legs away from home: a short connection is duty time (blocked for
+  // everything); a longer layover keeps home, errand and family items off.
+  const awayBusy = new Set<string>();
+  for (let i = 0; i < legs.length - 1; i++) {
+    const a = legs[i];
+    const b = legs[i + 1];
+    if (a.dest === HOME_BASE || b.origin !== a.dest || b.dep <= a.arr) continue;
+    if (b.dep - a.arr < CONNECTION_MAX_HOURS * HOUR_MS) markBusy(busy, a.arr, b.dep);
+    else markBusy(awayBusy, a.arr, b.dep);
+  }
 
   const utaBusy = new Set<string>();
   const uta = utaRanges(fixedEvents);
@@ -342,6 +519,8 @@ export function runEngine(
       room: 0,
       kind: "Habit",
       isBatch: false,
+      effort: h.effort ?? guessEffort({ name: h.name, context: h.context, durationMin: h.duration_min, pillar: h.pillar }).effort,
+      effortAuto: !h.effort || h.effort_auto !== false,
     });
   }
 
@@ -363,6 +542,8 @@ export function runEngine(
       isBatch: b.isBatch,
       memberNames: b.memberNames,
       memberIds: b.memberIds,
+      effort: b.effort,
+      effortAuto: b.effortAuto,
     });
   }
 
@@ -371,15 +552,25 @@ export function runEngine(
   const placed: PlacedItem[] = [];
   const unscheduled: UnscheduledItem[] = [];
   const placedContexts: PlacedContext[] = [];
+  const plan = buildPlanContext(fixedEvents);
 
   for (const p of placeables) {
     const isHomeOnly = isUtaBlocked(p.pillar, p.context);
-    const effectiveBusy = isHomeOnly ? new Set([...busy, ...utaBusy]) : busy;
-    const window = findSlot(effectiveBusy, allSlots, p.durationMin, p.searchStart, p.searchEnd, placedContexts, p.context);
+    const needsHome = p.pillar === "family" || AWAY_BLOCKED_CONTEXTS.includes(p.context);
+    const effectiveBusy =
+      isHomeOnly || needsHome
+        ? new Set([...busy, ...(isHomeOnly ? utaBusy : []), ...(needsHome ? awayBusy : [])])
+        : busy;
+    const earliest = new Date(Math.max(p.searchStart.getTime(), allSlots[0]?.getTime() ?? 0));
+    const scorer = (a: Date, b: Date) => scoreSlot(plan, p.effort, p.tier, earliest, a, b).score;
+    const window = findSlot(effectiveBusy, allSlots, p.durationMin, p.searchStart, p.searchEnd, placedContexts, p.context, scorer);
     if (window) {
       for (const w of window) busy.add(slotKey(w));
       const itemStart = window[0];
       const itemEnd = addMinutes(window[0], p.durationMin);
+      const why = scoreSlot(plan, p.effort, p.tier, earliest, itemStart, itemEnd).reason;
+      const dayKey = homeDayKey(itemStart);
+      plan.load.set(dayKey, (plan.load.get(dayKey) ?? 0) + p.durationMin);
       placedContexts.push({ start: itemStart, end: itemEnd, context: p.context });
       placed.push({
         id: p.id,
@@ -394,6 +585,9 @@ export function runEngine(
         isBatch: p.isBatch,
         memberNames: p.memberNames,
         memberIds: p.memberIds,
+        effort: p.effort,
+        effortAuto: p.effortAuto,
+        placementReason: why,
       });
     } else {
       // A window that starts after this week belongs to a later week's plan.
@@ -425,6 +619,7 @@ export function runEngine(
   }
 
   for (const ev of fixedEvents) {
+    if (ev.engine_only) continue;
     const evStart = new Date(ev.start_time);
     const evEnd = new Date(ev.end_time);
     const weekEndDate = addDays(weekStart, 7);

@@ -4,7 +4,7 @@
  * order, (2) re-run the scheduler afterwards to confirm the sessions held.
  */
 import { supabase } from "./supabase";
-import { runEngine, addDays, getWeekStart, WORK_START_HOUR, WORK_END_HOUR } from "./schedulingEngine";
+import { runEngine, addDays, getWeekStart, enrouteAsBusy, WORK_START_HOUR, WORK_END_HOUR } from "./schedulingEngine";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate } from "./recurrence";
 import type { ContextTag, FixedEvent, Habit, LifePillar, Task } from "./types";
 import { loadDailyItems, writeDailyPlan, type DailySession } from "./goalDaily";
@@ -136,7 +136,7 @@ function occurrenceEvents<T extends { id: string; name: string; pillar?: LifePil
 
 export async function loadWeekData(weekStart: Date): Promise<WeekData> {
   const weekEnd = addDays(weekStart, 7);
-  const [fe, hb, tk, mp, feo, ho, to] = await Promise.all([
+  const [fe, hb, tk, mp, feo, ho, to, eb] = await Promise.all([
     supabase.from("fixed_events").select("*").lt("start_time", weekEnd.toISOString()).gte("end_time", addDays(weekStart, -60).toISOString()),
     supabase.from("habits").select("*"),
     supabase.from("tasks").select("*"),
@@ -144,8 +144,9 @@ export async function loadWeekData(weekStart: Date): Promise<WeekData> {
     supabase.from("fixed_event_occurrences").select("*"),
     supabase.from("habit_occurrences").select("*"),
     supabase.from("task_occurrences").select("*"),
+    supabase.from("enroute_blocks").select("id, name, start_time, end_time").lt("start_time", weekEnd.toISOString()).gt("end_time", weekStart.toISOString()),
   ]);
-  for (const r of [fe, hb, tk, mp, feo, ho, to]) if (r.error) throw new Error(r.error.message);
+  for (const r of [fe, hb, tk, mp, feo, ho, to, eb]) if (r.error) throw new Error(r.error.message);
 
   const fixed = (fe.data as FixedEvent[]) ?? [];
   const habits = (hb.data as Habit[]) ?? [];
@@ -154,6 +155,7 @@ export async function loadWeekData(weekStart: Date): Promise<WeekData> {
   const inWeek = fixed.filter((e) => !e.recurrence_enabled && new Date(e.start_time) < weekEnd && new Date(e.end_time) > weekStart);
   const busy: FixedEvent[] = [
     ...inWeek,
+    ...enrouteAsBusy((eb.data as { id: string; name: string; start_time: string; end_time: string }[]) ?? []),
     ...occurrenceEvents(
       fixed.filter((e) => e.recurrence_enabled),
       (feo.data as OccRow[]) ?? [],
