@@ -16,7 +16,7 @@ const COMPOUND_MODEL = "openai/gpt-oss-120b";
 const EXTRACTION_MODEL = "openai/gpt-oss-120b";
 
 interface GoalResearchRequest {
-  action: "kickoff" | "chat" | "history";
+  action: "kickoff" | "chat" | "history" | "cascade";
   goal_id?: string;
   message?: string;
 }
@@ -412,6 +412,97 @@ async function handleChat(goalId: string, userMessage: string) {
   return { messages: updatedMessages, goal_status: goalStatus, approach, cadence_sessions_per_week: cadenceSessions, cadence_label: cadenceLabel, cadence_confirmed: cadenceConfirmed };
 }
 
+// ---------------------------------------------------------------------------
+// Cascade: turn an active goal (approach + cadence) into internal milestones
+// and a concrete weekly target. Only the weekly target ever reaches the
+// calendar (through the Weekly Review); milestones stay inside the app.
+
+interface Milestone {
+  id: string;
+  level: "year" | "quarter" | "month" | "week";
+  title: string;
+  due: string; // YYYY-MM-DD
+  metric: string | null;
+  done: boolean;
+}
+
+const CONTEXTS = ["desk", "home", "phone", "errand", "other"];
+
+async function handleCascade(goalId: string) {
+  const { data: goal, error } = await supabase
+    .from("goals")
+    .select("id, pillar, specific, measurable, achievable, relevant, time_bound, status, approach, deadline, cadence_sessions_per_week, cadence_label, cadence_confirmed, milestones")
+    .eq("id", goalId)
+    .maybeSingle();
+  if (error) throw new Error(`Failed to load goal: ${error.message}`);
+  if (!goal) throw new Error("Goal not found.");
+  if (!goal.approach) throw new Error("This goal has no approach yet — finish Research first.");
+  if (!goal.cadence_sessions_per_week) throw new Error("This goal has no weekly cadence yet — settle one in the Research chat first.");
+
+  const today = new Date().toISOString().slice(0, 10);
+  const system =
+    "You are a planning assistant that breaks a SMART goal into a cascade of checkpoints. Today is " + today + ". " +
+    "Scale the cascade to how far away the deadline is: 8 weeks or less -> one 'week' checkpoint per remaining week; up to 6 months -> one 'month' checkpoint per remaining month; up to 2 years -> 'quarter' checkpoints plus 'month' checkpoints for the next 3 months; longer -> 'year' checkpoints plus 'quarter' checkpoints for the next 12 months. " +
+    "Each checkpoint is a concrete, measurable intermediate result on the way to the goal (e.g. 'Weigh 202 lb', 'Run 2 mi in 21:45'), with a due date on or before the goal deadline, never in the past. The final checkpoint is the goal itself on the deadline. " +
+    "Also produce the weekly target that makes the plan happen: sessions_per_week (use the user's committed cadence), session_minutes (a realistic length for one session of the chosen approach), context (one of desk, home, phone, errand, other — where the session happens), label (a 1-4 word name for one session, e.g. 'Run', 'Budget check-in', 'Read Bible'), " +
+    "and plan_mode: 'count' if the chosen approach is an app or service that already puts each session on the user's calendar by itself (for example Runna syncing workouts to Google Calendar), otherwise 'schedule'. " +
+    "If the goal's deadline is not given, derive it from the time-bound text as a calendar date. " +
+    "Respond with one JSON object only: {\"deadline\": \"YYYY-MM-DD\", \"milestones\": [{\"level\": \"year|quarter|month|week\", \"title\": string, \"due\": \"YYYY-MM-DD\", \"metric\": string|null}], \"weekly_target\": {\"label\": string, \"sessions_per_week\": integer, \"session_minutes\": integer, \"context\": string, \"plan_mode\": \"schedule|count\"}}.";
+  const user =
+    `Pillar: ${goal.pillar}\nSpecific: ${goal.specific ?? "n/a"}\nMeasurable: ${goal.measurable ?? "n/a"}\nAchievable: ${goal.achievable ?? "n/a"}\n` +
+    `Relevant: ${goal.relevant ?? "n/a"}\nTime-bound: ${goal.time_bound ?? "n/a"}\nDeadline: ${goal.deadline ? String(goal.deadline).slice(0, 10) : "not set"}\n` +
+    `Chosen approach: ${goal.approach}\nCommitted cadence: ${goal.cadence_label ?? goal.cadence_sessions_per_week + "x/week"}`;
+
+  const resp = await fetchWithRetry(GROQ_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${Deno.env.get("GROQ_API_KEY")}` },
+    body: JSON.stringify({
+      model: EXTRACTION_MODEL,
+      response_format: { type: "json_object" },
+      messages: [{ role: "system", content: system }, { role: "user", content: user }],
+    }),
+  });
+  if (!resp.ok) throw new Error(`Planning request failed: ${resp.status} ${await resp.text()}`);
+  const content: string = (await resp.json()).choices?.[0]?.message?.content ?? "{}";
+  let parsed: any;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    throw new Error("The planner returned something unreadable — try Generate plan again.");
+  }
+
+  const isDate = (v: unknown) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+  const deadline = isDate(parsed.deadline) ? parsed.deadline : goal.deadline ? String(goal.deadline).slice(0, 10) : null;
+  const milestones: Milestone[] = (Array.isArray(parsed.milestones) ? parsed.milestones : [])
+    .filter((m: any) => m && typeof m.title === "string" && isDate(m.due) && ["year", "quarter", "month", "week"].includes(m.level))
+    .map((m: any) => ({ id: crypto.randomUUID(), level: m.level, title: m.title.trim(), due: m.due, metric: typeof m.metric === "string" ? m.metric : null, done: false }))
+    .sort((a: Milestone, b: Milestone) => a.due.localeCompare(b.due));
+  const wt = parsed.weekly_target ?? {};
+  const sessions = Number.isInteger(wt.sessions_per_week) && wt.sessions_per_week > 0 ? wt.sessions_per_week : goal.cadence_sessions_per_week;
+  const minutes = Number.isInteger(wt.session_minutes) && wt.session_minutes >= 10 ? Math.min(wt.session_minutes, 240) : 30;
+  const context = CONTEXTS.includes(wt.context) ? wt.context : "other";
+  const label = typeof wt.label === "string" && wt.label.trim() ? wt.label.trim().slice(0, 40) : "Session";
+  const planMode = wt.plan_mode === "count" ? "count" : "schedule";
+
+  const update: Record<string, unknown> = {
+    milestones,
+    weekly_target: label,
+    session_minutes: minutes,
+    session_context: context,
+    cascade_generated_at: new Date().toISOString(),
+  };
+  // End of the deadline day in Eastern time (03:59 UTC the next day).
+  if (deadline) update.deadline = new Date(Date.parse(`${deadline}T00:00:00Z`) + (24 + 4) * 3600 * 1000 - 60 * 1000).toISOString();
+  // Only set the plan mode the first time; after that it's the user's choice.
+  const { data: cur } = await supabase.from("goals").select("plan_mode").eq("id", goalId).maybeSingle();
+  if (!cur?.plan_mode) update.plan_mode = planMode;
+  if (sessions !== goal.cadence_sessions_per_week) update.cadence_sessions_per_week = sessions;
+
+  const { data: saved, error: saveErr } = await supabase.from("goals").update(update).eq("id", goalId).select("*").maybeSingle();
+  if (saveErr) throw new Error(`Failed to save the plan: ${saveErr.message}`);
+  return { goal: saved };
+}
+
 async function handleHistory(goalId: string) {
   const goal = await fetchGoal(goalId);
   const messages = await fetchAllMessages(goalId);
@@ -442,6 +533,11 @@ Deno.serve(async (req: Request) => {
       case "history": {
         if (!body.goal_id) throw new Error("goal_id is required.");
         result = await handleHistory(body.goal_id);
+        break;
+      }
+      case "cascade": {
+        if (!body.goal_id) throw new Error("goal_id is required.");
+        result = await handleCascade(body.goal_id);
         break;
       }
       default:
