@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { X, CalendarClock, Repeat, CheckSquare, Trash2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import type { ContextTag, LifePillar, Task, FixedEvent, Habit } from "@/lib/types";
@@ -6,6 +6,8 @@ import { CONTEXT_COLORS, PILLARS, PILLAR_LABELS, PILLAR_COLORS } from "@/lib/typ
 import { scheduleAutoPush } from "@/lib/gcalSync";
 import { formatLocalDate } from "@/lib/recurrence";
 import { DateTimeField, DateField } from "@/components/DateTimeField";
+import { EFFORTS, EFFORT_HINTS, EFFORT_LABELS, guessEffort, type Effort, type EffortGuess } from "@/lib/effort";
+import { loadEffortMemory, rememberEffort } from "@/lib/effortMemory";
 
 type RecurrenceFrequency = "daily" | "weekly" | "monthly";
 type MonthlyMode = "day_of_month" | "weekday_of_month";
@@ -157,6 +159,14 @@ export function AddItemModal({
     return null;
   });
 
+  const [habEffort, setHabEffort] = useState<Effort | null>(() => {
+    if (editTarget?.kind === "Habit") {
+      const h = editTarget.data as Habit;
+      return h.effort && h.effort_auto === false ? h.effort : null;
+    }
+    return null;
+  });
+
   // Task state
   const [taskName, setTaskName] = useState(() => {
     if (editTarget?.kind === "Task") return (editTarget.data as Task).name;
@@ -186,6 +196,22 @@ export function AddItemModal({
     if (editTarget?.kind === "Task") return (editTarget.data as Task).pillar ?? null;
     return null;
   });
+
+  const [taskEffort, setTaskEffort] = useState<Effort | null>(() => {
+    if (editTarget?.kind === "Task") {
+      const t = editTarget.data as Task;
+      return t.effort && t.effort_auto === false ? t.effort : null;
+    }
+    return null;
+  });
+
+  // Effort: guessed live from the title, context and length unless you pick one.
+  const [effortMemory, setEffortMemory] = useState<Map<string, Effort>>(new Map());
+  useEffect(() => {
+    void loadEffortMemory().then(setEffortMemory);
+  }, []);
+  const habGuess = guessEffort({ name: habName, context: habContext, durationMin: habDur, pillar: habPillar }, effortMemory);
+  const taskGuess = guessEffort({ name: taskName, context: taskContext, durationMin: taskDur, pillar: taskPillar }, effortMemory);
 
   // Recurrence state — shared across all tabs, initialized from editTarget if present
   const recSource = editTarget?.data as (FixedEvent | Habit | Task) | undefined;
@@ -262,8 +288,11 @@ export function AddItemModal({
           search_end: fromLocalInput(habEnd),
           context: habContext,
           pillar: habPillar,
+          effort: habEffort ?? habGuess.effort,
+          effort_auto: habEffort === null,
           ...buildRecurrencePayload(),
         };
+        if (habEffort) void rememberEffort(habName.trim(), habEffort);
         if (editTarget?.kind === "Habit") {
           const { error } = await supabase.from("habits").update(payload).eq("id", editTarget.id);
           if (error) throw error;
@@ -284,8 +313,11 @@ export function AddItemModal({
           deadline: fromLocalInput(taskDeadline),
           context: taskContext,
           pillar: taskPillar,
+          effort: taskEffort ?? taskGuess.effort,
+          effort_auto: taskEffort === null,
           ...buildRecurrencePayload(),
         };
+        if (taskEffort) void rememberEffort(taskName.trim(), taskEffort);
         if (editTarget?.kind === "Task") {
           const { error } = await supabase.from("tasks").update(payload).eq("id", editTarget.id);
           if (error) throw error;
@@ -455,6 +487,9 @@ export function AddItemModal({
               <Field label="Pillar">
                 <PillarPicker value={habPillar} onChange={setHabPillar} />
               </Field>
+              <Field label="Effort">
+                <EffortPicker value={habEffort} guess={habGuess} onChange={setHabEffort} />
+              </Field>
               <RecurrenceSection
                 enabled={recEnabled}
                 onToggle={() => setRecEnabled(!recEnabled)}
@@ -528,6 +563,9 @@ export function AddItemModal({
               </Field>
               <Field label="Pillar">
                 <PillarPicker value={taskPillar} onChange={setTaskPillar} />
+              </Field>
+              <Field label="Effort">
+                <EffortPicker value={taskEffort} guess={taskGuess} onChange={setTaskEffort} />
               </Field>
               <RecurrenceSection
                 enabled={recEnabled}
@@ -897,6 +935,48 @@ function PillarPicker({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+/** Auto (the app's guess) or a level you pick. Picking one is remembered for similar titles. */
+function EffortPicker({
+  value,
+  guess,
+  onChange,
+}: {
+  value: Effort | null;
+  guess: EffortGuess;
+  onChange: (e: Effort | null) => void;
+}) {
+  const active = value ?? guess.effort;
+  return (
+    <div>
+      <div className="flex gap-2 flex-wrap">
+        <button
+          onClick={() => onChange(null)}
+          className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+            value === null ? "bg-blue-600 text-white border-transparent" : "bg-slate-800 text-slate-400 border-slate-700 hover:border-slate-600"
+          }`}
+        >
+          Auto · {EFFORT_LABELS[guess.effort]}
+        </button>
+        {EFFORTS.map((e) => (
+          <button
+            key={e}
+            onClick={() => onChange(e)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+              value === e ? "bg-slate-200 text-slate-900 border-transparent" : "bg-slate-800 text-slate-400 border-slate-700 hover:border-slate-600"
+            }`}
+          >
+            {EFFORT_LABELS[e]}
+          </button>
+        ))}
+      </div>
+      <p className="mt-1.5 text-[11px] text-slate-500">
+        {value === null ? `Guessed ${EFFORT_LABELS[guess.effort]} (${guess.why}). ` : ""}
+        {EFFORT_HINTS[active]}.
+      </p>
     </div>
   );
 }

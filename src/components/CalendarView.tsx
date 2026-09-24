@@ -26,6 +26,7 @@ import { supabase } from "@/lib/supabase";
 import { recheckEnrouteBlocks, type StoredEnrouteBlock } from "@/lib/calendarHygiene";
 import {
   runEngine,
+  enrouteAsBusy,
   getWeekStart,
   addDays,
   GRID_START_HOUR,
@@ -56,6 +57,8 @@ import { getSyncStatus, pullFromGoogle, mirrorToGoogle, deleteFromGoogle, schedu
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, formatRecurrenceSummary } from "@/lib/recurrence";
 import { mirrorCalendarNames, defaultMirrorWindowStart, MIRROR_WEEKS } from "@/lib/googleMirror";
 import { layoutColumns, type ItemLayout } from "@/lib/calendarLayout";
+import { EFFORTS, EFFORT_LABELS, type Effort } from "@/lib/effort";
+import { rememberEffort } from "@/lib/effortMemory";
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -527,7 +530,7 @@ export function CalendarView({
     const fixedOccurrenceIds = new Set(fixedOccurrenceEvents.map((e) => e.id));
     const result = runEngine(
       displayStart,
-      [...fixedEvents.filter((e) => !e.recurrence_enabled), ...fixedOccurrenceEvents],
+      [...fixedEvents.filter((e) => !e.recurrence_enabled), ...fixedOccurrenceEvents, ...enrouteAsBusy(enrouteBlocks)],
       habits.filter((h) => !h.recurrence_enabled),
       nonRecurringTasks
     );
@@ -890,6 +893,17 @@ export function CalendarView({
       item.kind === "Fixed Event" ? "fixed_events" : item.kind === "Habit" ? "habits" : "tasks";
     await supabase.from(table).update({ pillar }).eq("id", item.id);
     setSelectedItem((prev) => (prev && prev.id === item.id ? { ...prev, pillar } : prev));
+    loadData();
+  }
+
+  /** Set Focus / Routine / Light yourself; remembered for similar titles. */
+  async function updateEffort(item: PlacedItem, effort: Effort) {
+    const kind = item.recurringItemKind ?? item.kind;
+    if (kind !== "Habit" && kind !== "Task") return;
+    const ids = item.isBatch && item.memberIds?.length ? item.memberIds : [item.recurringItemId ?? item.id];
+    await supabase.from(kind === "Habit" ? "habits" : "tasks").update({ effort, effort_auto: false }).in("id", ids);
+    if (!item.isBatch) void rememberEffort(item.name, effort);
+    setSelectedItem((prev) => (prev && prev.id === item.id ? { ...prev, effort, effortAuto: false } : prev));
     loadData();
   }
 
@@ -2076,6 +2090,7 @@ export function CalendarView({
             }
           }}
           onSetPillar={(p) => updatePillar(selectedItem, p)}
+          onSetEffort={(e) => updateEffort(selectedItem, e)}
         />
       )}
 
@@ -2283,6 +2298,7 @@ function ItemDetail({
   onDelete,
   onEdit,
   onSetPillar,
+  onSetEffort,
 }: {
   item: PlacedItem;
   source: ItemSource;
@@ -2290,6 +2306,7 @@ function ItemDetail({
   onDelete: () => void;
   onEdit: () => void;
   onSetPillar: (p: LifePillar | null) => void;
+  onSetEffort: (e: Effort) => void;
 }) {
   const colors = getPillarColor(item.pillar);
   return (
@@ -2367,6 +2384,32 @@ function ItemDetail({
                   );
                 })}
               </div>
+            </div>
+          )}
+          {(item.kind === "Habit" || item.kind === "Task") && item.effort && (
+            <div className="pt-1">
+              <div className="text-xs text-slate-500 mb-1.5">
+                Effort{item.effortAuto !== false ? " · guessed, tap to correct" : ""}
+              </div>
+              <div className="flex gap-1.5 flex-wrap">
+                {EFFORTS.map((e) => (
+                  <button
+                    key={e}
+                    onClick={() => e !== item.effort || item.effortAuto !== false ? onSetEffort(e) : undefined}
+                    className={`px-2 py-1 rounded-md text-[11px] font-medium border transition-all ${
+                      item.effort === e ? "bg-slate-200 text-slate-900 border-transparent" : "bg-slate-800 text-slate-400 border-slate-700 hover:border-slate-600"
+                    }`}
+                  >
+                    {EFFORT_LABELS[e]}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {item.placementReason && (
+            <div className="rounded-lg bg-slate-800/70 px-3 py-2 text-xs text-slate-400">
+              <span className="text-slate-500">Why here: </span>
+              {item.placementReason}
             </div>
           )}
           {item.isBatch && item.memberNames && (
