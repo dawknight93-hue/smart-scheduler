@@ -54,6 +54,7 @@ import { CalendarConnectionsPanel } from "@/components/CalendarConnectionsPanel"
 import { getSyncStatus, pullFromGoogle, mirrorToGoogle, deleteFromGoogle, scheduleAutoPush, updateGoogleSourceEvent } from "@/lib/gcalSync";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, formatRecurrenceSummary } from "@/lib/recurrence";
 import { mirrorCalendarNames, defaultMirrorWindowStart, MIRROR_WEEKS } from "@/lib/googleMirror";
+import { layoutColumns, type ItemLayout } from "@/lib/calendarLayout";
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -93,6 +94,13 @@ function isQuietTime(start: Date, end: Date): boolean {
 }
 
 /** True if [start, end) touches a UTA day (same day boundaries the scheduler uses). */
+/** Inline position for a laid-out item inside its day column. */
+function layoutStyle(l: ItemLayout | undefined): React.CSSProperties {
+  if (!l || l.cols === 1) return { left: "4px", right: "4px" };
+  const w = 100 / l.cols;
+  return { left: `calc(${l.col * w}% + 2px)`, width: `calc(${l.span * w}% - 4px)` };
+}
+
 function overlapsUta(start: Date, end: Date, fixedEvents: FixedEvent[]): boolean {
   return utaRanges(fixedEvents).some(([a, b]) => start < b && a < end);
 }
@@ -660,6 +668,12 @@ export function CalendarView({
     }
     return map;
   }, [placed, weekStart]);
+
+  const layoutByDay = useMemo(() => {
+    const out: Record<number, ItemLayout[]> = {};
+    for (let d = 0; d < 7; d++) out[d] = layoutColumns(itemsByDay[d]);
+    return out;
+  }, [itemsByDay]);
 
   const allDaySpans = useMemo(() => {
     const dateOnlyUTC = (d: Date) => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
@@ -1791,8 +1805,8 @@ export function CalendarView({
                         draggable={!isEnroute}
                         onDragStart={(e) => { if (!isEnroute) beginDrag(e, item); }}
                         onDragEnd={endDrag}
-                        className={`absolute left-1 right-1 rounded-md ${colors.soft} ${colors.border} border-l-2 px-2 py-1 text-left overflow-hidden group ${isEnroute ? "border-dashed" : "hover:z-10 hover:scale-[1.02] transition-transform cursor-pointer"} ${isDisplayOnly ? "opacity-60 border-dashed" : ""} ${dragItem && dragItem.id === item.id && dragItem.start.getTime() === item.start.getTime() ? "opacity-40" : ""}`}
-                        style={{ top: `${topOffset}px`, height: `${height}px`}}
+                        className={`absolute rounded-md ${colors.soft} ${colors.border} border-l-2 px-2 py-1 text-left overflow-hidden group ${isEnroute ? "border-dashed" : "hover:z-10 hover:scale-[1.02] transition-transform cursor-pointer"} ${isDisplayOnly ? "opacity-60 border-dashed" : ""} ${dragItem && dragItem.id === item.id && dragItem.start.getTime() === item.start.getTime() ? "opacity-40" : ""}`}
+                        style={{ top: `${topOffset}px`, height: `${height}px`, ...layoutStyle(layoutByDay[dayIdx][idx]) }}
                       >
                         <button
                           onClick={isEnroute ? undefined : () => setSelectedItem(item)}
@@ -1808,7 +1822,7 @@ export function CalendarView({
                               {item.name}
                             </span>
                           </div>
-                          <div className="text-[10px] text-slate-400 mt-0.5">
+                          <div className="text-[10px] text-slate-400 mt-0.5 truncate">
                             {formatTimeRange(item.start, effectiveEnd)}
                           </div>
                           {item.isBatch && (
@@ -1923,8 +1937,8 @@ export function CalendarView({
                       draggable
                       onDragStart={(e) => beginDrag(e, item)}
                       onDragEnd={endDrag}
-                      className={`absolute left-1 right-1 rounded-md ${colors.soft} ${colors.border} border-l-2 overflow-hidden ${isDisplayOnly ? "opacity-60 border-dashed" : ""} ${dragItem && dragItem.id === item.id && dragItem.start.getTime() === item.start.getTime() ? "opacity-40" : ""}`}
-                      style={{ top: `${topOffset}px`, height: `${height}px` }}
+                      className={`absolute rounded-md ${colors.soft} ${colors.border} border-l-2 overflow-hidden ${isDisplayOnly ? "opacity-60 border-dashed" : ""} ${dragItem && dragItem.id === item.id && dragItem.start.getTime() === item.start.getTime() ? "opacity-40" : ""}`}
+                      style={{ top: `${topOffset}px`, height: `${height}px`, ...layoutStyle(layoutByDay[mobileDayIndex]?.[idx]) }}
                     >
                       <button
                         onClick={() => setSelectedItem(item)}
@@ -1940,7 +1954,7 @@ export function CalendarView({
                             {item.name}
                           </span>
                         </div>
-                        <div className="text-[11px] text-slate-400 mt-0.5">
+                        <div className="text-[11px] text-slate-400 mt-0.5 truncate">
                           {formatTimeRange(item.start, effectiveEnd)}
                         </div>
                       </button>
