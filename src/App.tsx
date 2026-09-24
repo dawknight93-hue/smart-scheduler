@@ -1,15 +1,16 @@
 import { useState } from "react";
-import { CalendarDays, CheckSquare, Target, ClipboardCheck } from "lucide-react";
+import { CalendarDays, CheckSquare, Target, ClipboardCheck, Sunrise } from "lucide-react";
 import { CalendarView } from "@/components/CalendarView";
 import { TasksView } from "@/components/TasksView";
 import { GoalsView } from "@/components/GoalsView";
 import { WeeklyReview } from "@/components/WeeklyReview";
+import { BriefingView } from "@/components/BriefingView";
 import { useReviewDue } from "@/lib/useReviewDue";
 import { GoogleCallback } from "@/components/GoogleCallback";
 import { PrivacyPolicy } from "@/components/PrivacyPolicy";
 import { getWeekStart } from "@/lib/schedulingEngine";
 
-type View = "calendar" | "tasks" | "goals" | "review";
+type View = "briefing" | "calendar" | "tasks" | "goals" | "review";
 
 function App() {
   const [view, setView] = useState<View>("calendar");
@@ -23,7 +24,18 @@ function App() {
     <div className="min-h-screen w-full overflow-x-hidden bg-slate-950 text-slate-100 flex flex-col">
       {/* Tab bar */}
       <nav className="border-b border-slate-800 bg-slate-900/80 backdrop-blur-sm sticky top-0 z-40">
-        <div className="px-4 py-2 flex items-center gap-1">
+        <div className="px-4 py-2 flex items-center gap-1 overflow-x-auto">
+          <button
+            onClick={() => setView("briefing")}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+              view === "briefing"
+                ? "bg-blue-600 text-white"
+                : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+            }`}
+          >
+            <Sunrise className="w-4 h-4" />
+            Briefing
+          </button>
           <button
             onClick={() => setView("calendar")}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
@@ -81,6 +93,8 @@ function App() {
         />
       ) : view === "tasks" ? (
         <TasksView weekStart={weekStart} />
+      ) : view === "briefing" ? (
+        <BriefingView onOpenReview={() => setView("review")} />
       ) : view === "review" ? (
         <WeeklyReview onOpenGoals={() => setView("goals")} />
       ) : (
