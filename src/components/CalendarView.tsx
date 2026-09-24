@@ -7,6 +7,7 @@ import {
   Plus,
   Clock,
   Layers,
+  CheckCircle2,
   Lock,
   AlertTriangle,
   Trash2,
@@ -312,6 +313,8 @@ export function CalendarView({
   const [occurrences, setOccurrences] = useState<TaskOccurrence[]>([]);
   const [fixedEventOccurrences, setFixedEventOccurrences] = useState<FixedEventOccurrence[]>([]);
   const [habitOccurrences, setHabitOccurrences] = useState<HabitOccurrence[]>([]);
+  // 🎯 goal sessions ticked done (goal_daily_items), by habit id
+  const [goalSessionDone, setGoalSessionDone] = useState<Map<string, { id: string; done: boolean }>>(new Map());
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
   // True when the edit modal was opened from the "not on your calendar" panel, which also offers Delete.
   const [editFromUnscheduled, setEditFromUnscheduled] = useState(false);
@@ -369,7 +372,7 @@ export function CalendarView({
     const rangeStart = viewMode === "month" ? monthGridStart : weekStart;
     const rangeEnd = viewMode === "month" ? monthGridEnd : addDays(weekStart, 7);
 
-    const [evRes, recEvRes, habRes, taskRes, mapRes, ebRes, occRes, feoccRes, hoccRes] = await Promise.all([
+    const [evRes, recEvRes, habRes, taskRes, mapRes, ebRes, occRes, feoccRes, hoccRes, gdRes] = await Promise.all([
       supabase
         .from("fixed_events")
         .select("*")
@@ -392,6 +395,7 @@ export function CalendarView({
       supabase.from("task_occurrences").select("*").gte("occurrence_date", formatLocalDate(rangeStart)).lte("occurrence_date", formatLocalDate(addDays(rangeEnd, -1))),
       supabase.from("fixed_event_occurrences").select("*").gte("occurrence_date", formatLocalDate(rangeStart)).lte("occurrence_date", formatLocalDate(addDays(rangeEnd, -1))),
       supabase.from("habit_occurrences").select("*").gte("occurrence_date", formatLocalDate(rangeStart)).lte("occurrence_date", formatLocalDate(addDays(rangeEnd, -1))),
+      supabase.from("goal_daily_items").select("id, habit_id, done").not("habit_id", "is", null).gte("day", formatLocalDate(addDays(rangeStart, -7))).lt("day", formatLocalDate(addDays(rangeEnd, 7))),
     ]);
 
     const feById = new Map<string, FixedEvent>();
@@ -417,6 +421,9 @@ export function CalendarView({
     setOccurrences(oc);
     setFixedEventOccurrences(feo);
     setHabitOccurrences(ho);
+    setGoalSessionDone(
+      new Map(((gdRes.data as { id: string; habit_id: string; done: boolean }[]) ?? []).map((r) => [r.habit_id, { id: r.id, done: r.done }]))
+    );
     setLoading(false);
 
     return { fixedEvents: fe, habits: ha, tasks: ta, eventMap: em, enrouteBlocks: eb };
@@ -657,7 +664,18 @@ export function CalendarView({
     }
 
     // Feature 2: Auto-detect all-day Fixed Events (24h+ duration)
+    const taskById = new Map(tasks.map((t) => [t.id, t]));
+    const habitById = new Map(habits.map((h) => [h.id, h]));
     const finalPlaced = [...enriched, ...enrouteItems, ...recurringItems].map((p) => {
+      // Done state for anything you can complete from the calendar.
+      if (p.isRecurringOccurrence && (p.recurringItemKind === "Task" || p.recurringItemKind === "Habit")) {
+        p = { ...p, completed: !!p.occurrenceCompleted };
+      } else if (p.kind === "Task") {
+        const ids = p.isBatch && p.memberIds?.length ? p.memberIds : [p.id];
+        p = { ...p, completed: ids.every((id) => !!taskById.get(id)?.completed_at) };
+      } else if (p.kind === "Habit" && habitById.get(p.id)?.goal_id) {
+        p = { ...p, completed: !!goalSessionDone.get(p.id)?.done };
+      }
       if (p.kind === "Fixed Event" && !p.isAllDay) {
         const durationMs = p.end.getTime() - p.start.getTime();
         if (durationMs >= 24 * 60 * 60 * 1000) {
@@ -667,7 +685,7 @@ export function CalendarView({
       return p;
     });
     return { placed: finalPlaced, unscheduled: result.unscheduled };
-  }, [weekStart, viewMode, displayStart, displayEnd, fixedEvents, habits, tasks, eventMap, enrouteBlocks, occurrences, fixedEventOccurrences, habitOccurrences]);
+  }, [weekStart, viewMode, displayStart, displayEnd, fixedEvents, habits, tasks, eventMap, enrouteBlocks, occurrences, fixedEventOccurrences, habitOccurrences, goalSessionDone]);
 
   const itemsByDay = useMemo(() => {
     const map: Record<number, PlacedItem[]> = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
@@ -905,6 +923,93 @@ export function CalendarView({
     if (!item.isBatch) void rememberEffort(item.name, effort);
     setSelectedItem((prev) => (prev && prev.id === item.id ? { ...prev, effort, effortAuto: false } : prev));
     loadData();
+  }
+
+  /** Whether an item can be marked complete from the calendar. */
+  function canComplete(item: PlacedItem): boolean {
+    if (item.isRecurringOccurrence) return item.recurringItemKind === "Task" || item.recurringItemKind === "Habit";
+    if (item.kind === "Task") return true;
+    return item.kind === "Habit" && !!habits.find((h) => h.id === item.id)?.goal_id;
+  }
+
+  const [doneToast, setDoneToast] = useState<{ text: string; undo: () => Promise<void> } | null>(null);
+  const doneToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /**
+   * Marks an item done (or not done). A finished one-off task is pinned to the
+   * slot it was in, so it stays where you did it instead of being re-placed.
+   */
+  async function setItemComplete(item: PlacedItem, done: boolean, silent = false): Promise<void> {
+    const now = new Date().toISOString();
+    if (item.isRecurringOccurrence && item.recurringItemId && item.occurrenceDate) {
+      const isTask = item.recurringItemKind === "Task";
+      const table = isTask ? "task_occurrences" : "habit_occurrences";
+      const idCol = isTask ? "task_id" : "item_id";
+      const existing = isTask
+        ? occurrences.find((o) => o.task_id === item.recurringItemId && o.occurrence_date === item.occurrenceDate)
+        : habitOccurrences.find((o) => o.item_id === item.recurringItemId && o.occurrence_date === item.occurrenceDate);
+      const patch = { completed: done, completed_at: done ? now : null };
+      const { error } = existing
+        ? await supabase.from(table).update(patch).eq("id", existing.id)
+        : await supabase.from(table).insert({ [idCol]: item.recurringItemId, occurrence_date: item.occurrenceDate, ...patch });
+      if (error) throw new Error(error.message);
+    } else if (item.kind === "Task") {
+      const ids = item.isBatch && item.memberIds?.length ? item.memberIds : [item.id];
+      const before = tasks.filter((t) => ids.includes(t.id));
+      if (done) {
+        const { error } = await supabase
+          .from("tasks")
+          .update({ completed_at: now, search_start: item.start.toISOString(), deadline: item.end.toISOString() })
+          .in("id", ids);
+        if (error) throw new Error(error.message);
+        if (!silent) {
+          showDoneToast(`Completed: ${item.name}`, async () => {
+            // Undo restores each task's original window as well.
+            for (const t of before) {
+              await supabase.from("tasks").update({ completed_at: null, search_start: t.search_start, deadline: t.deadline }).eq("id", t.id);
+            }
+            await loadData();
+            scheduleAutoPush();
+          });
+        }
+      } else {
+        const { error } = await supabase.from("tasks").update({ completed_at: null }).in("id", ids);
+        if (error) throw new Error(error.message);
+      }
+    } else if (item.kind === "Habit") {
+      const habit = habits.find((h) => h.id === item.id);
+      if (!habit?.goal_id) return;
+      const existing = goalSessionDone.get(item.id);
+      const patch = { done, done_at: done ? now : null };
+      const { error } = existing
+        ? await supabase.from("goal_daily_items").update(patch).eq("id", existing.id)
+        : await supabase.from("goal_daily_items").insert({
+            goal_id: habit.goal_id,
+            week_start: formatLocalDate(getWeekStart(item.start)),
+            day: formatLocalDate(item.start),
+            habit_id: item.id,
+            start_at: item.start.toISOString(),
+            minutes: Math.round((item.end.getTime() - item.start.getTime()) / 60000),
+            focus: item.name.replace(/^🎯\s*/, ""),
+            ...patch,
+          });
+      if (error) throw new Error(error.message);
+    }
+    if (!silent && done && !(item.kind === "Task" && !item.isRecurringOccurrence)) {
+      showDoneToast(`Completed: ${item.name}`, async () => {
+        await setItemComplete({ ...item, completed: true }, false, true);
+        await loadData();
+      });
+    }
+    setSelectedItem((prev) => (prev && prev.id === item.id ? { ...prev, completed: done } : prev));
+    await loadData();
+    scheduleAutoPush();
+  }
+
+  function showDoneToast(text: string, undo: () => Promise<void>) {
+    setDoneToast({ text, undo });
+    if (doneToastTimer.current) clearTimeout(doneToastTimer.current);
+    doneToastTimer.current = setTimeout(() => setDoneToast(null), 6000);
   }
 
   const [dragItem, setDragItem] = useState<PlacedItem | null>(null);
@@ -1844,9 +1949,10 @@ export function CalendarView({
                         >
                           <div className="flex items-center gap-1">
                             <span className={`w-1.5 h-1.5 rounded-full ${colors.dot} shrink-0`} />
+                            {item.completed && <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" aria-label="Completed" />}
                             <span
                               className={`text-[11px] font-medium truncate ${
-                                isFixed ? "text-slate-300" : "text-slate-100"
+                                item.completed ? "line-through text-slate-500" : isFixed ? "text-slate-300" : "text-slate-100"
                               }`}
                             >
                               {item.name}
@@ -1977,9 +2083,10 @@ export function CalendarView({
                       >
                         <div className="flex items-center gap-1">
                           <span className={`w-1.5 h-1.5 rounded-full ${colors.dot} shrink-0`} />
+                          {item.completed && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" aria-label="Completed" />}
                           <span
                             className={`text-xs font-medium truncate ${
-                              isFixed ? "text-slate-300" : "text-slate-100"
+                              item.completed ? "line-through text-slate-500" : isFixed ? "text-slate-300" : "text-slate-100"
                             }`}
                           >
                             {item.name}
@@ -2094,6 +2201,16 @@ export function CalendarView({
           }}
           onSetPillar={(p) => updatePillar(selectedItem, p)}
           onSetEffort={(e) => updateEffort(selectedItem, e)}
+          canComplete={canComplete(selectedItem)}
+          onToggleComplete={async () => {
+            const item = selectedItem;
+            try {
+              await setItemComplete(item, !item.completed);
+              if (!item.completed) setSelectedItem(null);
+            } catch (e) {
+              showDragMessage(`Couldn't save: ${e instanceof Error ? e.message : "unknown error"}`, 5000);
+            }
+          }}
         />
       )}
 
@@ -2121,6 +2238,24 @@ export function CalendarView({
             setScopeDialog(null);
           }}
         />
+      )}
+
+      {/* Completed — with Undo */}
+      {doneToast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2 rounded-lg bg-emerald-600/95 text-white text-sm font-medium shadow-lg max-w-[90vw]">
+          <CheckCircle2 className="w-4 h-4 shrink-0" />
+          <span className="truncate">{doneToast.text}</span>
+          <button
+            onClick={async () => {
+              const t = doneToast;
+              setDoneToast(null);
+              await t.undo();
+            }}
+            className="shrink-0 rounded px-2 py-0.5 text-xs font-semibold bg-white/15 hover:bg-white/25"
+          >
+            Undo
+          </button>
+        </div>
       )}
 
       {/* Drag inline message */}
@@ -2302,6 +2437,8 @@ function ItemDetail({
   onEdit,
   onSetPillar,
   onSetEffort,
+  canComplete,
+  onToggleComplete,
 }: {
   item: PlacedItem;
   source: ItemSource;
@@ -2310,6 +2447,8 @@ function ItemDetail({
   onEdit: () => void;
   onSetPillar: (p: LifePillar | null) => void;
   onSetEffort: (e: Effort) => void;
+  canComplete: boolean;
+  onToggleComplete: () => void;
 }) {
   const colors = getPillarColor(item.pillar);
   return (
@@ -2332,7 +2471,20 @@ function ItemDetail({
             <X className="w-4 h-4 text-slate-400" />
           </button>
         </div>
-        <h3 className="text-lg font-semibold mb-3">{item.name}</h3>
+        <h3 className={`text-lg font-semibold mb-3 ${item.completed ? "line-through text-slate-400" : ""}`}>{item.name}</h3>
+        {canComplete && (
+          <button
+            onClick={onToggleComplete}
+            className={`mb-3 w-full py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-colors ${
+              item.completed
+                ? "bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20"
+                : "bg-emerald-600 text-white hover:bg-emerald-500"
+            }`}
+          >
+            <CheckCircle2 className="w-4 h-4" />
+            {item.completed ? "Completed · tap to undo" : item.isBatch ? `Mark all ${item.memberIds?.length ?? ""} complete` : "Mark complete"}
+          </button>
+        )}
         <div className="space-y-2 text-sm text-slate-300">
           <div className="flex items-center gap-2">
             <Clock className="w-4 h-4 text-slate-500" />
