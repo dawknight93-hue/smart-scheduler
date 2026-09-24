@@ -6,3 +6,6 @@ verify_jwt = true
 
 [functions.goal-research]
 verify_jwt = true
+
+[functions.briefing]
+verify_jwt = true
