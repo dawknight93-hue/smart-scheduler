@@ -133,6 +133,22 @@ interface GoogleEvent {
   recurringEventId?: string;
   originalStartTime?: { dateTime?: string; date?: string };
   extendedProperties?: { private?: Record<string, string> };
+  organizer?: { email?: string; self?: boolean };
+  guestsCanModify?: boolean;
+  locked?: boolean;
+}
+
+/**
+ * Whether Google would let you change this event's time, from what Google
+ * publishes: the calendar's accessRole, the event's locked flag, and — for
+ * events organized by someone else — guestsCanModify.
+ */
+function googleCanEdit(accessRole: string | undefined, ev: GoogleEvent): boolean {
+  const calendarWritable = !accessRole || accessRole === "owner" || accessRole === "writer";
+  if (!calendarWritable) return false;
+  if (ev.locked) return false;
+  if (ev.organizer && ev.organizer.self === false && !ev.guestsCanModify) return false;
+  return true;
 }
 
 // ---- Google Calendar mirror -------------------------------------------------
@@ -543,6 +559,10 @@ async function pullEvents(
 
     const data = await resp.json();
     const events: GoogleEvent[] = data.items ?? [];
+    const accessRole: string | undefined = data.accessRole;
+    if (accessRole) {
+      await supabase.from("calendar_connections").update({ access_role: accessRole }).eq("calendar_id", conn.calendar_id);
+    }
     for (const ev of events) seenIds.add(ev.id);
     if (!data.nextPageToken) fullyListed.add(conn.calendar_id);
 
@@ -592,6 +612,7 @@ async function pullEvents(
             end_time: evEnd.toISOString(),
             blocks_schedule: conn.role !== "display_only",
             is_all_day: isAllDay,
+            google_can_edit: googleCanEdit(accessRole, ev),
           })
           .eq("id", existing.item_id);
 
@@ -617,6 +638,7 @@ async function pullEvents(
               blocks_schedule: conn.role !== "display_only",
               is_all_day: isAllDay,
               pillar: guessedPillar,
+              google_can_edit: googleCanEdit(accessRole, ev),
             })
           .select("id")
           .maybeSingle();
