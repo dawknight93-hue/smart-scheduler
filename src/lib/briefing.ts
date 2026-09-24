@@ -47,6 +47,8 @@ export interface BriefItem {
   id: string;
   name: string;
   kind: string;
+  /** False for display-only calendars (Informational, Jatara's) — shown, never holds time. */
+  blocks?: boolean;
   start: Date;
   end: Date;
   allDay: boolean;
@@ -93,6 +95,7 @@ async function loadRange(start: Date, end: Date): Promise<RangeData> {
         pillar: p.pillar ?? null,
         flight: leg ? { origin: leg.origin, destination: leg.destination } : undefined,
         goalSession: goalHabitIds.has(p.id),
+        blocks: p.blocksSchedule !== false,
       });
     }
     for (const e of week.busy.filter((x) => x.is_all_day)) {
@@ -304,7 +307,7 @@ export async function buildDaily(now = new Date()): Promise<DailyBriefing> {
   }
   for (const u of trayed.values()) headsUp.push(`Not on the calendar: ${u.name} (${u.kind.toLowerCase()})`);
   // Overlapping timed commitments today
-  const timed = todayItems.filter((i) => !i.allDay && i.kind === "Fixed Event");
+  const timed = todayItems.filter((i) => !i.allDay && i.kind === "Fixed Event" && i.blocks !== false);
   for (let i = 0; i < timed.length; i++)
     for (let j = i + 1; j < timed.length; j++)
       if (timed[j].start < timed[i].end && timed[i].start < timed[j].end)

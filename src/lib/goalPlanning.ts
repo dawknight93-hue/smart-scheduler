@@ -109,7 +109,7 @@ export interface WeekData {
   fixedById: Map<string, FixedEvent>;
 }
 
-function occurrenceEvents<T extends { id: string; name: string; pillar?: LifePillar | null }>(
+function occurrenceEvents<T extends { id: string; name: string; pillar?: LifePillar | null; blocks_schedule?: boolean }>(
   items: T[],
   occ: OccRow[],
   idKey: "item_id" | "task_id",
@@ -128,7 +128,7 @@ function occurrenceEvents<T extends { id: string; name: string; pillar?: LifePil
       if (ex?.skipped) continue;
       const s = ex?.override_start ? new Date(ex.override_start) : new Date(day.getFullYear(), day.getMonth(), day.getDate(), start.getHours(), start.getMinutes());
       const e = ex?.override_end ? new Date(ex.override_end) : new Date(s.getTime() + minutes * 60000);
-      out.push({ id: `${it.id}--${date}`, name: it.name, start_time: s.toISOString(), end_time: e.toISOString(), pillar: it.pillar ?? null });
+      out.push({ id: `${it.id}--${date}`, name: it.name, start_time: s.toISOString(), end_time: e.toISOString(), pillar: it.pillar ?? null, blocks_schedule: it.blocks_schedule });
     }
   }
   return out;
