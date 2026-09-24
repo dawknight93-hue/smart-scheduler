@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, CalendarRange, ClipboardCheck, CloudLightning, DollarSign, Heart, Info, Loader2, Plane, Radar, RefreshCw, Sparkles, Sunrise, Target } from "lucide-react";
-import type { AwarenessNote, DailyAwareness, DutyStats } from "@/lib/awareness";
+import { AlertTriangle, SlidersHorizontal, CalendarRange, ClipboardCheck, CloudLightning, DollarSign, Heart, Info, Loader2, Plane, Radar, RefreshCw, Sparkles, Sunrise, Target } from "lucide-react";
+import type { AwarenessNote, AwareItem, DailyAwareness, DutyStats } from "@/lib/awareness";
+import { AwarenessRulesEditor } from "@/components/AwarenessRulesEditor";
 import { getPillarColor } from "@/lib/types";
 import { goalShortName } from "@/lib/goalPlanning";
 import { getWeekStart } from "@/lib/schedulingEngine";
@@ -40,6 +41,8 @@ function writeCache(key: string, value: string) {
 
 export function BriefingView({ onOpenReview }: { onOpenReview: () => void }) {
   const [kind, setKind] = useState<BriefingKind>(() => defaultBriefingKind());
+  // Awareness rules editor: closed, open, or open with a new rule drafted from an event.
+  const [rulesEditor, setRulesEditor] = useState<{ draft: { title: string; source?: string } | null } | null>(null);
   const [daily, setDaily] = useState<DailyBriefing | null>(null);
   const [period, setPeriod] = useState<PeriodBriefing | null>(null);
   const [weather, setWeather] = useState<WeatherResult[]>([]);
@@ -128,11 +131,24 @@ export function BriefingView({ onOpenReview }: { onOpenReview: () => void }) {
               </button>
             ))}
           </div>
+          <button onClick={() => setRulesEditor({ draft: null })} className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-slate-800 text-xs text-slate-300 hover:bg-slate-700" title="Awareness rules">
+            <SlidersHorizontal className="w-3.5 h-3.5" /> Rules
+          </button>
           <button onClick={() => load(true)} className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700" aria-label="Refresh briefing" title="Refresh">
             <RefreshCw className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
+
+      {rulesEditor && (
+        <AwarenessRulesEditor
+          draft={rulesEditor.draft}
+          onClose={(changed) => {
+            setRulesEditor(null);
+            if (changed) void load(false);
+          }}
+        />
+      )}
 
       {error && <div className="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-300">{error}</div>}
 
@@ -150,7 +166,7 @@ export function BriefingView({ onOpenReview }: { onOpenReview: () => void }) {
       </div>
 
       {loading ? null : daily ? (
-        <Daily b={daily} weather={weather} wxState={wxState} onChange={setDaily} />
+        <Daily b={daily} weather={weather} wxState={wxState} onChange={setDaily} onAddRule={(i) => setRulesEditor({ draft: { title: i.name, source: i.source } })} />
       ) : period ? (
         <Period b={period} onOpenReview={onOpenReview} />
       ) : null}
@@ -170,7 +186,19 @@ function Section({ icon, title, children }: { icon: React.ReactNode; title: stri
   );
 }
 
-function Daily({ b, weather, wxState, onChange }: { b: DailyBriefing; weather: WeatherResult[]; wxState: string; onChange: (b: DailyBriefing) => void }) {
+function Daily({
+  b,
+  weather,
+  wxState,
+  onChange,
+  onAddRule,
+}: {
+  b: DailyBriefing;
+  weather: WeatherResult[];
+  wxState: string;
+  onChange: (b: DailyBriefing) => void;
+  onAddRule: (i: AwareItem) => void;
+}) {
   const [tickError, setTickError] = useState<string | null>(null);
   async function tick(goalId: string, e: DayEntry, done: boolean) {
     const g = b.goals.find((x) => x.goal.id === goalId);
@@ -195,7 +223,7 @@ function Daily({ b, weather, wxState, onChange }: { b: DailyBriefing; weather: W
   }
   return (
     <>
-      <AwarenessCard a={b.awareness} />
+      <AwarenessCard a={b.awareness} onAddRule={onAddRule} />
 
       <Section icon={<CalendarRange className="w-4 h-4 text-blue-400" />} title={`Today · ${dayLabel(b.date)}`}>
         {b.utaToday && <div className="mb-2 inline-block rounded-full bg-emerald-600/15 px-2 py-0.5 text-[11px] font-medium text-emerald-300">UTA</div>}
@@ -471,7 +499,7 @@ const TONE_ICON: Record<AwarenessNote["tone"], React.ReactNode> = {
 };
 
 /** Info-only calendars (Informational, Jatara's) turned into notes and actions. */
-function AwarenessCard({ a }: { a: DailyAwareness }) {
+function AwarenessCard({ a, onAddRule }: { a: DailyAwareness; onAddRule: (i: AwareItem) => void }) {
   if (!a.notes.length && !a.fyi.length && !a.comingUp.length) return null;
   const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   return (
@@ -491,12 +519,17 @@ function AwarenessCard({ a }: { a: DailyAwareness }) {
             </span>
           </li>
         ))}
-        {a.fyi.map((f, i) => (
+        {a.fyi.map(({ item: f, noRule }, i) => (
           <li key={`fyi-${i}`} className="flex items-start gap-2 text-sm text-slate-300">
             <span className="mt-0.5 shrink-0">{TONE_ICON.info}</span>
             <span>
               {f.name.replace(/^[\s,]+/, "")}
               <span className="text-slate-500"> · {f.allDay ? "all day" : `${hhmm(f.start)}–${hhmm(f.end)}`}{f.source ? ` · ${f.source}` : ""}</span>
+              {noRule && (
+                <button onClick={() => onAddRule(f)} className="ml-2 text-xs text-blue-400 hover:underline">
+                  No rule yet · add one
+                </button>
+              )}
             </span>
           </li>
         ))}
