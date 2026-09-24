@@ -87,7 +87,7 @@ export function BriefingView({ onOpenReview }: { onOpenReview: () => void }) {
             }
           }
           setWeather(wx);
-          await writeSummary("daily", dailyFacts(b, wx), force);
+          await writeSummary("daily", dailyFacts(b, wx, new Date()), force);
         } else {
           const b = kind === "weekly" ? await buildWeekly() : await buildMonthly();
           setPeriod(b);
