@@ -22,6 +22,7 @@ import { goalDayEntries, loadDailyItems, type DailyItem, type DayEntry } from ".
 import { dailyAwareness, dutySentence, dutyStats, periodMarkers, type DailyAwareness, type DutyStats } from "./awareness";
 import { loadAwarenessRules } from "./awarenessRules";
 import type { LifePillar, Task, UnscheduledItem } from "./types";
+import { factCheck, type Removed } from "./factCheck";
 
 export type BriefingKind = "daily" | "weekly" | "monthly";
 
@@ -217,9 +218,42 @@ export async function fetchWeather(stops: WeatherStop[]): Promise<WeatherResult[
   return out;
 }
 
-export async function fetchSummary(kind: BriefingKind, facts: string): Promise<string> {
-  const { summary } = await callBriefing<{ summary: string }>({ action: "summary", kind, facts });
-  return stripResultClaims(summary);
+export interface SummaryResult {
+  text: string;
+  model: string;
+  warning?: string;
+  /** Sentences the fact-check took out (after one rewrite attempt). */
+  removed: Removed[];
+  /** True when the first draft failed the fact-check and was rewritten. */
+  retried: boolean;
+}
+
+/**
+ * Write the summary, then fact-check it against the facts. If any sentence
+ * fails, ask for one rewrite that names the problems; whatever still fails
+ * after that is removed and reported.
+ */
+export async function fetchSummary(kind: BriefingKind, facts: string, memory: string[] = []): Promise<SummaryResult> {
+  type Resp = { summary: string; model?: string; warning?: string };
+  const first = await callBriefing<Resp>({ action: "summary", kind, facts, memory });
+  let check = factCheck(stripResultClaims(first.summary), facts);
+  let resp = first;
+  let retried = false;
+  if (check.removed.length) {
+    const retryNote = check.removed.map((r) => `- "${r.sentence}" — ${r.reasons.join("; ")}`).join("\n");
+    try {
+      const second = await callBriefing<Resp>({ action: "summary", kind, facts, memory, retryNote });
+      const check2 = factCheck(stripResultClaims(second.summary), facts);
+      if (check2.text && check2.removed.length <= check.removed.length) {
+        check = check2;
+        resp = second;
+        retried = true;
+      }
+    } catch {
+      // keep the first draft, minus what failed
+    }
+  }
+  return { text: check.text, model: resp.model ?? "unknown model", warning: resp.warning, removed: check.removed, retried };
 }
 
 /**
@@ -694,9 +728,10 @@ export function periodFacts(b: PeriodBriefing, now = new Date()): string {
 }
 
 /** Cache key for the written summary so it's only regenerated when the facts change. */
-export function factsKey(kind: BriefingKind, facts: string): string {
+export function factsKey(kind: BriefingKind, facts: string, memory: string[] = []): string {
+  const text = facts + "\u0000" + memory.join("\u0000");
   let h = 0;
-  for (let i = 0; i < facts.length; i++) h = (Math.imul(31, h) + facts.charCodeAt(i)) | 0;
-  return `briefing-summary:${kind}:${h}`;
+  for (let i = 0; i < text.length; i++) h = (Math.imul(31, h) + text.charCodeAt(i)) | 0;
+  return `briefing-summary-v2:${kind}:${h}`;
 }
 
