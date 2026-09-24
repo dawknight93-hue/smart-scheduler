@@ -247,7 +247,7 @@ export function sessionNoun(g: PlanGoal, plural = true): string {
 export const TICKS_TRACKED_FROM = new Date(2026, 8, 21);
 
 const NO_RESULTS_RULE =
-  "The app records goal SESSIONS only (e.g. runs done). It has NO weight, time or other result readings: never state or imply a current weight, pounds lost, or being under/over a checkpoint number.";
+  "The app records goal SESSIONS only (e.g. runs ticked done). It has NO weight, time or other result readings: never state or imply a current weight, pounds lost, or being under/over a checkpoint number. Call sessions by their name (runs), not by the goal (not 'weight-loss sessions').";
 
 // ---------------------------------------------------------------------------
 // Goal progress
@@ -662,7 +662,9 @@ export function periodFacts(b: PeriodBriefing, now = new Date()): string {
         .map(
           (g) =>
             `goal "${goalShortName(g.goal)}" — ${g.held} of ${g.target} ${sessionNoun(g.goal)} on the calendar, ${
-              g.tracked ? `${g.done} ticked done` : "done-ticks weren't tracked yet that week (don't say none were done)"
+              g.tracked
+                ? `${g.done} ticked done`
+                : "whether they happened was NOT tracked that week — say only that they were scheduled; never say they were completed, done or missed"
             }${g.status ? ` (review ${g.status})` : " (week not reviewed)"}`
         )
         .join("; ")}`
