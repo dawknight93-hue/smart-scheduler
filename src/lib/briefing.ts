@@ -279,7 +279,7 @@ export async function buildDaily(now = new Date()): Promise<DailyBriefing> {
   const headsUp: string[] = [];
   // Overdue one-time tasks
   for (const t of range.tasks.filter((x) => !x.recurrence_enabled && !x.completed_at && new Date(x.deadline) < now)) {
-    headsUp.push(`Overdue: ${t.name} (was due ${dayLabel(new Date(t.deadline))} ${hhmm(new Date(t.deadline))})`);
+    headsUp.push(`Overdue: ${t.name} (was due ${relDay(new Date(t.deadline), now)} at ${hhmm(new Date(t.deadline))})`);
   }
   // Items the scheduler couldn't place this week
   const trayed = new Map<string, UnscheduledItem>();
@@ -479,10 +479,22 @@ function wxLine(w: WeatherResult): string {
   return `${w.iata} ${when}: ${f.condition}, ${f.tempMinF}–${f.tempMaxF}°F, wind ${f.windKt} kt gust ${f.gustKt} kt, precip chance ${f.precipPct}%${f.visSm !== null && f.visSm < 5 ? `, visibility ${f.visSm} sm` : ""}`;
 }
 
-export function dailyFacts(b: DailyBriefing, wx: WeatherResult[]): string {
-  const lines = [`DAILY BRIEFING for ${dayLabel(b.date)}.`];
+/** "today", "yesterday", "tomorrow", or a date — so the summary never guesses relative days. */
+function relDay(d: Date, now: Date): string {
+  const diff = Math.round((startOfDay(d).getTime() - startOfDay(now).getTime()) / DAY);
+  return diff === 0 ? "today" : diff === -1 ? "yesterday" : diff === 1 ? "tomorrow" : dayLabel(d);
+}
+
+export function dailyFacts(b: DailyBriefing, wx: WeatherResult[], now = new Date()): string {
+  const lines = [
+    `DAILY BRIEFING for ${dayLabel(b.date)}. Current time: ${hhmm(now)} on ${dayLabel(now)}. Items marked [done] are already over; only talk about what's still ahead unless something was missed.`,
+  ];
   if (b.allDay.length) lines.push(`All-day: ${b.allDay.map((i) => i.name).join("; ")}`);
-  lines.push(b.agenda.length ? `Agenda: ${b.agenda.map((i) => `${hhmm(i.start)}–${hhmm(i.end)} ${i.name}`).join("; ")}` : "Agenda: nothing timed today.");
+  lines.push(
+    b.agenda.length
+      ? `Agenda today: ${b.agenda.map((i) => `${hhmm(i.start)}–${hhmm(i.end)} ${i.name}${i.end <= now ? " [done]" : i.start <= now ? " [now]" : ""}`).join("; ")}`
+      : "Agenda: nothing timed today."
+  );
   if (wx.length) lines.push(`Airport weather: ${wx.map(wxLine).join(" | ")}`);
   if (b.goals.length)
     lines.push(`Goals: ${b.goals.map((g) => `${goalShortName(g.goal)} — ${g.done} of ${g.target} done this week (${g.scheduled} on the calendar)${g.nextCheckpoint ? `, next checkpoint "${g.nextCheckpoint.title}" in ${g.nextCheckpoint.daysLeft} days` : ""}`).join("; ")}`);
