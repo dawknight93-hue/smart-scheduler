@@ -447,9 +447,13 @@ export async function buildWeekly(now = new Date()): Promise<PeriodBriefing> {
   const aheadStart = addDays(backStart, 7);
   const goals = await loadGoals();
   const fmt = (d: Date) => d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  // Mid-week, "ahead" is the rest of this week (days already gone aren't ahead).
+  const today = startOfDay(now);
+  const from = aheadStart < today ? today : aheadStart;
+  const aheadLabel = from > aheadStart ? `rest of this week, ${fmt(from)} – ${fmt(addDays(aheadStart, 6))}` : `${fmt(aheadStart)} – ${fmt(addDays(aheadStart, 6))}`;
   const [back, ahead] = await Promise.all([
     lookBack(`${fmt(backStart)} – ${fmt(addDays(backStart, 6))}`, backStart, aheadStart, goals, true),
-    lookAhead(`${fmt(aheadStart)} – ${fmt(addDays(aheadStart, 6))}`, aheadStart, addDays(aheadStart, 7), goals, true),
+    lookAhead(aheadLabel, from, addDays(aheadStart, 7), goals, true),
   ]);
   return { kind: "weekly", back, ahead };
 }
@@ -462,9 +466,11 @@ export async function buildMonthly(now = new Date()): Promise<PeriodBriefing> {
   const aheadEnd = new Date(aheadStart.getFullYear(), aheadStart.getMonth() + 1, 1);
   const goals = await loadGoals();
   const fmt = (d: Date) => d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  const today = startOfDay(now);
+  const from = aheadStart < today ? today : aheadStart;
   const [back, ahead] = await Promise.all([
     lookBack(fmt(backStart), backStart, aheadStart, goals, false),
-    lookAhead(fmt(aheadStart), aheadStart, aheadEnd, goals, false),
+    lookAhead(from > aheadStart ? `rest of ${fmt(aheadStart)}` : fmt(aheadStart), from, aheadEnd, goals, false),
   ]);
   return { kind: "monthly", back, ahead };
 }
@@ -497,7 +503,11 @@ export function dailyFacts(b: DailyBriefing, wx: WeatherResult[], now = new Date
   );
   if (wx.length) lines.push(`Airport weather: ${wx.map(wxLine).join(" | ")}`);
   if (b.goals.length)
-    lines.push(`Goals: ${b.goals.map((g) => `${goalShortName(g.goal)} — ${g.done} of ${g.target} done this week (${g.scheduled} on the calendar)${g.nextCheckpoint ? `, next checkpoint "${g.nextCheckpoint.title}" in ${g.nextCheckpoint.daysLeft} days` : ""}`).join("; ")}`);
+    lines.push(
+      `Goals (session counts show how many planned sessions happened this week — they are NOT the goal's result): ${b.goals
+        .map((g) => `goal "${goalShortName(g.goal)}": ${g.done} of ${g.target} weekly sessions done so far (${g.scheduled} on the calendar)${g.nextCheckpoint ? `, next checkpoint "${g.nextCheckpoint.title}" in ${g.nextCheckpoint.daysLeft} days` : ""}`)
+        .join("; ")}`
+    );
   lines.push(b.headsUp.length ? `Heads-up: ${b.headsUp.join("; ")}` : "Heads-up: none.");
   const t = b.tomorrow;
   lines.push(
@@ -506,11 +516,15 @@ export function dailyFacts(b: DailyBriefing, wx: WeatherResult[], now = new Date
   return lines.join("\n");
 }
 
-export function periodFacts(b: PeriodBriefing): string {
+export function periodFacts(b: PeriodBriefing, now = new Date()): string {
   const k = b.kind === "weekly" ? "WEEKLY" : "MONTHLY";
-  const lines = [`${k} BRIEFING. Looking back at ${b.back.label}; looking ahead to ${b.ahead.label}.`];
+  const lines = [`${k} BRIEFING. Current time: ${hhmm(now)} on ${dayLabel(now)}. Looking back at ${b.back.label}; looking ahead to ${b.ahead.label}.`];
   if (b.back.goalLines.length)
-    lines.push(`Goal sessions last period: ${b.back.goalLines.map((g) => `${goalShortName(g.goal)} ${g.held}/${g.target}${g.status ? ` (review ${g.status})` : " (not reviewed)"}`).join("; ")}`);
+    lines.push(
+      `Goal sessions held last week (session counts, NOT the goal's result — e.g. runs done, not pounds lost): ${b.back.goalLines
+        .map((g) => `goal "${goalShortName(g.goal)}": ${g.held} of ${g.target} sessions${g.status ? ` (review ${g.status})` : " (week not reviewed)"}`)
+        .join("; ")}`
+    );
   if (b.kind === "monthly")
     lines.push(`Weekly reviews: ${b.back.reviewsByGoal.map((r) => `${goalShortName(r.goal)} ${r.approved} on target, ${r.short} short, ${r.skipped} skipped`).join("; ") || "none"}`);
   lines.push(`Tasks completed: ${b.back.tasksCompleted.length}${b.back.tasksCompleted.length ? ` (${b.back.tasksCompleted.slice(0, 8).join(", ")})` : ""}`);
