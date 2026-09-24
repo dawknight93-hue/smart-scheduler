@@ -101,6 +101,11 @@ function layoutStyle(l: ItemLayout | undefined): React.CSSProperties {
   return { left: `calc(${l.col * w}% + 2px)`, width: `calc(${l.span * w}% - 4px)` };
 }
 
+/** Display-only events (Informational, Jatara's calendar) are shown but never hold time. */
+function isNonBlocking(p: PlacedItem): boolean {
+  return p.kind === "Fixed Event" && p.blocksSchedule === false;
+}
+
 function overlapsUta(start: Date, end: Date, fixedEvents: FixedEvent[]): boolean {
   return utaRanges(fixedEvents).some(([a, b]) => start < b && a < end);
 }
@@ -132,6 +137,7 @@ function findNextFreeSlot(
         for (const other of allItems) {
           if (other.id === itemToMove.id) continue;
           if (other.kind === "Enroute") continue;
+          if (isNonBlocking(other)) continue;
           if (rangesOverlap(slotStart, slotEnd, other.start, other.end)) {
             conflict = true;
             break;
@@ -987,7 +993,7 @@ export function CalendarView({
     }
     const overlaps = placed
       // All-day items sit in their own row and don't conflict with timed ones.
-      .filter((p) => p.id !== item.id && p.kind !== "Enroute" && !p.isAllDay && rangesOverlap(newStart, newEnd, p.start, p.end))
+      .filter((p) => p.id !== item.id && p.kind !== "Enroute" && !p.isAllDay && !isNonBlocking(p) && rangesOverlap(newStart, newEnd, p.start, p.end))
       .map((p) => p.name);
     return { overlaps, notes };
   }
@@ -1315,6 +1321,7 @@ export function CalendarView({
       p.id !== item.id &&
       p.kind !== "Enroute" &&
       !p.isAllDay &&
+      !isNonBlocking(p) &&
       rangesOverlap(newStart, new Date(newStart.getTime() + durationMin * 60000), p.start, p.end)
     );
 
