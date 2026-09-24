@@ -16,9 +16,10 @@ const COMPOUND_MODEL = "openai/gpt-oss-120b";
 const EXTRACTION_MODEL = "openai/gpt-oss-120b";
 
 interface GoalResearchRequest {
-  action: "kickoff" | "chat" | "history" | "cascade";
+  action: "kickoff" | "chat" | "history" | "cascade" | "daily";
   goal_id?: string;
   message?: string;
+  sessions?: { ref: string; day: string; minutes: number }[];
 }
 
 interface TavilyResult {
@@ -503,6 +504,74 @@ async function handleCascade(goalId: string) {
   return { goal: saved };
 }
 
+/**
+ * Daily level of the cascade: one short focus line (plus up to 3 steps) for
+ * each approved session this week, written from the goal's next checkpoint and
+ * what got done in recent sessions. Returns the lines; the app saves them.
+ */
+async function handleDaily(goalId: string, sessions: { ref: string; day: string; minutes: number }[]) {
+  if (!sessions.length) return { items: [] };
+  const { data: goal, error } = await supabase
+    .from("goals")
+    .select("id, pillar, specific, measurable, time_bound, approach, deadline, weekly_target, cadence_label, milestones")
+    .eq("id", goalId)
+    .maybeSingle();
+  if (error) throw new Error(`Failed to load goal: ${error.message}`);
+  if (!goal) throw new Error("Goal not found.");
+
+  const today = new Date().toISOString().slice(0, 10);
+  const open = ((goal.milestones ?? []) as Milestone[]).filter((m) => !m.done).sort((a, b) => a.due.localeCompare(b.due)).slice(0, 3);
+  const since = new Date(Date.now() - 21 * 86400000).toISOString().slice(0, 10);
+  const { data: recent } = await supabase
+    .from("goal_daily_items")
+    .select("day, focus, done")
+    .eq("goal_id", goalId)
+    .gte("day", since)
+    .lt("day", today)
+    .order("day");
+
+  const system =
+    "You turn a goal's weekly sessions into a day-by-day plan. Today is " + today + ". " +
+    "For each session, write a focus: one concrete thing to do in that session, 3 to 9 words, imperative, specific to the chosen approach and the next checkpoint (e.g. 'Log August spending into the budget sheet', 'Read Romans 5 and journal one takeaway'). " +
+    "Add 0 to 3 short steps only if they help; they must fit in the session length. " +
+    "Build the sessions on each other across the week so they move toward the next checkpoint; if a recent session was not done, pick its work back up first. " +
+    "Don't invent facts about the user, don't repeat the same focus twice, and don't restate the goal. " +
+    "Respond with one JSON object only: {\"items\": [{\"ref\": string, \"focus\": string, \"steps\": [string]}]} with exactly one item per session ref given.";
+  const user =
+    `Pillar: ${goal.pillar}\nGoal: ${goal.specific ?? "n/a"}\nMeasure: ${goal.measurable ?? "n/a"}\nDeadline: ${goal.deadline ? String(goal.deadline).slice(0, 10) : goal.time_bound ?? "n/a"}\n` +
+    `Approach: ${goal.approach ?? "n/a"}\nSession name: ${goal.weekly_target ?? "Session"} (${goal.cadence_label ?? ""})\n` +
+    `Next checkpoints: ${open.length ? open.map((m) => `${m.title} by ${m.due}${m.metric ? ` (${m.metric})` : ""}`).join("; ") : "none left"}\n` +
+    `Recent sessions: ${(recent ?? []).length ? (recent ?? []).map((r: any) => `${r.day} ${r.done ? "[done]" : "[not done]"} ${r.focus}`).join("; ") : "none yet"}\n` +
+    `Sessions this week:\n${sessions.map((s) => `- ref ${s.ref}: ${s.day}, ${s.minutes} min`).join("\n")}`;
+
+  const resp = await fetchWithRetry(GROQ_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${Deno.env.get("GROQ_API_KEY")}` },
+    body: JSON.stringify({
+      model: EXTRACTION_MODEL,
+      response_format: { type: "json_object" },
+      messages: [{ role: "system", content: system }, { role: "user", content: user }],
+    }),
+  });
+  if (!resp.ok) throw new Error(`Daily plan request failed: ${resp.status} ${await resp.text()}`);
+  const content: string = (await resp.json()).choices?.[0]?.message?.content ?? "{}";
+  let parsed: any;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    throw new Error("The planner returned something unreadable — try again.");
+  }
+  const refs = new Set(sessions.map((s) => s.ref));
+  const items = (Array.isArray(parsed.items) ? parsed.items : [])
+    .filter((i: any) => i && refs.has(String(i.ref)) && typeof i.focus === "string" && i.focus.trim())
+    .map((i: any) => ({
+      ref: String(i.ref),
+      focus: i.focus.trim().replace(/\.$/, "").slice(0, 120),
+      steps: (Array.isArray(i.steps) ? i.steps : []).filter((x: unknown) => typeof x === "string" && x.trim()).map((x: string) => x.trim().slice(0, 120)).slice(0, 3),
+    }));
+  return { items };
+}
+
 async function handleHistory(goalId: string) {
   const goal = await fetchGoal(goalId);
   const messages = await fetchAllMessages(goalId);
@@ -538,6 +607,12 @@ Deno.serve(async (req: Request) => {
       case "cascade": {
         if (!body.goal_id) throw new Error("goal_id is required.");
         result = await handleCascade(body.goal_id);
+        break;
+      }
+      case "daily": {
+        if (!body.goal_id) throw new Error("goal_id is required.");
+        if (!Array.isArray(body.sessions)) throw new Error("sessions is required.");
+        result = await handleDaily(body.goal_id, body.sessions.slice(0, 14));
         break;
       }
       default:
