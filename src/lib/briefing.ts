@@ -569,7 +569,8 @@ export function periodFacts(b: PeriodBriefing, now = new Date()): string {
   const a = b.ahead;
   lines.push(`Flying days ahead: ${a.flightDays.length}${a.flightDays.length ? ` (${a.flightDays.map((f) => `${dayLabel(f.date)} ${f.route}`).join("; ")})` : ""}`);
   lines.push(`UTA days ahead: ${a.utaDays.length ? a.utaDays.map(dayLabel).join(", ") : "none"}`);
-  if (a.busiest) lines.push(`Busiest day: ${dayLabel(a.busiest.date)} with ${a.busiest.hours} booked hours`);
+  if (a.busiest) lines.push(`Busiest day: ${dayLabel(a.busiest.date)} with ${a.busiest.hours} hours of scheduled items (appointments, tasks and habits — not flight duty unless a flying day is listed above)`);
+  lines.push("Weather is not part of this briefing; do not mention weather.");
   lines.push(`Deadlines and checkpoints ahead: ${a.deadlines.length ? a.deadlines.map((d) => `${dayLabel(d.date)} ${d.text}`).join("; ") : "none"}`);
   return lines.join("\n");
 }
