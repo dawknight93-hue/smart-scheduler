@@ -18,6 +18,9 @@ const corsHeaders = {
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const MODEL = "openai/gpt-oss-120b";
+// Summaries are written by Claude Sonnet 5 when ANTHROPIC_API_KEY is set; Groq is the fallback.
+const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+const CLAUDE_MODEL = "claude-sonnet-5";
 const AWC = "https://aviationweather.gov/api/data";
 const AWC_HEADERS = { "User-Agent": "SmartScheduler/1.0 (personal crew briefing)" };
 
@@ -157,23 +160,64 @@ async function handleWeather(stops: Stop[]) {
   return { stops: results };
 }
 
-async function handleSummary(kind: string, facts: string) {
+async function claudeText(system: string, user: string, key: string): Promise<string> {
+  const resp = await fetch(ANTHROPIC_URL, {
+    method: "POST",
+    headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 1500,
+      // A short summary doesn't need extended reasoning; keeps it fast.
+      thinking: { type: "disabled" },
+      system,
+      messages: [{ role: "user", content: user }],
+    }),
+  });
+  if (!resp.ok) throw new Error(`Claude request failed (${resp.status}): ${(await resp.text()).slice(0, 300)}`);
+  const data = await resp.json();
+  // Read text blocks by type, not position.
+  return ((data.content ?? []) as { type: string; text?: string }[])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text ?? "")
+    .join("")
+    .trim();
+}
+
+async function groqText(system: string, user: string): Promise<string> {
+  const resp = await fetch(GROQ_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${Deno.env.get("GROQ_API_KEY")}` },
+    body: JSON.stringify({ model: MODEL, messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
+  });
+  if (!resp.ok) throw new Error(`Summary request failed (${resp.status})`);
+  const data = await resp.json();
+  return String(data.choices?.[0]?.message?.content ?? "").trim();
+}
+
+async function handleSummary(kind: string, facts: string, memory: string[], retryNote: string | null) {
   const system =
     "You write a short briefing for Oshane, an airline First Officer based in MIA who plans his life around seven pillars (Spiritual, Family, Physical, Civ Career, Mil Career, Mental, Financial). " +
     "Using ONLY the facts provided, write 3 to 5 sentences of plain prose (no lists, no headings, no markdown), friendly and direct like a good crew briefing. " +
     "Lead with what matters most for this " + kind + " briefing: the first commitment or departure, flights and any notable weather (thunderstorms, low visibility, strong gusts), goal progress, and heads-ups that need action. " +
     "Use 24-hour times like 07:30. Never invent events, numbers or advice not supported by the facts. Only mention weather if an 'Airport weather' line is in the facts. If there is little going on, say so briefly. " +
     "Situational-awareness facts come from info-only calendars: they are context and actions, never booked time or commitments. When they include a reserve day, proffer window, assignment timing, open-time or bid window, payday or bill, weave the most important one into a sentence that starts 'For your situational awareness,' and keep its exact times and actions. " +
-    "For weekly and monthly briefings, use the duty-day counts to say how the period went and what it means for the month (for example, reserve days with no flying count toward his days off).";
-  const resp = await fetch(GROQ_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${Deno.env.get("GROQ_API_KEY")}` },
-    body: JSON.stringify({ model: MODEL, messages: [{ role: "system", content: system }, { role: "user", content: facts.slice(0, 12000) }] }),
-  });
-  if (!resp.ok) throw new Error(`Summary request failed (${resp.status})`);
-  const data = await resp.json();
-  const text: string = data.choices?.[0]?.message?.content ?? "";
-  return { summary: text.trim() };
+    "For weekly and monthly briefings, use the duty-day counts to say how the period went and what it means for the month (for example, reserve days with no flying count toward his days off). " +
+    "Every time, date and number you write must appear in the facts exactly; if you're not sure, leave it out." +
+    (memory.length
+      ? "\n\nHis standing corrections from earlier briefings — always follow these:\n" + memory.map((m) => `- ${m}`).join("\n")
+      : "");
+  const user = facts.slice(0, 16000) + (retryNote ? `\n\nYOUR PREVIOUS DRAFT HAD PROBLEMS. Rewrite the whole summary and drop or fix these sentences (only use times, dates and numbers that appear in the facts):\n${retryNote}` : "");
+  const key = Deno.env.get("ANTHROPIC_API_KEY");
+  if (key) {
+    try {
+      return { summary: await claudeText(system, user, key), model: "Claude Sonnet 5" };
+    } catch (e) {
+      console.error(e);
+      // Fall through to Groq so the Briefing still has a summary.
+      return { summary: await groqText(system, user), model: "Groq gpt-oss-120b (Claude unavailable)", warning: String(e).slice(0, 200) };
+    }
+  }
+  return { summary: await groqText(system, user), model: "Groq gpt-oss-120b (Claude key not set)" };
 }
 
 Deno.serve(async (req: Request) => {
@@ -186,7 +230,8 @@ Deno.serve(async (req: Request) => {
       result = await handleWeather(body.stops.slice(0, 40));
     } else if (body.action === "summary") {
       if (typeof body.facts !== "string") throw new Error("facts is required.");
-      result = await handleSummary(String(body.kind ?? "daily"), body.facts);
+      const memory = Array.isArray(body.memory) ? body.memory.filter((m: unknown) => typeof m === "string" && m.trim()).slice(0, 40).map((m: string) => m.slice(0, 300)) : [];
+      result = await handleSummary(String(body.kind ?? "daily"), body.facts, memory, typeof body.retryNote === "string" ? body.retryNote.slice(0, 1500) : null);
     } else {
       throw new Error("Unknown action.");
     }
