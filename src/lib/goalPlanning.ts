@@ -7,6 +7,7 @@ import { supabase } from "./supabase";
 import { runEngine, addDays, getWeekStart, WORK_START_HOUR, WORK_END_HOUR } from "./schedulingEngine";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate } from "./recurrence";
 import type { ContextTag, FixedEvent, Habit, LifePillar, Task } from "./types";
+import { loadDailyItems, writeDailyPlan, type DailySession } from "./goalDaily";
 
 /** Order goals compete for time in the Weekly Review (Flight Manual, Rev G). */
 export const GOAL_PRIORITY: LifePillar[] = ["spiritual", "family", "physical", "civ_career", "mil_career", "mental", "financial"];
@@ -331,9 +332,14 @@ export function sessionName(goal: PlanGoal): string {
   return `🎯 ${goal.weekly_target ?? "Goal session"}`;
 }
 
-/** Adds the approved sessions as habits pinned to their proposed slots and records the review. */
+/**
+ * Adds the approved sessions as habits pinned to their proposed slots, records
+ * the review, then writes the Daily level: a focus for every session this week
+ * that doesn't have one yet (a failed focus request never undoes the approval).
+ */
 export async function approveGoalWeek(plan: GoalWeekPlan, sessions: ProposedSession[], weekStart: Date): Promise<void> {
   const g = plan.goal;
+  const daily: DailySession[] = [];
   if (sessions.length) {
     const rows = sessions.map((s) => ({
       name: sessionName(g),
@@ -345,11 +351,27 @@ export async function approveGoalWeek(plan: GoalWeekPlan, sessions: ProposedSess
       pillar: g.pillar,
       goal_id: g.id,
     }));
-    const { error } = await supabase.from("habits").insert(rows);
+    const { data, error } = await supabase.from("habits").insert(rows).select("id, search_start, search_end");
     if (error) throw new Error(error.message);
+    for (const h of (data as Pick<Habit, "id" | "search_start" | "search_end">[]) ?? []) {
+      daily.push({ habitId: h.id, start: new Date(h.search_start), end: new Date(h.search_end) });
+    }
   }
   const scheduled = g.plan_mode === "count" ? plan.counted.length : plan.existing.length + sessions.length;
   await recordReview(g.id, weekStart, plan.target, scheduled, scheduled >= plan.target ? "approved" : "short");
+
+  if (g.plan_mode !== "count") {
+    try {
+      const items = await loadDailyItems(weekStart, addDays(weekStart, 7));
+      const covered = new Set(items.map((i) => i.habit_id));
+      for (const h of plan.existing) {
+        if (!covered.has(h.id)) daily.push({ habitId: h.id, start: new Date(h.search_start), end: new Date(h.search_end) });
+      }
+      if (daily.length) await writeDailyPlan(g, daily, weekStart, items);
+    } catch (e) {
+      console.warn("Daily plan not written:", e);
+    }
+  }
 }
 
 export async function recordReview(goalId: string, weekStart: Date, target: number, scheduled: number, status: "approved" | "skipped" | "short", note?: string) {
@@ -382,22 +404,25 @@ export interface VerifyResult {
   target: number;
   held: number;
   offCalendar: number;
+  /** Sessions ticked done so far (Daily level). */
+  done: number;
 }
 
-export function verifyWeek(goals: PlanGoal[], week: WeekData): VerifyResult[] {
+export function verifyWeek(goals: PlanGoal[], week: WeekData, doneByGoal: Map<string, number> = new Map()): VerifyResult[] {
   const r = runEngine(week.weekStart, week.busy, week.habits, week.tasks);
   const placedIds = new Set(r.placed.map((p) => p.id));
   return sortByPriority(goals).map((g) => {
     const target = g.cadence_sessions_per_week ?? 0;
+    const done = doneByGoal.get(g.id) ?? 0;
     if (g.plan_mode === "count") {
       const n = countGoalEvents(g, week).length;
-      return { goalId: g.id, target, held: n, offCalendar: 0 };
+      return { goalId: g.id, target, held: n, offCalendar: 0, done };
     }
     const mine = week.habits.filter(
       (h) => h.goal_id === g.id && new Date(h.search_start) >= week.weekStart && new Date(h.search_start) < week.weekEnd
     );
     const held = mine.filter((h) => placedIds.has(h.id)).length;
-    return { goalId: g.id, target, held, offCalendar: mine.length - held };
+    return { goalId: g.id, target, held, offCalendar: mine.length - held, done };
   });
 }
 

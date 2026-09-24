@@ -18,6 +18,7 @@ import {
   type WeekData,
   type WeekReviewRow,
 } from "./goalPlanning";
+import { goalDayEntries, loadDailyItems, type DailyItem, type DayEntry } from "./goalDaily";
 import type { LifePillar, Task, UnscheduledItem } from "./types";
 
 export type BriefingKind = "daily" | "weekly" | "monthly";
@@ -213,36 +214,43 @@ export async function fetchSummary(kind: BriefingKind, facts: string): Promise<s
 export interface GoalProgress {
   goal: PlanGoal;
   target: number;
+  /** Sessions ticked done this week (Daily level). */
   done: number;
+  /** Sessions whose time has already come this week. */
+  past: number;
   scheduled: number;
+  /** Today's sessions with their focus. */
+  today: DayEntry[];
+  /** Earlier sessions this week that were never ticked done. */
+  unticked: DayEntry[];
   nextCheckpoint: { title: string; due: string; daysLeft: number } | null;
   deadlineDays: number | null;
 }
 
-function goalProgress(goals: PlanGoal[], week: WeekData | undefined, now: Date): GoalProgress[] {
+function goalProgress(goals: PlanGoal[], week: WeekData | undefined, now: Date, items: DailyItem[]): GoalProgress[] {
   if (!week) return [];
   const planned = sortByPriority(goals.filter((g) => g.status === "active" && g.plan_mode && (g.cadence_sessions_per_week ?? 0) > 0));
   const r = runEngine(week.weekStart, week.busy, week.habits, week.tasks);
   const placedById = new Map(r.placed.map((p) => [p.id, p]));
   const today = startOfDay(now);
   return planned.map((g) => {
-    let done = 0;
-    let scheduled = 0;
-    if (g.plan_mode === "count") {
-      const evs = countGoalEvents(g, week);
-      scheduled = evs.length;
-      done = evs.filter((e) => e.start <= now).length;
-    } else {
-      const mine = week.habits.filter((h) => h.goal_id === g.id).map((h) => placedById.get(h.id)).filter(Boolean);
-      scheduled = mine.length;
-      done = mine.filter((p) => p!.end <= now).length;
-    }
+    const sessions = week.habits
+      .filter((h) => h.goal_id === g.id && new Date(h.search_start) >= week.weekStart && new Date(h.search_start) < week.weekEnd)
+      .map((h) => {
+        const p = placedById.get(h.id);
+        return { id: h.id, start: p?.start ?? new Date(h.search_start), end: p?.end ?? new Date(h.search_end) };
+      });
+    const entries = goalDayEntries(g, sessions, g.plan_mode === "count" ? countGoalEvents(g, week) : [], items);
+    const isPast = (e: DayEntry) => (e.start ?? addDays(e.day, 1)) <= now;
     const next = (g.milestones ?? []).filter((m) => !m.done && new Date(`${m.due}T23:59:00`) >= today).sort((a, b) => a.due.localeCompare(b.due))[0];
     return {
       goal: g,
       target: g.cadence_sessions_per_week ?? 0,
-      done,
-      scheduled,
+      done: entries.filter((e) => e.done).length,
+      past: entries.filter(isPast).length,
+      scheduled: entries.length,
+      today: entries.filter((e) => e.day.getTime() === today.getTime()),
+      unticked: entries.filter((e) => !e.done && e.day < today),
       nextCheckpoint: next ? { title: next.title, due: next.due, daysLeft: Math.round((new Date(`${next.due}T00:00:00`).getTime() - today.getTime()) / DAY) } : null,
       deadlineDays: g.deadline ? Math.round((startOfDay(new Date(g.deadline)).getTime() - today.getTime()) / DAY) : null,
     };
@@ -269,7 +277,12 @@ export interface DailyBriefing {
 export async function buildDaily(now = new Date()): Promise<DailyBriefing> {
   const today = startOfDay(now);
   const tomorrow = addDays(today, 1);
-  const [range, goals] = await Promise.all([loadRange(today, addDays(today, 2)), loadGoals()]);
+  const weekStart = getWeekStart(today);
+  const [range, goalRows, dailyItems] = await Promise.all([
+    loadRange(today, addDays(today, 2)),
+    loadGoals(),
+    loadDailyItems(weekStart, addDays(weekStart, 7)).catch(() => [] as DailyItem[]),
+  ]);
   const todayItems = dayItems(range.items, today);
   const tomorrowItems = dayItems(range.items, tomorrow);
   const allFixed = range.weeks.flatMap((w) => w.busy);
@@ -301,6 +314,14 @@ export async function buildDaily(now = new Date()): Promise<DailyBriefing> {
     const nextUp = [...todayItems, ...tomorrowItems].find((i) => !i.allDay && !i.enroute && !i.flight && i.start >= home.start && i.start.getTime() - home.end.getTime() < 3600000);
     if (nextUp) headsUp.push(`Tight turnaround: home ~${hhmm(home.end)}, then ${nextUp.name} at ${hhmm(nextUp.start)}`);
   }
+  const goals = goalProgress(goalRows, range.weeks.find((w) => w.weekStart.getTime() === weekStart.getTime()), now, dailyItems);
+  // Earlier goal sessions this week nobody ticked done
+  for (const g of goals) {
+    if (g.unticked.length)
+      headsUp.push(
+        `Not ticked done: ${g.unticked.map((e) => `${dayLabel(e.day)} ${e.focus ?? e.title}`).join("; ")} (${goalShortName(g.goal)}) — did ${g.unticked.length === 1 ? "it" : "they"} happen?`
+      );
+  }
   if (isUta(today)) headsUp.unshift("UTA today — Family, Desk, Home and Errand items are kept off the calendar.");
   else if (isUta(tomorrow)) headsUp.push("UTA tomorrow.");
 
@@ -319,7 +340,7 @@ export async function buildDaily(now = new Date()): Promise<DailyBriefing> {
     utaTomorrow: isUta(tomorrow),
     flightsToday: todayItems.filter((i) => i.flight),
     weatherStops: weatherStops([...todayItems, ...tomorrowItems].filter((i) => i.flight && i.end > now)),
-    goals: goalProgress(goals, range.weeks.find((w) => w.weekStart.getTime() === getWeekStart(today).getTime()), now),
+    goals,
     headsUp,
     tomorrow: { first, leaveBy, firstFlight, flights: tomorrowItems.filter((i) => i.flight), earlyStart },
   };
@@ -330,7 +351,7 @@ export async function buildDaily(now = new Date()): Promise<DailyBriefing> {
 
 export interface PeriodLookBack {
   label: string;
-  goalLines: { goal: PlanGoal; held: number; target: number; status: WeekReviewRow["status"] | null }[];
+  goalLines: { goal: PlanGoal; held: number; done: number; target: number; status: WeekReviewRow["status"] | null }[];
   reviewsByGoal: { goal: PlanGoal; approved: number; short: number; skipped: number }[];
   tasksCompleted: string[];
   checkpointsHit: string[];
@@ -406,11 +427,12 @@ async function lookBack(label: string, start: Date, end: Date, goals: PlanGoal[]
   const active = sortByPriority(goals.filter((g) => g.status === "active" && g.plan_mode));
   let goalLines: PeriodLookBack["goalLines"] = [];
   if (weekly) {
-    const week = await loadWeekData(start);
+    const [week, items] = await Promise.all([loadWeekData(start), loadDailyItems(start, end).catch(() => [] as DailyItem[])]);
     const results = verifyWeek(active, week);
     goalLines = results.map((r) => {
       const goal = active.find((g) => g.id === r.goalId)!;
-      return { goal, held: r.held, target: r.target, status: reviews.find((x) => x.goal_id === r.goalId)?.status ?? null };
+      const done = items.filter((i) => i.goal_id === r.goalId && i.done).length;
+      return { goal, held: r.held, done, target: r.target, status: reviews.find((x) => x.goal_id === r.goalId)?.status ?? null };
     });
   }
   const reviewsByGoal = active.map((goal) => {
@@ -502,12 +524,20 @@ export function dailyFacts(b: DailyBriefing, wx: WeatherResult[], now = new Date
       : "Agenda: nothing timed today."
   );
   if (wx.length) lines.push(`Airport weather: ${wx.map(wxLine).join(" | ")}`);
-  if (b.goals.length)
+  if (b.goals.length) {
     lines.push(
-      `Goals (session counts show how many planned sessions happened this week — they are NOT the goal's result): ${b.goals
-        .map((g) => `goal "${goalShortName(g.goal)}": ${g.done} of ${g.target} weekly sessions done so far (${g.scheduled} on the calendar)${g.nextCheckpoint ? `, next checkpoint "${g.nextCheckpoint.title}" in ${g.nextCheckpoint.daysLeft} days` : ""}`)
+      `Goals (session counts are sessions, NOT the goal's result; "ticked done" means he confirmed it happened): ${b.goals
+        .map((g) => `goal "${goalShortName(g.goal)}": ${g.done} of ${g.target} weekly sessions ticked done (${g.past} of ${g.scheduled} on the calendar are already past)${g.nextCheckpoint ? `, next checkpoint "${g.nextCheckpoint.title}" in ${g.nextCheckpoint.daysLeft} days` : ""}`)
         .join("; ")}`
     );
+    const focus = b.goals.flatMap((g) => g.today.map((e) => ({ g, e })));
+    if (focus.length)
+      lines.push(
+        `Goal sessions today: ${focus
+          .map(({ g, e }) => `${e.start ? hhmm(e.start) : "all day"} ${goalShortName(g.goal)} — ${e.focus ?? e.title}${e.done ? " [ticked done]" : ""}`)
+          .join("; ")}`
+      );
+  }
   lines.push(b.headsUp.length ? `Heads-up: ${b.headsUp.join("; ")}` : "Heads-up: none.");
   const t = b.tomorrow;
   lines.push(
@@ -522,7 +552,7 @@ export function periodFacts(b: PeriodBriefing, now = new Date()): string {
   if (b.back.goalLines.length)
     lines.push(
       `Goal sessions held last week (session counts, NOT the goal's result — e.g. runs done, not pounds lost): ${b.back.goalLines
-        .map((g) => `goal "${goalShortName(g.goal)}": ${g.held} of ${g.target} sessions${g.status ? ` (review ${g.status})` : " (week not reviewed)"}`)
+        .map((g) => `goal "${goalShortName(g.goal)}": ${g.held} of ${g.target} sessions on the calendar, ${g.done} ticked done${g.status ? ` (review ${g.status})` : " (week not reviewed)"}`)
         .join("; ")}`
     );
   if (b.kind === "monthly")
