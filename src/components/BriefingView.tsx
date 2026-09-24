@@ -213,7 +213,10 @@ function Daily({ b, weather, wxState, onChange }: { b: DailyBriefing; weather: W
                 <li key={i.id} className="flex items-center gap-2 text-sm">
                   <span className="w-24 shrink-0 tabular-nums text-slate-400">{hhmm(i.start)}–{hhmm(i.end)}</span>
                   <span className={`w-2 h-2 rounded-full shrink-0 ${c.dot}`} />
-                  <span className={`truncate ${i.enroute ? "text-slate-400" : "text-slate-200"}`}>{i.name}</span>
+                  <span className={`truncate ${i.enroute || i.blocks === false ? "text-slate-400" : "text-slate-200"}`}>{i.name}</span>
+                  {i.blocks === false && !i.flight && (
+                    <span className="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400" title="From an info-only calendar — doesn't hold time">info</span>
+                  )}
                   {i.goalSession && <Target className="w-3.5 h-3.5 text-blue-300 shrink-0" />}
                 </li>
               );
