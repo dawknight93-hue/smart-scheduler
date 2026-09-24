@@ -142,7 +142,7 @@ const HOURS = Array.from(
 );
 
 function formatWhen(d: Date): string {
-  return d.toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  return `${d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}, ${formatTime(d)}`;
 }
 
 function formatDuration(min: number): string {
@@ -170,7 +170,7 @@ function unscheduledReasonText(u: UnscheduledItem): string {
     case "window_too_short":
       return `Its window (${window}) is shorter than the ${formatDuration(u.durationMin)} it needs.`;
     case "outside_hours":
-      return `Its window (${window}) doesn't overlap scheduling hours (6 AM–10 PM) long enough for ${formatDuration(u.durationMin)}.`;
+      return `Its window (${window}) doesn't overlap scheduling hours (06:00–22:00) long enough for ${formatDuration(u.durationMin)}.`;
     case "family_uta":
       return `The only open time in its window is on a UTA day, and Family, Desk, Home and Errand items can't go on UTA days.`;
     case "no_free_time":
@@ -178,22 +178,13 @@ function unscheduledReasonText(u: UnscheduledItem): string {
   }
 }
 
+/** 24-hour clock, e.g. "07:05", "17:30". */
 function formatTime(d: Date): string {
-  return d.toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 function formatTimeRange(start: Date, end: Date): string {
-  const startStr = formatTime(start);
-  const endStr = formatTime(end);
-  const startPeriod = startStr.slice(-2);
-  const endPeriod = endStr.slice(-2);
-  if (startPeriod === endPeriod) {
-    return `${startStr.slice(0, -3)}\u2013${endStr}`;
-  }
-  return `${startStr}\u2013${endStr}`;
+  return `${formatTime(start)}\u2013${formatTime(end)}`;
 }
 
 function formatDay(d: Date): string {
@@ -951,7 +942,7 @@ export function CalendarView({
   /** Same rules the drop enforces, so the preview tells the truth before release. */
   function checkMove(item: PlacedItem, newStart: Date): { blocked?: string; overlaps: string[]; notes: string[] } {
     const newEnd = new Date(newStart.getTime() + (item.end.getTime() - item.start.getTime()));
-    if (isQuietTime(newStart, newEnd)) return { blocked: "Can't schedule between 9 PM and 9 AM", overlaps: [], notes: [] };
+    if (isQuietTime(newStart, newEnd)) return { blocked: "Can't schedule between 21:00 and 09:00", overlaps: [], notes: [] };
     if (isUtaBlocked(item.pillar, item.context) && overlapsUta(newStart, newEnd, fixedEvents)) {
       return { blocked: `${utaBlockLabel(item.pillar, item.context)} items can't go on UTA days`, overlaps: [], notes: [] };
     }
@@ -1057,6 +1048,52 @@ export function CalendarView({
   }
   const [dragMessage, setDragMessage] = useState<string | null>(null);
   const [overlapConfirm, setOverlapConfirm] = useState<{ item: PlacedItem; newStart: Date; overlapNames: string[] } | null>(null);
+  // A resize that would leave a task/habit's window shorter than its duration asks first.
+  const [resizeWarning, setResizeWarning] = useState<{
+    item: PlacedItem;
+    kind: "Task" | "Habit";
+    newEnd: Date;
+    windowMin: number;
+    durationMin: number;
+  } | null>(null);
+
+  /** If resizing this task/habit to end at newEnd leaves too little window for its duration, describe it. */
+  function resizeShortfall(item: PlacedItem, newEnd: Date) {
+    if (item.isRecurringOccurrence || item.isBatch) return null;
+    if (item.kind === "Task") {
+      const t = tasks.find((x) => x.id === item.id);
+      if (!t) return null;
+      const windowMin = Math.round((newEnd.getTime() - new Date(t.search_start).getTime()) / 60000);
+      return windowMin < t.duration_min ? { kind: "Task" as const, windowMin, durationMin: t.duration_min } : null;
+    }
+    if (item.kind === "Habit") {
+      const h = habits.find((x) => x.id === item.id);
+      if (!h) return null;
+      const windowMin = Math.round((newEnd.getTime() - new Date(h.search_start).getTime()) / 60000);
+      return windowMin < h.duration_min ? { kind: "Habit" as const, windowMin, durationMin: h.duration_min } : null;
+    }
+    return null;
+  }
+
+  async function resolveResizeWarning(choice: "shorten" | "edit" | "tray" | "cancel") {
+    const w = resizeWarning;
+    setResizeWarning(null);
+    if (!w || choice === "cancel") return;
+    const table = w.kind === "Task" ? "tasks" : "habits";
+    const endCol = w.kind === "Task" ? "deadline" : "search_end";
+    if (choice === "edit") {
+      const src = w.kind === "Task" ? tasks.find((x) => x.id === w.item.id) : habits.find((x) => x.id === w.item.id);
+      if (src) setEditTarget({ kind: w.kind, id: w.item.id, data: { ...src, [endCol]: w.newEnd.toISOString() } as Task | Habit });
+      return;
+    }
+    if (choice === "shorten") {
+      await supabase.from(table).update({ [endCol]: w.newEnd.toISOString(), duration_min: Math.max(SLOT_MIN, w.windowMin) }).eq("id", w.item.id);
+    } else {
+      await updateItemDuration(w.item, w.newEnd);
+    }
+    loadData();
+    scheduleAutoPush();
+  }
   const dragMessageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function showDragMessage(msg: string, ms = 3000) {
@@ -1192,13 +1229,19 @@ export function CalendarView({
       const minEnd = new Date(resizeState.item.start.getTime() + 15 * 60 * 1000);
       const hint = (h: string) => setResizeState((prev) => (prev && prev.hint !== h ? { ...prev, hint: h } : prev));
       if (snapped < minEnd) return hint("15 min minimum");
-      if (isQuietTime(resizeState.item.start, snapped)) return hint("can't run into 9 PM – 9 AM");
+      if (isQuietTime(resizeState.item.start, snapped)) return hint("can't run into 21:00–09:00");
       if (isUtaBlocked(resizeState.item.pillar, resizeState.item.context) && overlapsUta(resizeState.item.start, snapped, fixedEvents)) return hint(`${utaBlockLabel(resizeState.item.pillar, resizeState.item.context)} items can't go on UTA days`);
       setResizeState((prev) => (prev ? { ...prev, previewEnd: snapped, hint: undefined } : null));
     };
     const onUp = async () => {
       const rs = resizeState;
       if (rs && rs.previewEnd.getTime() !== rs.originalEnd.getTime()) {
+        const short = resizeShortfall(rs.item, rs.previewEnd);
+        if (short) {
+          setResizeWarning({ item: rs.item, newEnd: rs.previewEnd, ...short });
+          setResizeState(null);
+          return;
+        }
         await updateItemDuration(rs.item, rs.previewEnd);
         // Reload either way: on success to show the change, on failure to snap back.
         loadData();
@@ -1694,13 +1737,7 @@ export function CalendarView({
                     key={h}
                     className="h-16 flex items-start justify-end pr-2 pt-1 text-xs text-slate-500"
                   >
-                    {h === 0
-                      ? "12 AM"
-                      : h === 12
-                      ? "12 PM"
-                      : h > 12
-                      ? `${h - 12} PM`
-                      : `${h} AM`}
+                    {`${String(h).padStart(2, "0")}:00`}
                   </div>
                 ))}
               </div>
@@ -1844,13 +1881,7 @@ export function CalendarView({
                     key={h}
                     className="h-16 flex items-start justify-end pr-1.5 pt-1 text-[11px] text-slate-500"
                   >
-                    {h === 0
-                      ? "12 AM"
-                      : h === 12
-                      ? "12 PM"
-                      : h > 12
-                      ? `${h - 12} PM`
-                      : `${h} AM`}
+                    {`${String(h).padStart(2, "0")}:00`}
                   </div>
                 ))}
               </div>
@@ -2054,6 +2085,59 @@ export function CalendarView({
       )}
 
       {/* Overlap confirmation dialog */}
+      {resizeWarning && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+          onClick={() => resolveResizeWarning("cancel")}
+        >
+          <div
+            className="w-full max-w-sm bg-slate-900 border border-slate-700 rounded-2xl p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 mb-3">
+              <AlertTriangle className="w-5 h-5 text-amber-400" />
+              <h3 className="text-base font-semibold">It won't fit anymore</h3>
+            </div>
+            <p className="text-sm text-slate-300 mb-2">
+              Resizing <span className="font-medium text-white">{resizeWarning.item.name}</span> sets its{" "}
+              {resizeWarning.kind === "Task" ? "deadline" : "search end"} to {formatTime(resizeWarning.newEnd)}, leaving{" "}
+              {Math.max(0, resizeWarning.windowMin)} min in its window — but it needs {resizeWarning.durationMin} min.
+            </p>
+            <p className="text-xs text-slate-500 mb-4">
+              If you keep it this way it comes off the calendar and goes to the "not on your calendar" tray.
+            </p>
+            <div className="flex flex-col gap-2">
+              {resizeWarning.windowMin >= SLOT_MIN && (
+                <button
+                  onClick={() => resolveResizeWarning("shorten")}
+                  className="w-full py-2.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-500 transition-colors"
+                >
+                  Change duration to {resizeWarning.windowMin} min
+                </button>
+              )}
+              <button
+                onClick={() => resolveResizeWarning("edit")}
+                className="w-full py-2.5 rounded-lg bg-blue-500/10 border border-blue-500/30 text-blue-300 text-sm font-medium hover:bg-blue-500/20 transition-colors"
+              >
+                Edit {resizeWarning.kind === "Task" ? "task" : "habit"}…
+              </button>
+              <button
+                onClick={() => resolveResizeWarning("tray")}
+                className="w-full py-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-sm font-medium hover:bg-amber-500/20 transition-colors"
+              >
+                Send to tray
+              </button>
+              <button
+                onClick={() => resolveResizeWarning("cancel")}
+                className="w-full py-2.5 rounded-lg bg-slate-800 text-slate-300 text-sm font-medium hover:bg-slate-700 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {overlapConfirm && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"

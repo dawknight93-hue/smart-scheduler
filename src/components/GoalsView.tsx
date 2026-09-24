@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Plus, Send, ArrowLeft, CheckCircle2, Loader2, Trash2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { PILLARS, PILLAR_LABELS, getPillarColor, LifePillar } from "@/lib/types";
+import { GoalPlanPanel } from "@/components/GoalPlanPanel";
 
 const FUNCTION_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/smart-gate`;
 const HEADERS = {
@@ -541,6 +542,8 @@ function GoalChat({ goalId, onBack }: { goalId: string; onBack: () => void }) {
           </p>
         </div>
       )}
+
+      {status === "active" && <GoalPlanPanel goalId={goalId} />}
     </div>
   );
 }
