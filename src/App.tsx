@@ -21,9 +21,15 @@ function App() {
   if (window.location.pathname === "/privacy") return <PrivacyPolicy />;
 
   return (
-    <div className="min-h-screen w-full overflow-x-hidden bg-slate-950 text-slate-100 flex flex-col">
+    <div
+      className={`w-full overflow-x-hidden bg-slate-950 text-slate-100 flex flex-col ${
+        // Calendar: fixed to the screen so only the hour grid scrolls and the
+        // tabs, header, day names and all-day row stay frozen at the top.
+        view === "calendar" ? "h-[100dvh] overflow-y-hidden" : "min-h-screen"
+      }`}
+    >
       {/* Tab bar */}
-      <nav className="border-b border-slate-800 bg-slate-900/80 backdrop-blur-sm sticky top-0 z-40">
+      <nav className="shrink-0 border-b border-slate-800 bg-slate-900/80 backdrop-blur-sm sticky top-0 z-40">
         <div className="px-4 py-2 flex items-center gap-1 overflow-x-auto">
           <button
             onClick={() => setView("briefing")}
