@@ -277,6 +277,9 @@ export interface DailyBriefing {
   tomorrow: { first: BriefItem | null; leaveBy: BriefItem | null; firstFlight: BriefItem | null; flights: BriefItem[]; earlyStart: boolean };
 }
 
+/** Counts toward your time: not an info-only item from a display-only calendar (flights always count). */
+const holdsTime = (i: BriefItem) => i.blocks !== false || !!i.flight;
+
 export async function buildDaily(now = new Date()): Promise<DailyBriefing> {
   const today = startOfDay(now);
   const tomorrow = addDays(today, 1);
@@ -314,7 +317,7 @@ export async function buildDaily(now = new Date()): Promise<DailyBriefing> {
         headsUp.push(`Conflict: ${timed[i].name} ${hhmm(timed[i].start)} overlaps ${timed[j].name} ${hhmm(timed[j].start)}`);
   // Tight turnaround: less than an hour between getting home from a trip and the next commitment
   for (const home of [...todayItems, ...tomorrowItems].filter((i) => i.enroute === "from")) {
-    const nextUp = [...todayItems, ...tomorrowItems].find((i) => !i.allDay && !i.enroute && !i.flight && i.start >= home.start && i.start.getTime() - home.end.getTime() < 3600000);
+    const nextUp = [...todayItems, ...tomorrowItems].find((i) => !i.allDay && !i.enroute && !i.flight && holdsTime(i) && i.start >= home.start && i.start.getTime() - home.end.getTime() < 3600000);
     if (nextUp) headsUp.push(`Tight turnaround: home ~${hhmm(home.end)}, then ${nextUp.name} at ${hhmm(nextUp.start)}`);
   }
   const goals = goalProgress(goalRows, range.weeks.find((w) => w.weekStart.getTime() === weekStart.getTime()), now, dailyItems);
@@ -328,7 +331,7 @@ export async function buildDaily(now = new Date()): Promise<DailyBriefing> {
   if (isUta(today)) headsUp.unshift("UTA today — Family, Desk, Home and Errand items are kept off the calendar.");
   else if (isUta(tomorrow)) headsUp.push("UTA tomorrow.");
 
-  const tomorrowTimed = tomorrowItems.filter((i) => !i.allDay);
+  const tomorrowTimed = tomorrowItems.filter((i) => !i.allDay && holdsTime(i));
   const firstFlight = tomorrowTimed.find((i) => i.flight) ?? null;
   const leaveBy = firstFlight ? tomorrowTimed.find((i) => i.enroute === "to" && i.end <= firstFlight.start) ?? null : null;
   const first = tomorrowTimed[0] ?? null;
@@ -397,7 +400,7 @@ async function lookAhead(label: string, start: Date, end: Date, goals: PlanGoal[
       const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), WORK_START_HOUR);
       const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), WORK_END_HOUR);
       const mins = items
-        .filter((i) => !i.allDay)
+        .filter((i) => !i.allDay && holdsTime(i))
         .reduce((acc, i) => acc + Math.max(0, Math.min(i.end.getTime(), dayEnd.getTime()) - Math.max(i.start.getTime(), dayStart.getTime())) / 60000, 0);
       if (!busiest || mins / 60 > busiest.hours) busiest = { date: new Date(d), hours: Math.round((mins / 60) * 10) / 10 };
     }
@@ -523,7 +526,7 @@ export function dailyFacts(b: DailyBriefing, wx: WeatherResult[], now = new Date
   if (b.allDay.length) lines.push(`All-day: ${b.allDay.map((i) => i.name).join("; ")}`);
   lines.push(
     b.agenda.length
-      ? `Agenda today: ${b.agenda.map((i) => `${hhmm(i.start)}–${hhmm(i.end)} ${i.name}${i.end <= now ? " [done]" : i.start <= now ? " [now]" : ""}`).join("; ")}`
+      ? `Agenda today (items marked [info] are reminders from an info-only calendar, not commitments or booked time): ${b.agenda.map((i) => `${hhmm(i.start)}–${hhmm(i.end)} ${i.name}${holdsTime(i) ? "" : " [info]"}${i.end <= now ? " [done]" : i.start <= now ? " [now]" : ""}`).join("; ")}`
       : "Agenda: nothing timed today."
   );
   if (wx.length) lines.push(`Airport weather: ${wx.map(wxLine).join(" | ")}`);
