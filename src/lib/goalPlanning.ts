@@ -197,6 +197,7 @@ export interface CountedEvent {
   id: string;
   name: string;
   start: Date;
+  allDay: boolean;
 }
 
 export function countGoalEvents(goal: PlanGoal, week: WeekData): CountedEvent[] {
@@ -207,12 +208,15 @@ export function countGoalEvents(goal: PlanGoal, week: WeekData): CountedEvent[] 
   for (const m of week.map) {
     if (m.calendar_id !== goal.count_calendar_id || !m.item_id || seen.has(m.item_id)) continue;
     const fe = week.fixedById.get(m.item_id);
-    const start = new Date(fe?.start_time ?? m.start_time);
+    const raw = new Date(fe?.start_time ?? m.start_time);
+    // All-day events are stored at UTC midnight of their date — read that date, not the local instant.
+    const allDay = !!fe?.is_all_day;
+    const start = allDay ? new Date(raw.getUTCFullYear(), raw.getUTCMonth(), raw.getUTCDate()) : raw;
     if (start < week.weekStart || start >= week.weekEnd) continue;
     const name = fe?.name ?? m.item_name;
     if (kw && !name.toLowerCase().includes(kw)) continue;
     seen.add(m.item_id);
-    out.push({ id: m.item_id, name, start });
+    out.push({ id: m.item_id, name, start, allDay });
   }
   return out.sort((a, b) => a.start.getTime() - b.start.getTime());
 }
