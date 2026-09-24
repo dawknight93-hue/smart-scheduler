@@ -18,6 +18,7 @@ import {
   fetchWeather,
   hhmm,
   periodFacts,
+  sessionNoun,
   type BriefingKind,
   type DailyBriefing,
   type PeriodBriefing,
@@ -419,8 +420,14 @@ function Period({ b, onOpenReview }: { b: PeriodBriefing; onOpenReview: () => vo
               <li key={g.goal.id} className="flex items-center gap-2 text-sm">
                 <span className={`w-2 h-2 rounded-full ${getPillarColor(g.goal.pillar).dot}`} />
                 <span className="truncate text-slate-200">{goalShortName(g.goal)}</span>
-                <span className="ml-auto tabular-nums text-xs text-slate-400" title="Sessions on the calendar">{g.held}/{g.target} planned</span>
-                <span className={`tabular-nums ${g.done >= g.target ? "text-emerald-300" : "text-amber-300"}`} title="Sessions ticked done">{g.done} done</span>
+                <span className="ml-auto tabular-nums text-xs text-slate-400" title="Sessions on the calendar">
+                  {g.held} of {g.target} {sessionNoun(g.goal)} on the calendar
+                </span>
+                {g.tracked ? (
+                  <span className={`tabular-nums ${g.done >= g.target ? "text-emerald-300" : "text-amber-300"}`} title="Sessions you ticked done">{g.done} ticked done</span>
+                ) : (
+                  <span className="text-xs text-slate-500" title="Done-ticks started the week of 21 Sep">done not tracked yet</span>
+                )}
                 <span className="w-24 text-right text-xs text-slate-500">{g.status ? `review ${g.status}` : "not reviewed"}</span>
               </li>
             ))}
@@ -469,7 +476,21 @@ function Period({ b, onOpenReview }: { b: PeriodBriefing; onOpenReview: () => vo
               </ul>
             </div>
           )}
-          {ahead.busiest && <div><span className="text-slate-400">Busiest day: </span>{dayLabel(ahead.busiest.date)} ({ahead.busiest.hours} h booked)</div>}
+          {ahead.busiest && (
+            <div>
+              <span className="text-slate-400">Busiest day: </span>
+              {dayLabel(ahead.busiest.date)} ({ahead.busiest.hours} h booked)
+              {ahead.busiest.items.length > 0 && (
+                <ul className="mt-1 space-y-0.5 text-slate-400">
+                  {ahead.busiest.items.map((i, k) => (
+                    <li key={k} className="tabular-nums">
+                      {hhmm(i.start)}–{hhmm(i.end)} · <span className="text-slate-300">{i.name}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
           <div>
             <span className="text-slate-400">Deadlines & checkpoints: </span>
             {ahead.deadlines.length === 0 ? "none" : (
