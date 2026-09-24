@@ -880,9 +880,20 @@ async function deleteEvent(itemType: string, itemId: string) {
     return { deleted: false, message: "No linked Google event found for this item." };
   }
 
+  // Display-only calendars don't hold time, but deleting follows Google's own
+  // permissions: a calendar you own or can edit (e.g. Informational) deletes in
+  // Google too; one you can only view (e.g. Jatara's) can't be deleted at all.
   if (mapping.calendar_role === "display_only") {
-    await supabase.from("gcal_event_map").delete().eq("item_type", itemType).eq("item_id", itemId);
-    return { deleted: false, message: "Event is from a display-only calendar; removed local mapping only." };
+    const { data: conn } = await supabase
+      .from("calendar_connections")
+      .select("access_role")
+      .eq("calendar_id", mapping.calendar_id)
+      .limit(1)
+      .maybeSingle();
+    const role = conn?.access_role ?? "owner";
+    if (role !== "owner" && role !== "writer") {
+      return { deleted: false, error: "You can only view this calendar in Google, so its events can't be deleted." };
+    }
   }
 
   const accessToken = await getValidAccessToken();
@@ -892,13 +903,14 @@ async function deleteEvent(itemType: string, itemId: string) {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
 
-  await supabase.from("gcal_event_map").delete().eq("item_type", itemType).eq("item_id", itemId);
-
-  if (!resp.ok && resp.status !== 410) {
+  // Gone already (404/410) counts as deleted. On any other failure keep the link,
+  // so the next sync doesn't pull the event back in as a duplicate.
+  if (!resp.ok && resp.status !== 410 && resp.status !== 404) {
     const errText = await resp.text();
     return { deleted: false, error: `Google delete failed (${resp.status}): ${errText}` };
   }
 
+  await supabase.from("gcal_event_map").delete().eq("item_type", itemType).eq("item_id", itemId);
   return { deleted: true };
 }
 
