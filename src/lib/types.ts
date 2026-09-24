@@ -154,6 +154,8 @@ export interface PlacedItem {
   effortAuto?: boolean;
   /** Why the scheduler put it here, in plain words. */
   placementReason?: string;
+  /** Marked done (task, repeating occurrence, or 🎯 goal session). */
+  completed?: boolean;
   googleEventId?: string;
   googleCalendarId?: string;
   googleCalendarRole?: string;
