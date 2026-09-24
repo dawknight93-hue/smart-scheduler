@@ -112,7 +112,7 @@ export function GoalsView() {
   }
 
   return (
-    <div className="max-w-3xl mx-auto p-4 md:p-6">
+    <div className="w-full max-w-3xl mx-auto p-4 md:p-6">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-xl font-semibold text-slate-100">Goals</h1>
         <button
@@ -437,7 +437,7 @@ function GoalChat({ goalId, onBack }: { goalId: string; onBack: () => void }) {
   const colors = pillar ? getPillarColor(pillar) : null;
 
   return (
-    <div className="max-w-3xl mx-auto p-4 md:p-6 flex flex-col h-full">
+    <div className="w-full max-w-3xl mx-auto p-4 md:p-6 flex flex-col h-full">
       <div className="flex items-center gap-3 mb-4">
         <button onClick={onBack} className="text-slate-400 hover:text-slate-200 transition-colors">
           <ArrowLeft className="w-5 h-5" />

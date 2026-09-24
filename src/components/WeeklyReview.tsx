@@ -323,7 +323,7 @@ function GoalCard({
           <ul className="space-y-1">
             {plan.counted.map((c) => (
               <li key={c.id} className="text-xs text-slate-300 tabular-nums">
-                {dayLabel(c.start)} {hhmm(c.start)} · {c.name}
+                {dayLabel(c.start)} {c.allDay ? "all day" : hhmm(c.start)} · {c.name}
               </li>
             ))}
           </ul>
