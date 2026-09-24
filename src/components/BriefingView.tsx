@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, CalendarRange, ClipboardCheck, CloudLightning, Loader2, Plane, RefreshCw, Sparkles, Sunrise, Target } from "lucide-react";
+import { AlertTriangle, CalendarRange, ClipboardCheck, CloudLightning, DollarSign, Heart, Info, Loader2, Plane, Radar, RefreshCw, Sparkles, Sunrise, Target } from "lucide-react";
+import type { AwarenessNote, DailyAwareness, DutyStats } from "@/lib/awareness";
 import { getPillarColor } from "@/lib/types";
 import { goalShortName } from "@/lib/goalPlanning";
 import { getWeekStart } from "@/lib/schedulingEngine";
@@ -194,6 +195,8 @@ function Daily({ b, weather, wxState, onChange }: { b: DailyBriefing; weather: W
   }
   return (
     <>
+      <AwarenessCard a={b.awareness} />
+
       <Section icon={<CalendarRange className="w-4 h-4 text-blue-400" />} title={`Today · ${dayLabel(b.date)}`}>
         {b.utaToday && <div className="mb-2 inline-block rounded-full bg-emerald-600/15 px-2 py-0.5 text-[11px] font-medium text-emerald-300">UTA</div>}
         {b.allDay.length > 0 && (
@@ -404,7 +407,9 @@ function Period({ b, onOpenReview }: { b: PeriodBriefing; onOpenReview: () => vo
             ))}
           </ul>
         )}
-        <p className="text-sm text-slate-300">
+        <DutyLine label="Duty days" stats={back.duty.stats} sentence={back.duty.sentence} />
+        {back.duty.month && <DutyLine label={back.duty.month.label} stats={back.duty.month.stats} sentence={back.duty.month.sentence} muted />}
+        <p className="mt-2 text-sm text-slate-300">
           {back.tasksCompleted.length} task{back.tasksCompleted.length === 1 ? "" : "s"} completed
           {back.tasksCompleted.length > 0 && <span className="text-slate-500"> — {back.tasksCompleted.slice(0, 6).join(", ")}{back.tasksCompleted.length > 6 ? "…" : ""}</span>}
         </p>
@@ -425,6 +430,17 @@ function Period({ b, onOpenReview }: { b: PeriodBriefing; onOpenReview: () => vo
             )}
           </div>
           <div><span className="text-slate-400">UTA: </span>{ahead.utaDays.length ? ahead.utaDays.map(dayLabel).join(", ") : "none"}</div>
+          <DutyLine label="Duty days" stats={ahead.duty.stats} sentence={ahead.duty.sentence} />
+          {ahead.markers.length > 0 && (
+            <div>
+              <span className="text-slate-400">For your awareness: </span>
+              <ul className="mt-1 space-y-0.5">
+                {ahead.markers.map((m, i) => (
+                  <li key={i} className="tabular-nums">{dayLabel(m.date)} · {m.text}</li>
+                ))}
+              </ul>
+            </div>
+          )}
           {ahead.busiest && <div><span className="text-slate-400">Busiest day: </span>{dayLabel(ahead.busiest.date)} ({ahead.busiest.hours} h booked)</div>}
           <div>
             <span className="text-slate-400">Deadlines & checkpoints: </span>
@@ -444,5 +460,70 @@ function Period({ b, onOpenReview }: { b: PeriodBriefing; onOpenReview: () => vo
         )}
       </Section>
     </>
+  );
+}
+
+const TONE_ICON: Record<AwarenessNote["tone"], React.ReactNode> = {
+  duty: <Plane className="w-3.5 h-3.5 text-sky-300" />,
+  money: <DollarSign className="w-3.5 h-3.5 text-emerald-300" />,
+  family: <Heart className="w-3.5 h-3.5 text-rose-300" />,
+  info: <Info className="w-3.5 h-3.5 text-slate-400" />,
+};
+
+/** Info-only calendars (Informational, Jatara's) turned into notes and actions. */
+function AwarenessCard({ a }: { a: DailyAwareness }) {
+  if (!a.notes.length && !a.fyi.length && !a.comingUp.length) return null;
+  const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  return (
+    <section className="mb-4 rounded-xl border border-sky-500/25 bg-sky-500/5 p-4">
+      <h2 className="flex items-center gap-2 mb-2 text-sm font-semibold text-slate-100">
+        <Radar className="w-4 h-4 text-sky-300" />
+        Situational awareness
+        <span className="text-[11px] font-normal text-slate-500">info only · doesn't hold time</span>
+      </h2>
+      <ul className="space-y-2">
+        {a.notes.map((n, i) => (
+          <li key={i} className="flex items-start gap-2 text-sm">
+            <span className="mt-0.5 shrink-0">{TONE_ICON[n.tone]}</span>
+            <span>
+              <span className="text-slate-100">{n.text}</span>
+              {n.action && <span className="block text-amber-200/90">{n.action}</span>}
+            </span>
+          </li>
+        ))}
+        {a.fyi.map((f, i) => (
+          <li key={`fyi-${i}`} className="flex items-start gap-2 text-sm text-slate-300">
+            <span className="mt-0.5 shrink-0">{TONE_ICON.info}</span>
+            <span>
+              {f.name.replace(/^[\s,]+/, "")}
+              <span className="text-slate-500"> · {f.allDay ? "all day" : `${hhmm(f.start)}–${hhmm(f.end)}`}{f.source ? ` · ${f.source}` : ""}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+      {a.comingUp.length > 0 && (
+        <p className="mt-3 text-xs text-slate-400">
+          <span className="text-slate-500">Coming up: </span>
+          {a.comingUp.join(" · ")}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function DutyLine({ label, stats, sentence, muted }: { label: string; stats: DutyStats; sentence: string; muted?: boolean }) {
+  return (
+    <div className={`mb-1 text-sm ${muted ? "text-slate-400" : "text-slate-300"}`}>
+      <span className="text-slate-400">{label}: </span>
+      {sentence}
+      {!muted && stats.days > 0 && (
+        <div className="mt-1 flex h-1.5 overflow-hidden rounded-full bg-slate-800" title={`${stats.flying} flying · ${stats.reserveUnflown} unflown reserve · ${stats.uta} UTA · ${stats.clearOff} off`}>
+          <div className="bg-sky-500" style={{ width: `${(stats.flying / stats.days) * 100}%` }} />
+          <div className="bg-violet-500/70" style={{ width: `${(stats.reserveUnflown / stats.days) * 100}%` }} />
+          <div className="bg-emerald-600/70" style={{ width: `${(stats.uta / stats.days) * 100}%` }} />
+          <div className="bg-slate-600" style={{ width: `${(stats.clearOff / stats.days) * 100}%` }} />
+        </div>
+      )}
+    </div>
   );
 }
