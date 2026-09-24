@@ -20,6 +20,7 @@ import {
 } from "./goalPlanning";
 import { goalDayEntries, loadDailyItems, type DailyItem, type DayEntry } from "./goalDaily";
 import { dailyAwareness, dutySentence, dutyStats, periodMarkers, type DailyAwareness, type DutyStats } from "./awareness";
+import { loadAwarenessRules } from "./awarenessRules";
 import type { LifePillar, Task, UnscheduledItem } from "./types";
 
 export type BriefingKind = "daily" | "weekly" | "monthly";
@@ -296,10 +297,11 @@ export async function buildDaily(now = new Date()): Promise<DailyBriefing> {
   const today = startOfDay(now);
   const tomorrow = addDays(today, 1);
   const weekStart = getWeekStart(today);
-  const [range, goalRows, dailyItems] = await Promise.all([
-    loadRange(today, addDays(today, 8)),
+  const [range, goalRows, dailyItems, rules] = await Promise.all([
+    loadRange(today, addDays(today, 15)),
     loadGoals(),
     loadDailyItems(weekStart, addDays(weekStart, 7)).catch(() => [] as DailyItem[]),
+    loadAwarenessRules(),
   ]);
   const todayItems = dayItems(range.items, today);
   const tomorrowItems = dayItems(range.items, tomorrow);
@@ -354,7 +356,7 @@ export async function buildDaily(now = new Date()): Promise<DailyBriefing> {
     date: today,
     agenda: todayItems.filter((i) => !i.allDay && holdsTime(i)),
     allDay: todayItems.filter((i) => i.allDay && holdsTime(i)),
-    awareness: dailyAwareness(range.items, now),
+    awareness: dailyAwareness(range.items, now, rules),
     utaToday: isUta(today),
     utaTomorrow: isUta(tomorrow),
     flightsToday: todayItems.filter((i) => i.flight),
@@ -440,7 +442,8 @@ async function lookAhead(label: string, start: Date, end: Date, goals: PlanGoal[
   }
   deadlines.sort((a, b) => a.date.getTime() - b.date.getTime());
   const isUtaDay = (d: Date) => uta.some(([a, b]) => d.getTime() + 12 * 3600000 >= a.getTime() && d.getTime() + 12 * 3600000 < b.getTime());
-  const stats = dutyStats(range.items, start, end, isUtaDay);
+  const rules = await loadAwarenessRules();
+  const stats = dutyStats(range.items, start, end, isUtaDay, rules);
   return {
     label,
     start,
@@ -449,7 +452,7 @@ async function lookAhead(label: string, start: Date, end: Date, goals: PlanGoal[
     busiest: busiest && busiest.hours > 0 ? busiest : null,
     deadlines,
     duty: { stats, sentence: dutySentence(stats, false) },
-    markers: periodMarkers(range.items, start, end),
+    markers: periodMarkers(range.items, start, end, rules),
   };
 }
 
@@ -464,13 +467,13 @@ async function lookBack(label: string, start: Date, end: Date, goals: PlanGoal[]
   // Duty days: this period, plus month-to-date for the weekly look-back.
   const lastDay = addDays(end, -1);
   const monthStart = new Date(lastDay.getFullYear(), lastDay.getMonth(), 1);
-  const dutyRange = await loadRange(weekly && monthStart < start ? monthStart : start, end);
+  const [dutyRange, rules] = await Promise.all([loadRange(weekly && monthStart < start ? monthStart : start, end), loadAwarenessRules()]);
   const utaR = utaRanges(dutyRange.weeks.flatMap((w) => w.busy));
   const isUtaDay = (d: Date) => utaR.some(([a, b]) => d.getTime() + 12 * 3600000 >= a.getTime() && d.getTime() + 12 * 3600000 < b.getTime());
-  const periodStats = dutyStats(dutyRange.items, start, end, isUtaDay);
+  const periodStats = dutyStats(dutyRange.items, start, end, isUtaDay, rules);
   const duty: PeriodLookBack["duty"] = { stats: periodStats, sentence: dutySentence(periodStats, true) };
   if (weekly) {
-    const mtd = dutyStats(dutyRange.items, monthStart, end, isUtaDay);
+    const mtd = dutyStats(dutyRange.items, monthStart, end, isUtaDay, rules);
     duty.month = {
       label: `${monthStart.toLocaleDateString("en-US", { month: "long" })} so far (through ${dayLabel(lastDay)})`,
       stats: mtd,
@@ -596,7 +599,7 @@ export function dailyFacts(b: DailyBriefing, wx: WeatherResult[], now = new Date
     lines.push(
       `SITUATIONAL AWARENESS (from info-only calendars — context and actions, not booked time): ${[
         ...aw.notes.map((n) => `${n.text}${n.action ? ` Action: ${n.action}` : ""}`),
-        ...aw.fyi.map((i) => `FYI: ${i.name.replace(/^[\s,]+/, "")}${i.allDay ? " (all day)" : ` ${hhmm(i.start)}–${hhmm(i.end)}`}`),
+        ...aw.fyi.map(({ item: i }) => `FYI: ${i.name.replace(/^[\s,]+/, "")}${i.allDay ? " (all day)" : ` ${hhmm(i.start)}–${hhmm(i.end)}`}`),
       ].join(" | ")}${aw.comingUp.length ? ` | Coming up: ${aw.comingUp.join("; ")}` : ""}`
     );
   }
