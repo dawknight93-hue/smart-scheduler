@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, SlidersHorizontal, CalendarRange, ClipboardCheck, CloudLightning, DollarSign, Heart, Info, Loader2, Plane, Radar, RefreshCw, Sparkles, Sunrise, Target } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AlertTriangle, SlidersHorizontal, CalendarRange, ClipboardCheck, CloudLightning, DollarSign, Heart, Info, Loader2, Plane, Radar, RefreshCw, ShieldCheck, Sparkles, Sunrise, Target, ThumbsDown, ThumbsUp, BookOpen } from "lucide-react";
 import type { AwarenessNote, AwareItem, DailyAwareness, DutyStats } from "@/lib/awareness";
 import { AwarenessRulesEditor } from "@/components/AwarenessRulesEditor";
+import { BriefingMemoryEditor } from "@/components/BriefingMemoryEditor";
+import { addMemory, loadMemory } from "@/lib/briefingMemory";
 import { getPillarColor } from "@/lib/types";
 import { goalShortName } from "@/lib/goalPlanning";
 import { getWeekStart } from "@/lib/schedulingEngine";
@@ -22,6 +24,7 @@ import {
   type BriefingKind,
   type DailyBriefing,
   type PeriodBriefing,
+  type SummaryResult,
   type WeatherResult,
 } from "@/lib/briefing";
 
@@ -48,29 +51,68 @@ export function BriefingView({ onOpenReview }: { onOpenReview: () => void }) {
   const [period, setPeriod] = useState<PeriodBriefing | null>(null);
   const [weather, setWeather] = useState<WeatherResult[]>([]);
   const [wxState, setWxState] = useState<"idle" | "loading" | "error">("idle");
-  const [summary, setSummary] = useState<string | null>(null);
+  const [summary, setSummary] = useState<SummaryResult | null>(null);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const [memoryCount, setMemoryCount] = useState<number | null>(null);
+  // Feedback on the current summary: null, "up" (thanks shown), or "down" (note input open).
+  const [feedback, setFeedback] = useState<null | "up" | "down" | "saved">(null);
+  const [feedbackNote, setFeedbackNote] = useState("");
+  const [feedbackBusy, setFeedbackBusy] = useState(false);
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  const lastFacts = useRef<{ kind: BriefingKind; facts: string } | null>(null);
   const [summaryState, setSummaryState] = useState<"idle" | "loading" | "error">("idle");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const writeSummary = useCallback(async (k: BriefingKind, facts: string, force: boolean) => {
-    const key = factsKey(k, facts);
+    lastFacts.current = { kind: k, facts };
+    setFeedback(null);
+    setFeedbackNote("");
+    setFeedbackError(null);
+    const memory = (await loadMemory()).filter((n) => n.active).map((n) => n.note);
+    setMemoryCount(memory.length);
+    const key = factsKey(k, facts, memory);
     const cached = force ? null : readCache(key);
     if (cached) {
-      setSummary(cached);
-      setSummaryState("idle");
-      return;
+      try {
+        const parsed = JSON.parse(cached) as SummaryResult;
+        if (parsed && typeof parsed.text === "string") {
+          setSummary(parsed);
+          setSummaryState("idle");
+          return;
+        }
+      } catch {
+        // old or damaged cache entry — write a fresh summary
+      }
     }
     setSummaryState("loading");
     try {
-      const s = await fetchSummary(k, facts);
+      const s = await fetchSummary(k, facts, memory);
       setSummary(s);
-      writeCache(key, s);
+      if (s.text) writeCache(key, JSON.stringify(s));
       setSummaryState("idle");
     } catch {
       setSummaryState("error");
     }
   }, []);
+
+  async function saveFeedback() {
+    const note = feedbackNote.trim();
+    if (!note || !summary || !lastFacts.current) return;
+    setFeedbackBusy(true);
+    setFeedbackError(null);
+    try {
+      await addMemory(note, "feedback", lastFacts.current.kind, summary.text);
+      setFeedback("saved");
+      const { kind: k, facts } = lastFacts.current;
+      await writeSummary(k, facts, true);
+      setFeedback("saved");
+    } catch (e) {
+      setFeedbackError(e instanceof Error ? e.message : "Couldn't save the note");
+    } finally {
+      setFeedbackBusy(false);
+    }
+  }
 
   const load = useCallback(
     async (force = false) => {
@@ -132,6 +174,9 @@ export function BriefingView({ onOpenReview }: { onOpenReview: () => void }) {
               </button>
             ))}
           </div>
+          <button onClick={() => setMemoryOpen(true)} className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-slate-800 text-xs text-slate-300 hover:bg-slate-700" title="What the summary writer remembers">
+            <BookOpen className="w-3.5 h-3.5" /> Memory{memoryCount !== null ? ` (${memoryCount})` : ""}
+          </button>
           <button onClick={() => setRulesEditor({ draft: null })} className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-slate-800 text-xs text-slate-300 hover:bg-slate-700" title="Awareness rules">
             <SlidersHorizontal className="w-3.5 h-3.5" /> Rules
           </button>
@@ -151,6 +196,15 @@ export function BriefingView({ onOpenReview }: { onOpenReview: () => void }) {
         />
       )}
 
+      {memoryOpen && (
+        <BriefingMemoryEditor
+          onClose={(changed) => {
+            setMemoryOpen(false);
+            if (changed) void load(false);
+          }}
+        />
+      )}
+
       {error && <div className="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-300">{error}</div>}
 
       <div className="mb-4 rounded-xl border border-blue-500/25 bg-blue-500/5 p-4">
@@ -162,7 +216,72 @@ export function BriefingView({ onOpenReview }: { onOpenReview: () => void }) {
         ) : summaryState === "error" || !summary ? (
           <p className="text-sm text-slate-400">The written summary isn't available right now — everything below is complete.</p>
         ) : (
-          <p className="text-sm leading-relaxed text-slate-200 whitespace-pre-wrap">{summary}</p>
+          <>
+            {summary.text ? (
+              <p className="text-sm leading-relaxed text-slate-200 whitespace-pre-wrap">{summary.text}</p>
+            ) : (
+              <p className="text-sm text-slate-400">Every sentence in the summary failed the fact-check, so none is shown — everything below is complete.</p>
+            )}
+            <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] text-slate-500">
+              <span>Written by {summary.model}</span>
+              <span className="flex items-center gap-1">
+                <ShieldCheck className="w-3 h-3" />
+                {summary.removed.length
+                  ? `Fact-check removed ${summary.removed.length} sentence${summary.removed.length === 1 ? "" : "s"}`
+                  : summary.retried
+                    ? "Fact-checked — fixed on rewrite"
+                    : "Fact-checked"}
+              </span>
+              <span className="ml-auto flex items-center gap-1">
+                {feedback === "saved" ? (
+                  <span className="text-emerald-400">Saved to memory — rewritten with it</span>
+                ) : feedback === "up" ? (
+                  <span className="text-emerald-400">Thanks</span>
+                ) : (
+                  <>
+                    <button onClick={() => setFeedback("up")} className="p-1 rounded hover:bg-slate-800" aria-label="Good summary" title="Good summary">
+                      <ThumbsUp className="w-3.5 h-3.5" />
+                    </button>
+                    <button onClick={() => setFeedback(feedback === "down" ? null : "down")} className={`p-1 rounded hover:bg-slate-800 ${feedback === "down" ? "text-rose-300" : ""}`} aria-label="Something's wrong" title="Something's wrong — tell it what to fix">
+                      <ThumbsDown className="w-3.5 h-3.5" />
+                    </button>
+                  </>
+                )}
+              </span>
+            </div>
+            {summary.removed.length > 0 && (
+              <details className="mt-1.5">
+                <summary className="cursor-pointer text-[11px] text-slate-400">What was removed and why</summary>
+                <ul className="mt-1 space-y-1">
+                  {summary.removed.map((r, i) => (
+                    <li key={i} className="text-[11px] text-slate-400">
+                      <span className="line-through text-slate-500">{r.sentence}</span> — {r.reasons.join("; ")}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            {summary.warning && <p className="mt-1 text-[11px] text-amber-400/80">Claude error: {summary.warning}</p>}
+            {feedback === "down" && (
+              <div className="mt-3 space-y-2">
+                <p className="text-xs text-slate-400">What should it do differently? This is saved to memory and used in every summary from now on.</p>
+                <textarea
+                  value={feedbackNote}
+                  onChange={(e) => setFeedbackNote(e.target.value)}
+                  rows={2}
+                  placeholder="e.g. “My first item is the 07:30 gym session, not Jatara's appointment.”"
+                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-sm text-slate-100 placeholder:text-slate-500"
+                />
+                {feedbackError && <p className="text-xs text-rose-300">{feedbackError}</p>}
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setFeedback(null)} className="px-3 py-1 rounded-lg text-xs text-slate-300 hover:bg-slate-800">Cancel</button>
+                  <button disabled={feedbackBusy || !feedbackNote.trim()} onClick={() => void saveFeedback()} className="flex items-center gap-1 px-3 py-1 rounded-lg bg-blue-600 text-xs text-white disabled:opacity-50">
+                    {feedbackBusy && <Loader2 className="w-3 h-3 animate-spin" />} Save and rewrite
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
 
