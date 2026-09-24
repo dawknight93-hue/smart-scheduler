@@ -790,6 +790,12 @@ export function CalendarView({
     setSyncing(false);
   }
 
+  /** The hover trash: events pulled from Google open their details first, where deleting asks twice. */
+  function quickDelete(item: PlacedItem) {
+    if (item.googleEventId && item.googleCalendarRole !== "schedule_target") setSelectedItem(item);
+    else void deleteItem(item);
+  }
+
   async function deleteItem(item: PlacedItem) {
     if (item.isRecurringOccurrence && item.recurringItemId && item.occurrenceDate) {
       setScopeDialog({ action: "delete", item });
@@ -798,7 +804,12 @@ export function CalendarView({
     const table =
       item.kind === "Fixed Event" ? "fixed_events" : item.kind === "Habit" ? "habits" : "tasks";
     if (item.googleEventId) {
-      await deleteFromGoogle(item.kind, item.id);
+      // If Google refuses, keep it here too — otherwise the next sync pulls it straight back.
+      const r = await deleteFromGoogle(item.kind, item.id);
+      if (!r.success) {
+        showDragMessage(`Not deleted — ${r.error ?? "Google Calendar refused the delete"}`, 6000);
+        return;
+      }
     }
     await supabase.from(table).delete().eq("id", item.id);
     if (table === "fixed_events") {
@@ -1864,7 +1875,7 @@ export function CalendarView({
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          deleteItem(item);
+                          quickDelete(item);
                         }}
                         className="absolute top-0.5 right-0.5 p-0.5 rounded text-slate-500 hover:text-rose-400 hover:bg-rose-500/20 transition-colors opacity-0 group-hover:opacity-100"
                         aria-label="Delete item"
@@ -1975,7 +1986,7 @@ export function CalendarView({
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            deleteItem(item);
+                            quickDelete(item);
                           }}
                           className="absolute top-1 right-1 p-1 rounded text-slate-500 hover:text-rose-400 hover:bg-rose-500/20 transition-colors opacity-0 group-hover:opacity-100"
                           aria-label="Delete item"
@@ -2451,6 +2462,7 @@ function ItemDetail({
   onToggleComplete: () => void;
 }) {
   const colors = getPillarColor(item.pillar);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
@@ -2617,11 +2629,11 @@ function ItemDetail({
           Edit
         </button>
         <button
-          onClick={onDelete}
+          onClick={() => (source.fromGoogle && !confirmDelete ? setConfirmDelete(true) : onDelete())}
           className="mt-4 w-full py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-400 text-sm font-medium hover:bg-rose-500/20 transition-colors flex items-center justify-center gap-2"
         >
           <Trash2 className="w-4 h-4" />
-          Delete
+          {confirmDelete ? `Tap again — also deletes it from ${source.title} in Google Calendar` : "Delete"}
         </button>
         </>
         )}
