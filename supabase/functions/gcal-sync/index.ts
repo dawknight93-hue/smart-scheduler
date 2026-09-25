@@ -7,6 +7,7 @@ const corsHeaders = {
 };
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const HOME_TIME_ZONE = "America/New_York";
 const GOOGLE_EVENTS_URL = (calendarId: string) =>
   `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`;
 
@@ -108,6 +109,7 @@ interface SyncRequest {
   calendarId?: string;
   start?: string;
   end?: string;
+  allDay?: boolean;
 }
 
 interface PlacedItemForPush {
@@ -802,19 +804,21 @@ async function pushEvents(
  * so a change made by dragging in the app is saved at the source (e.g. Runna,
  * which syncs Google Calendar changes back into its own app).
  */
-async function updateSourceEvent(googleEventId: string, calendarId: string, start: string, end: string) {
+async function updateSourceEvent(googleEventId: string, calendarId: string, start: string, end: string, allDay = false) {
   const accessToken = await getValidAccessToken();
   const url = `${GOOGLE_EVENTS_URL(calendarId)}/${encodeURIComponent(googleEventId)}`;
   const auth = { Authorization: `Bearer ${accessToken}` };
   const cur = await fetch(url, { headers: auth });
   if (!cur.ok) throw new Error(`Couldn't find this event in Google Calendar (${cur.status}).`);
   const ev = await cur.json();
-  if (ev.start?.date) throw new Error("All-day events can't be moved from the app.");
-  const tz = ev.start?.timeZone ?? ev.end?.timeZone;
-  const body = {
-    start: { dateTime: start, ...(tz ? { timeZone: tz } : {}) },
-    end: { dateTime: end, ...(tz ? { timeZone: tz } : {}) },
-  };
+  // Switching between all-day and timed: clear the other field (a PATCH merges).
+  const tz = ev.start?.timeZone ?? ev.end?.timeZone ?? (ev.start?.date ? HOME_TIME_ZONE : undefined);
+  const body = allDay
+    ? { start: { date: start, dateTime: null, timeZone: null }, end: { date: end, dateTime: null, timeZone: null } }
+    : {
+        start: { dateTime: start, date: null, ...(tz ? { timeZone: tz } : {}) },
+        end: { dateTime: end, date: null, ...(tz ? { timeZone: tz } : {}) },
+      };
   const resp = await fetch(url, {
     method: "PATCH",
     headers: { ...auth, "Content-Type": "application/json" },
@@ -827,7 +831,11 @@ async function updateSourceEvent(googleEventId: string, calendarId: string, star
   }
   await supabase
     .from("gcal_event_map")
-    .update({ start_time: start, end_time: end, synced_at: new Date().toISOString() })
+    .update({
+      start_time: allDay ? `${start}T00:00:00.000Z` : start,
+      end_time: allDay ? `${end}T00:00:00.000Z` : end,
+      synced_at: new Date().toISOString(),
+    })
     .eq("google_event_id", googleEventId)
     .eq("calendar_id", calendarId);
   return { updated: true };
@@ -1012,7 +1020,7 @@ Deno.serve(async (req: Request) => {
         if (!body.googleEventId || !body.calendarId || !body.start || !body.end) {
           throw new Error("googleEventId, calendarId, start and end are required.");
         }
-        result = { success: true, ...(await updateSourceEvent(body.googleEventId, body.calendarId, body.start, body.end)) };
+        result = { success: true, ...(await updateSourceEvent(body.googleEventId, body.calendarId, body.start, body.end, !!body.allDay)) };
         break;
       }
 
