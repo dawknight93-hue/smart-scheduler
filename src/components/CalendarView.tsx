@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from "react";
+import { createPortal } from "react-dom";
 import {
   CalendarDays,
   Calendar,
@@ -318,7 +319,16 @@ export function CalendarView({
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
   // True when the edit modal was opened from the "not on your calendar" panel, which also offers Delete.
   const [editFromUnscheduled, setEditFromUnscheduled] = useState(false);
-  const [scopeDialog, setScopeDialog] = useState<{ action: "delete" | "edit"; item: PlacedItem } | null>(null);
+
+  // Wider screens: the "not on your calendar" tray goes in the App's left sidebar.
+  const [sidebarSlot, setSidebarSlot] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 768px)");
+    const pick = () => setSidebarSlot(mq.matches ? document.getElementById("sidebar-slot") : null);
+    pick();
+    mq.addEventListener("change", pick);
+    return () => mq.removeEventListener("change", pick);
+  }, []);  const [scopeDialog, setScopeDialog] = useState<{ action: "delete" | "edit"; item: PlacedItem } | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [addPrefillDate, setAddPrefillDate] = useState<Date | null>(null);
@@ -1487,6 +1497,58 @@ export function CalendarView({
     unscheduled: notScheduled.length,
   };
 
+  function renderTray(compact: boolean) {
+    return (
+      <>
+        <div className="flex items-center gap-2">
+          <AlertTriangle className={`${compact ? "w-3.5 h-3.5" : "w-4 h-4"} text-amber-400 shrink-0`} />
+          <span className={`${compact ? "text-xs" : "text-sm"} font-medium text-amber-400`}>
+            {notScheduled.length} item{notScheduled.length > 1 ? "s" : ""} not on your calendar{compact ? "" : " this week"}
+          </span>
+        </div>
+        <p className={`mt-1 mb-2 ${compact ? "text-[11px] leading-snug" : "text-xs"} text-slate-400`}>
+          {compact
+            ? "Not shown here or in Google Calendar this week. Tap one to fix its window or duration, or delete it."
+            : "These don't appear here or in Google Calendar. Tap one to change its time window or duration, or to delete it."}
+        </p>
+        <div className="flex flex-col gap-2">
+          {notScheduled.map((u) => {
+            const overdue = u.reason === "window_ended" && u.kind === "Task";
+            return (
+              <button
+                key={u.id}
+                type="button"
+                onClick={() => editUnscheduled(u)}
+                disabled={u.isBatch}
+                className={`text-left ${compact ? "px-2.5 py-2" : "px-3 py-2"} rounded-lg border text-xs ${
+                  overdue
+                    ? "bg-red-500/10 border-red-500/30 text-red-300 hover:bg-red-500/15"
+                    : "bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/15"
+                } disabled:cursor-default`}
+              >
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="font-medium break-words">{u.name}</span>
+                  {!compact && (
+                    <span className="opacity-70">
+                      {u.kind} · {TIER_LABELS[u.tier]}
+                    </span>
+                  )}
+                  {overdue && <span className="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase">Overdue</span>}
+                </div>
+                {compact && (
+                  <div className="mt-0.5 text-[11px] opacity-70">
+                    {u.kind} · {TIER_LABELS[u.tier]}
+                  </div>
+                )}
+                <div className={`mt-0.5 text-slate-300/80 ${compact ? "text-[11px] leading-snug" : ""}`}>{unscheduledReasonText(u)}</div>
+              </button>
+            );
+          })}
+        </div>
+      </>
+    );
+  }
+
   function editUnscheduled(u: UnscheduledItem) {
     if (u.isBatch) return;
     const data = u.kind === "Habit" ? habits.find((h) => h.id === u.id) : tasks.find((t) => t.id === u.id);
@@ -2124,47 +2186,12 @@ export function CalendarView({
               </div>
             </div>
           </div>
-        {/* Items the engine couldn't put on the calendar this week, with why */}
-        {notScheduled.length > 0 && (
-          <div className="border-t border-slate-800 bg-slate-900/50 px-6 py-3">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-amber-400" />
-              <span className="text-sm font-medium text-amber-400">
-                {notScheduled.length} item{notScheduled.length > 1 ? "s" : ""} not on your calendar this week
-              </span>
-            </div>
-            <p className="mt-1 mb-2 text-xs text-slate-400">
-              These don't appear here or in Google Calendar. Tap one to change its time window or duration, or to delete it.
-            </p>
-            <div className="flex flex-col gap-2">
-              {notScheduled.map((u) => {
-                const overdue = u.reason === "window_ended" && u.kind === "Task";
-                return (
-                  <button
-                    key={u.id}
-                    type="button"
-                    onClick={() => editUnscheduled(u)}
-                    disabled={u.isBatch}
-                    className={`text-left px-3 py-2 rounded-lg border text-xs ${
-                      overdue
-                        ? "bg-red-500/10 border-red-500/30 text-red-300 hover:bg-red-500/15"
-                        : "bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/15"
-                    } disabled:cursor-default`}
-                  >
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium">{u.name}</span>
-                      <span className="opacity-70">
-                        {u.kind} · {TIER_LABELS[u.tier]}
-                      </span>
-                      {overdue && <span className="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase">Overdue</span>}
-                    </div>
-                    <div className="mt-0.5 text-slate-300/80">{unscheduledReasonText(u)}</div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+        {/* Items the engine couldn't put on the calendar this week, with why.
+            On wider screens they sit in the left sidebar under the tabs instead. */}
+        {notScheduled.length > 0 && !sidebarSlot && (
+          <div className="border-t border-slate-800 bg-slate-900/50 px-6 py-3">{renderTray(false)}</div>
         )}
+        {notScheduled.length > 0 && sidebarSlot && createPortal(<div className="rounded-xl border border-amber-500/20 bg-slate-900 p-2.5">{renderTray(true)}</div>, sidebarSlot)}
 
         {showConnections && <CalendarConnectionsPanel onClose={() => setShowConnections(false)} />}
       </div>
