@@ -14,42 +14,42 @@ export const DEFAULT_RULES: NewRule[] = [
     note: "On reserve today (through {through}) — {flying}.", action: null,
     note_next: "Airline reserve tomorrow ({tomorrow}).",
     action_next: "Proffer for flying or RAP for tomorrow; {proffer}; be on the lookout after {lookout} for tomorrow's assignment and confirm it before {confirm_by}.",
-    lead_days: 7, coming_up: "Reserve starts {date}", confirm_by: "20:00", assign_from: "15:00",
+    lead_days: 7, coming_up: "Reserve starts {date}", confirm_by: "20:00", assign_from: "15:00", opens_at: null, closes_at: null,
   },
   {
     position: 20, enabled: true, label: "Proffer window", match: "proffer", source: null, tone: "duty", role: "proffer",
     note: "Proffer window today {start}–{end}.", action: null, note_next: null, action_next: null,
-    lead_days: 0, coming_up: null, confirm_by: null, assign_from: null,
+    lead_days: 0, coming_up: null, confirm_by: null, assign_from: null, opens_at: "11:00", closes_at: "15:00",
   },
   {
     position: 30, enabled: true, label: "Next-day assignments", match: "crew scheduling, assignments for the following day", source: null, tone: "duty", role: "assignments",
     note: "Crew Scheduling posts next-day assignments {start}–{end}.", action: null, note_next: null, action_next: null,
-    lead_days: 0, coming_up: null, confirm_by: null, assign_from: null,
+    lead_days: 0, coming_up: null, confirm_by: null, assign_from: null, opens_at: null, closes_at: null,
   },
   {
     position: 40, enabled: true, label: "Open time / TTOT", match: "open time, ttot, trip trade", source: null, tone: "duty", role: null,
     note: "{title} opens today{at_time}.", action: "Check open time if you want to pick up or trade a trip.", note_next: null, action_next: null,
-    lead_days: 7, coming_up: "{title} opens {date}{at_time}", confirm_by: null, assign_from: null,
+    lead_days: 7, coming_up: "{title} opens {date}{at_time}", confirm_by: null, assign_from: null, opens_at: null, closes_at: null,
   },
   {
     position: 50, enabled: true, label: "Bid window", match: "bid window, bid period, bidding", source: null, tone: "duty", role: null,
     note: "{title} is open through {through}.", action: "Get your bid in.", note_next: "{title} opens tomorrow.", action_next: null,
-    lead_days: 7, coming_up: "{title} opens {date}", confirm_by: null, assign_from: null,
+    lead_days: 7, coming_up: "{title} opens {date}", confirm_by: null, assign_from: null, opens_at: null, closes_at: null,
   },
   {
     position: 60, enabled: true, label: "Payday", match: "pay date, payday", source: null, tone: "money", role: null,
     note: "Payday today ({title}).", action: null, note_next: null, action_next: null,
-    lead_days: 7, coming_up: "Payday {date}", confirm_by: null, assign_from: null,
+    lead_days: 7, coming_up: "Payday {date}", confirm_by: null, assign_from: null, opens_at: null, closes_at: null,
   },
   {
     position: 70, enabled: true, label: "Bills due", match: "payment due, bill due", source: null, tone: "money", role: null,
     note: "{title} today.", action: "Make sure it's paid.", note_next: "{title} tomorrow.", action_next: "Pay it today if it isn't set to autopay.",
-    lead_days: 7, coming_up: "{title} {date}", confirm_by: null, assign_from: null,
+    lead_days: 7, coming_up: "{title} {date}", confirm_by: null, assign_from: null, opens_at: null, closes_at: null,
   },
   {
     position: 80, enabled: true, label: "Jatara's calendar", match: "", source: "jatara", tone: "family", role: null,
     note: "Jatara: {title}{when}.", action: null, note_next: null, action_next: null,
-    lead_days: 0, coming_up: null, confirm_by: null, assign_from: null,
+    lead_days: 0, coming_up: null, confirm_by: null, assign_from: null, opens_at: null, closes_at: null,
   },
 ];
 

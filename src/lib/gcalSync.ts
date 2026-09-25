@@ -166,19 +166,25 @@ export async function getSyncStatus(): Promise<SyncStatus | null> {
   return resp.json();
 }
 
-/** Save a moved/resized pulled event back to its own Google calendar. */
+/**
+ * Save a moved/resized/edited pulled event back to its own Google calendar.
+ * Timed: start/end are instants. All-day (allDay=true): start/end are
+ * "YYYY-MM-DD" dates, end exclusive (Google's convention).
+ */
 export async function updateGoogleSourceEvent(
   googleEventId: string,
   calendarId: string,
-  start: Date,
-  end: Date
+  start: Date | string,
+  end: Date | string,
+  allDay = false
 ): Promise<SyncResult> {
   return callEdgeFunction({
     action: "update-source-event",
     googleEventId,
     calendarId,
-    start: start.toISOString(),
-    end: end.toISOString(),
+    start: typeof start === "string" ? start : start.toISOString(),
+    end: typeof end === "string" ? end : end.toISOString(),
+    allDay,
   });
 }
 

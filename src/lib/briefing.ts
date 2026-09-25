@@ -70,6 +70,11 @@ interface RangeData {
   tasks: Task[];
 }
 
+/** Everything on the calendar between two dates (for reminders). */
+export async function loadBriefItems(start: Date, end: Date): Promise<BriefItem[]> {
+  return (await loadRange(start, end)).items;
+}
+
 async function loadRange(start: Date, end: Date): Promise<RangeData> {
   const weekStarts: Date[] = [];
   for (let w = getWeekStart(start); w < end; w = addDays(w, 7)) weekStarts.push(w);

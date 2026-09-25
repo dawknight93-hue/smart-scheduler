@@ -345,8 +345,11 @@ export async function buildMirrorItems(
           description: describe("Fixed Event", fe.pillar),
           colorId: colorFor(fe.pillar),
           allDay,
-          start: allDay ? formatLocalDate(start) : localWall(start),
-          end: allDay ? formatLocalDate(addDays(start, Math.max(1, Math.round((end.getTime() - start.getTime()) / DAY_MS)))) : localWall(end),
+          // Events marked all-day are stored at UTC midnight of their dates.
+          start: fe.is_all_day ? fe.start_time.slice(0, 10) : allDay ? formatLocalDate(start) : localWall(start),
+          end: fe.is_all_day
+            ? new Date(end.getTime() <= start.getTime() ? start.getTime() + DAY_MS : end.getTime()).toISOString().slice(0, 10)
+            : allDay ? formatLocalDate(addDays(start, Math.max(1, Math.round((end.getTime() - start.getTime()) / DAY_MS)))) : localWall(end),
           timeZone,
         })
       );

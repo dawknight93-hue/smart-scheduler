@@ -42,6 +42,9 @@ export interface AwarenessRule {
   confirm_by: string | null;
   /** Reserve rule: assignments are posted from (HH:MM) when no Crew Scheduling event is on the calendar. */
   assign_from: string | null;
+  /** Proffer rule: the usual window (HH:MM), used when no proffer event is on the calendar that day. */
+  opens_at?: string | null;
+  closes_at?: string | null;
 }
 
 export interface AwareItem {
@@ -166,9 +169,56 @@ function ruleFor(rules: AwarenessRule[], i: AwareItem): AwarenessRule | null {
 
 const byRole = (rules: AwarenessRule[], role: RuleRole) => rules.find((r) => r.enabled && r.role === role) ?? null;
 
+const atTime = (day: Date, t: string | null | undefined): Date | null => {
+  const m = /^(\d{1,2}):(\d{2})$/.exec((t ?? "").trim());
+  return m ? new Date(day.getFullYear(), day.getMonth(), day.getDate(), Number(m[1]), Number(m[2])) : null;
+};
+
+/** The Proffer rule's usual window on a day, when it has one. */
+export function ruleWindow(rule: AwarenessRule | null, day: Date): { start: Date; end: Date } | undefined {
+  if (!rule) return undefined;
+  const start = atTime(day, rule.opens_at);
+  const end = atTime(day, rule.closes_at);
+  return start && end && end > start ? { start, end } : undefined;
+}
+
 function reserveOn(items: AwareItem[], day: Date, rule: AwarenessRule | null): AwareItem | null {
   if (!rule) return null;
   return onDay(items, day).find((i) => i.allDay && ruleMatches(rule, i)) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Reserve-eve timings (for reminders)
+
+export interface ReserveEve {
+  /** The reserve day (tomorrow relative to `day`). */
+  reserveDay: Date;
+  /** Flights already assigned on the reserve day. */
+  flights: AwareItem[];
+  proffer: { start: Date; end: Date } | null;
+  /** When Crew Scheduling starts posting next-day assignments. */
+  lookout: Date | null;
+  confirmBy: Date | null;
+}
+
+/** When `day + 1` is a reserve day: the proffer window, assignment and confirm times on `day`. */
+export function reserveEve(items: AwareItem[], day: Date, rules: AwarenessRule[]): ReserveEve | null {
+  const d = startOfDay(day);
+  const next = addDays(d, 1);
+  const reserveRule = byRole(rules, "reserve");
+  if (!reserveOn(items, next, reserveRule)) return null;
+  const profferRule = byRole(rules, "proffer");
+  const assignRule = byRole(rules, "assignments");
+  const dayItems = onDay(items, d);
+  const profferEvent = profferRule ? dayItems.find((i) => !i.allDay && ruleMatches(profferRule, i)) : undefined;
+  const assign = assignRule ? dayItems.find((i) => !i.allDay && ruleMatches(assignRule, i)) : undefined;
+  return {
+    reserveDay: next,
+    flights: onDay(items, next).filter((i) => i.flight),
+    proffer: profferEvent ? { start: profferEvent.start, end: profferEvent.end } : ruleWindow(profferRule, d) ?? null,
+    lookout: assign ? assign.start : atTime(d, reserveRule?.assign_from || "15:00"),
+    confirmBy: atTime(d, reserveRule?.confirm_by || "20:00"),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +237,9 @@ export function dailyAwareness(items: AwareItem[], now: Date, rules: AwarenessRu
   const assignRule = byRole(rules, "assignments");
   const resToday = reserveOn(items, today, reserveRule);
   const resTomorrow = reserveOn(items, tomorrow, reserveRule);
-  const proffer = profferRule ? todayItems.find((i) => !i.allDay && ruleMatches(profferRule, i)) : undefined;
+  const profferEvent = profferRule ? todayItems.find((i) => !i.allDay && ruleMatches(profferRule, i)) : undefined;
+  // No proffer event today: use the Proffer rule's usual window (e.g. 11:00–15:00).
+  const proffer = profferEvent ?? ruleWindow(profferRule, today);
   const assign = assignRule ? todayItems.find((i) => !i.allDay && ruleMatches(assignRule, i)) : undefined;
   const flightsToday = todayItems.filter((i) => i.flight);
   const flightsTomorrow = tomorrowItems.filter((i) => i.flight);
@@ -197,7 +249,7 @@ export function dailyAwareness(items: AwareItem[], now: Date, rules: AwarenessRu
     const confirmBy = reserveRule.confirm_by || "20:00";
     const lookout = assign ? hhmm(assign.start) : reserveRule.assign_from || "15:00";
     const profferText = !proffer
-      ? "no proffer window on the calendar today"
+      ? "no proffer window set (add its usual times in Rules → Proffer window)"
       : now < proffer.start
         ? `proffering opens at ${hhmm(proffer.start)} and closes at ${hhmm(proffer.end)}`
         : now < proffer.end
@@ -234,7 +286,7 @@ export function dailyAwareness(items: AwareItem[], now: Date, rules: AwarenessRu
         notes.push({ tone: reserveRule.tone, text: fill(reserveRule.note_next, v), action: action || undefined, ruleId: reserveRule.id });
       }
       // With a reserve day tomorrow, the proffer and assignment windows are covered above.
-      if (proffer) used.add(proffer);
+      if (profferEvent) used.add(profferEvent);
       if (assign) used.add(assign);
     }
   }
