@@ -3,7 +3,7 @@ import { X, CalendarClock, Repeat, CheckSquare, Trash2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import type { ContextTag, LifePillar, Task, FixedEvent, Habit } from "@/lib/types";
 import { CONTEXT_COLORS, PILLARS, PILLAR_LABELS, PILLAR_COLORS } from "@/lib/types";
-import { scheduleAutoPush } from "@/lib/gcalSync";
+import { scheduleAutoPush, updateGoogleSourceEvent } from "@/lib/gcalSync";
 import { formatLocalDate } from "@/lib/recurrence";
 import { DateTimeField, DateField } from "@/components/DateTimeField";
 import { EFFORTS, EFFORT_HINTS, EFFORT_LABELS, guessEffort, type Effort, type EffortGuess } from "@/lib/effort";
@@ -57,6 +57,18 @@ function toLocalInput(d: Date): string {
 
 function fromLocalInput(s: string): string {
   return new Date(s).toISOString();
+}
+
+/** All-day events are stored at UTC midnight of their date: "YYYY-MM-DD" from that. */
+function utcDate(iso: string): string {
+  return new Date(iso).toISOString().slice(0, 10);
+}
+
+/** "YYYY-MM-DD" plus n days. */
+function shiftDate(date: string, n: number): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
 }
 
 export interface EditTarget {
@@ -117,13 +129,33 @@ export function AddItemModal({
     return "";
   });
   const [evStart, setEvStart] = useState(() => {
-    if (editTarget?.kind === "Fixed Event") return toLocalInput(new Date((editTarget.data as FixedEvent).start_time));
+    if (editTarget?.kind === "Fixed Event") {
+      const fe = editTarget.data as FixedEvent;
+      // An all-day event has no time yet; offer 09:00 on its date if you switch it to timed.
+      if (fe.is_all_day) return `${utcDate(fe.start_time)}T09:00`;
+      return toLocalInput(new Date(fe.start_time));
+    }
     return toLocalInput(defaultEventStart);
   });
   const [evEnd, setEvEnd] = useState(() => {
-    if (editTarget?.kind === "Fixed Event") return toLocalInput(new Date((editTarget.data as FixedEvent).end_time));
+    if (editTarget?.kind === "Fixed Event") {
+      const fe = editTarget.data as FixedEvent;
+      if (fe.is_all_day) return `${utcDate(fe.start_time)}T10:00`;
+      return toLocalInput(new Date(fe.end_time));
+    }
     return toLocalInput(defaultEventEnd);
   });
+  // All-day: dates only (end date is the last day, inclusive).
+  const editFixed = editTarget?.kind === "Fixed Event" ? (editTarget.data as FixedEvent) : null;
+  const [evAllDay, setEvAllDay] = useState(() => !!editFixed?.is_all_day);
+  const [evStartDate, setEvStartDate] = useState(() =>
+    editFixed?.is_all_day ? utcDate(editFixed.start_time) : toDateInput(editFixed ? new Date(editFixed.start_time) : defaultEventStart)
+  );
+  const [evEndDate, setEvEndDate] = useState(() =>
+    editFixed?.is_all_day
+      ? shiftDate(utcDate(editFixed.end_time), -1) < utcDate(editFixed.start_time) ? utcDate(editFixed.start_time) : shiftDate(utcDate(editFixed.end_time), -1)
+      : toDateInput(editFixed ? new Date(editFixed.end_time) : defaultEventEnd)
+  );
   const [evPillar, setEvPillar] = useState<LifePillar | null>(() => {
     if (editTarget?.kind === "Fixed Event") return (editTarget.data as FixedEvent).pillar ?? null;
     return null;
@@ -258,17 +290,47 @@ export function AddItemModal({
     try {
       if (tab === "event") {
         if (!evName.trim()) throw new Error("Name is required");
-        const start = new Date(evStart);
-        const end = new Date(evEnd);
-        if (end <= start) throw new Error("End time must be after start time");
+        let startIso: string;
+        let endIso: string;
+        if (evAllDay) {
+          if (evEndDate < evStartDate) throw new Error("End date can't be before the start date");
+          startIso = `${evStartDate}T00:00:00.000Z`;
+          endIso = `${shiftDate(evEndDate, 1)}T00:00:00.000Z`;
+        } else {
+          const start = new Date(evStart);
+          const end = new Date(evEnd);
+          if (end <= start) throw new Error("End time must be after start time");
+          startIso = fromLocalInput(evStart);
+          endIso = fromLocalInput(evEnd);
+        }
         const payload: Record<string, unknown> = {
           name: evName.trim(),
-          start_time: fromLocalInput(evStart),
-          end_time: fromLocalInput(evEnd),
+          start_time: startIso,
+          end_time: endIso,
+          is_all_day: evAllDay,
           pillar: evPillar,
-          ...buildRecurrencePayload(),
+          ...(evAllDay ? { recurrence_enabled: false } : buildRecurrencePayload()),
         };
         if (editTarget?.kind === "Fixed Event") {
+          // An event pulled from Google is changed in Google first, so the next
+          // sync doesn't put the old time back.
+          const fe = editTarget.data as FixedEvent;
+          const timeChanged = fe.start_time !== startIso || fe.end_time !== endIso || !!fe.is_all_day !== evAllDay;
+          if (timeChanged) {
+            const { data: map } = await supabase
+              .from("gcal_event_map")
+              .select("google_event_id, calendar_id, calendar_role")
+              .eq("item_id", editTarget.id)
+              .eq("item_type", "fixed_event")
+              .maybeSingle();
+            if (map && map.calendar_role !== "schedule_target" && map.google_event_id && map.calendar_id) {
+              if (fe.google_can_edit === false) throw new Error("Locked — Google doesn't let you change events on this calendar");
+              const res = evAllDay
+                ? await updateGoogleSourceEvent(map.google_event_id, map.calendar_id, evStartDate, shiftDate(evEndDate, 1), true)
+                : await updateGoogleSourceEvent(map.google_event_id, map.calendar_id, startIso, endIso, false);
+              if (!res.success) throw new Error(`Not saved — Google Calendar refused the change: ${res.error ?? "unknown error"}`);
+            }
+          }
           const { error } = await supabase.from("fixed_events").update(payload).eq("id", editTarget.id);
           if (error) throw error;
         } else {
@@ -396,47 +458,91 @@ export function AddItemModal({
                   className="input"
                 />
               </Field>
-              <Field label="Start">
-                <DateTimeField
-                  value={evStart}
-                  onChange={(v) => {
-                    // Like Google Calendar: moving the start keeps the event's length.
-                    const len = new Date(evEnd).getTime() - new Date(evStart).getTime();
-                    setEvStart(v);
-                    if (len > 0) setEvEnd(toLocalInput(new Date(new Date(v).getTime() + len)));
+              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={evAllDay}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    if (on) {
+                      setEvStartDate(evStart.slice(0, 10));
+                      setEvEndDate(evEnd.slice(0, 10) < evStart.slice(0, 10) ? evStart.slice(0, 10) : evEnd.slice(0, 10));
+                    } else {
+                      // Keep the chosen date, with the time already in the boxes.
+                      const len = Math.max(15 * 60000, new Date(evEnd).getTime() - new Date(evStart).getTime());
+                      const st = `${evStartDate}T${evStart.slice(11, 16) || "09:00"}`;
+                      setEvStart(st);
+                      setEvEnd(toLocalInput(new Date(new Date(st).getTime() + Math.min(len, 12 * 3600000))));
+                    }
+                    setEvAllDay(on);
                   }}
+                  className="accent-blue-500"
                 />
-              </Field>
-              <Field label="End">
-                <DateTimeField value={evEnd} onChange={setEvEnd} durationFrom={evStart} />
-              </Field>
+                All day
+              </label>
+              {evAllDay ? (
+                <>
+                  <Field label="Start date">
+                    <DateField
+                      value={evStartDate}
+                      onChange={(d) => {
+                        const len = Math.round((Date.parse(evEndDate) - Date.parse(evStartDate)) / 86400000);
+                        setEvStartDate(d);
+                        setEvEndDate(shiftDate(d, Math.max(0, len)));
+                      }}
+                    />
+                  </Field>
+                  <Field label="End date">
+                    <DateField value={evEndDate} onChange={setEvEndDate} />
+                  </Field>
+                </>
+              ) : (
+                <>
+                  <Field label="Start">
+                    <DateTimeField
+                      value={evStart}
+                      onChange={(v) => {
+                        // Like Google Calendar: moving the start keeps the event's length.
+                        const len = new Date(evEnd).getTime() - new Date(evStart).getTime();
+                        setEvStart(v);
+                        if (len > 0) setEvEnd(toLocalInput(new Date(new Date(v).getTime() + len)));
+                      }}
+                    />
+                  </Field>
+                  <Field label="End">
+                    <DateTimeField value={evEnd} onChange={setEvEnd} durationFrom={evStart} />
+                  </Field>
+                </>
+              )}
               <Field label="Pillar">
                 <PillarPicker value={evPillar} onChange={setEvPillar} />
               </Field>
+              {!evAllDay && (
               <RecurrenceSection
-                enabled={recEnabled}
-                onToggle={() => setRecEnabled(!recEnabled)}
-                freq={recFreq}
-                onFreq={setRecFreq}
-                interval={recInterval}
-                onInterval={setRecInterval}
-                weekdays={recWeekdays}
-                onWeekdays={setRecWeekdays}
-                monthlyMode={recMonthlyMode}
-                onMonthlyMode={setRecMonthlyMode}
-                monthlyDay={recMonthlyDay}
-                onMonthlyDay={setRecMonthlyDay}
-                monthlyWeekN={recMonthlyWeekN}
-                onMonthlyWeekN={setRecMonthlyWeekN}
-                monthlyWeekday={recMonthlyWeekday}
-                onMonthlyWeekday={setRecMonthlyWeekday}
-                endMode={recEndMode}
-                onEndMode={setRecEndMode}
-                endDate={recEndDate}
-                onEndDate={setRecEndDate}
-                count={recCount}
-                onCount={setRecCount}
-              />
+                  enabled={recEnabled}
+                  onToggle={() => setRecEnabled(!recEnabled)}
+                  freq={recFreq}
+                  onFreq={setRecFreq}
+                  interval={recInterval}
+                  onInterval={setRecInterval}
+                  weekdays={recWeekdays}
+                  onWeekdays={setRecWeekdays}
+                  monthlyMode={recMonthlyMode}
+                  onMonthlyMode={setRecMonthlyMode}
+                  monthlyDay={recMonthlyDay}
+                  onMonthlyDay={setRecMonthlyDay}
+                  monthlyWeekN={recMonthlyWeekN}
+                  onMonthlyWeekN={setRecMonthlyWeekN}
+                  monthlyWeekday={recMonthlyWeekday}
+                  onMonthlyWeekday={setRecMonthlyWeekday}
+                  endMode={recEndMode}
+                  onEndMode={setRecEndMode}
+                  endDate={recEndDate}
+                  onEndDate={setRecEndDate}
+                  count={recCount}
+                  onCount={setRecCount}
+                />
+              )}
             </>
           )}
 

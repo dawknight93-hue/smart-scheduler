@@ -12,7 +12,7 @@ const TONES: { id: NoteTone; label: string; icon: React.ReactNode }[] = [
 
 const ROLE_HELP: Record<string, string> = {
   reserve: "Reserve rule — works with the Proffer and Assignments rules. Extra blanks: {flying}, {proffer}, {lookout}, {confirm_by}.",
-  proffer: "Proffer rule — its times feed {proffer} in the reserve rule. Its own note shows when tomorrow isn't a reserve day.",
+  proffer: "Proffer rule — the day before a reserve day, its window feeds {proffer} in the reserve rule. A proffer event on the calendar wins; otherwise the usual window below is used. Its own note shows only when there's a proffer event and tomorrow isn't a reserve day.",
   assignments: "Assignments rule — its start time feeds {lookout} in the reserve rule.",
 };
 
@@ -34,6 +34,8 @@ function blankRule(position: number, seed?: { title: string; source?: string }):
     coming_up: null,
     confirm_by: null,
     assign_from: null,
+    opens_at: null,
+    closes_at: null,
   };
 }
 
@@ -302,6 +304,18 @@ function RuleForm({
           <div>
             <span className={label}>Assignments posted from (if not on calendar)</span>
             <input className={field} value={rule.assign_from ?? ""} placeholder="15:00" onChange={(e) => set("assign_from", e.target.value || null)} />
+          </div>
+        </div>
+      )}
+      {rule.role === "proffer" && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <span className={label}>Usual window opens</span>
+            <input className={field} value={rule.opens_at ?? ""} placeholder="11:00" onChange={(e) => set("opens_at", e.target.value || null)} />
+          </div>
+          <div>
+            <span className={label}>Usual window closes</span>
+            <input className={field} value={rule.closes_at ?? ""} placeholder="15:00" onChange={(e) => set("closes_at", e.target.value || null)} />
           </div>
         </div>
       )}

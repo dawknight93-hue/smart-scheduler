@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, SlidersHorizontal, CalendarRange, ClipboardCheck, CloudLightning, DollarSign, Heart, Info, Loader2, Plane, Radar, RefreshCw, ShieldCheck, Sparkles, Sunrise, Target, ThumbsDown, ThumbsUp, BookOpen } from "lucide-react";
+import { AlertTriangle, SlidersHorizontal, CalendarRange, ClipboardCheck, CloudLightning, DollarSign, Heart, Info, Loader2, Plane, Radar, RefreshCw, ShieldCheck, Sparkles, Sunrise, Target, ThumbsDown, ThumbsUp, BookOpen, Bell } from "lucide-react";
 import type { AwarenessNote, AwareItem, DailyAwareness, DutyStats } from "@/lib/awareness";
 import { AwarenessRulesEditor } from "@/components/AwarenessRulesEditor";
 import { BriefingMemoryEditor } from "@/components/BriefingMemoryEditor";
+import { RemindersPanel } from "@/components/RemindersPanel";
 import { addMemory, loadMemory } from "@/lib/briefingMemory";
 import { getPillarColor } from "@/lib/types";
 import { goalShortName } from "@/lib/goalPlanning";
@@ -53,6 +54,7 @@ export function BriefingView({ onOpenReview }: { onOpenReview: () => void }) {
   const [wxState, setWxState] = useState<"idle" | "loading" | "error">("idle");
   const [summary, setSummary] = useState<SummaryResult | null>(null);
   const [memoryOpen, setMemoryOpen] = useState(false);
+  const [remindersOpen, setRemindersOpen] = useState(false);
   const [memoryCount, setMemoryCount] = useState<number | null>(null);
   // Feedback on the current summary: null, "up" (thanks shown), or "down" (note input open).
   const [feedback, setFeedback] = useState<null | "up" | "down" | "saved">(null);
@@ -174,6 +176,9 @@ export function BriefingView({ onOpenReview }: { onOpenReview: () => void }) {
               </button>
             ))}
           </div>
+          <button onClick={() => setRemindersOpen(true)} className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-slate-800 text-xs text-slate-300 hover:bg-slate-700" title="Push reminders on this phone">
+            <Bell className="w-3.5 h-3.5" /> Reminders
+          </button>
           <button onClick={() => setMemoryOpen(true)} className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-slate-800 text-xs text-slate-300 hover:bg-slate-700" title="What the summary writer remembers">
             <BookOpen className="w-3.5 h-3.5" /> Memory{memoryCount !== null ? ` (${memoryCount})` : ""}
           </button>
@@ -195,6 +200,8 @@ export function BriefingView({ onOpenReview }: { onOpenReview: () => void }) {
           }}
         />
       )}
+
+      {remindersOpen && <RemindersPanel onClose={() => setRemindersOpen(false)} />}
 
       {memoryOpen && (
         <BriefingMemoryEditor
