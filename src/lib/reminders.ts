@@ -10,12 +10,17 @@
  *                       how much is on, and the top situational-awareness notes.
  *   Reserve eve       — the day before a reserve day: proffer window opens,
  *                       assignments start posting, and 30 min before confirm-by.
+ *
+ * Times are always your home (MIA, Eastern) times, whatever time zone the
+ * phone happens to be in — otherwise a phone on a trip would move every
+ * reminder by the time difference.
  */
 import { supabase } from "./supabase";
 import { dailyAwareness, reserveEve } from "./awareness";
 import { loadAwarenessRules } from "./awarenessRules";
 import { dayLabel, hhmm, loadBriefItems, type BriefItem } from "./briefing";
 import { formatLocalDate } from "./recurrence";
+import { homeDate, homeWallParts } from "./schedulingEngine";
 
 export interface ReminderSettings {
   enabled: boolean;
@@ -49,6 +54,17 @@ const at = (day: Date, hm: string) => {
   return new Date(day.getFullYear(), day.getMonth(), day.getDate(), h || 0, m || 0);
 };
 const holdsTime = (i: BriefItem) => i.blocks !== false || !!i.flight;
+
+/**
+ * Planning happens in a "home frame": each instant becomes a Date whose local
+ * getters read Eastern wall-clock time, so the date math below works the same
+ * on any device. fromHomeFrame turns a frame time back into the real instant.
+ */
+const toHomeFrame = (d: Date) => {
+  const w = homeWallParts(d);
+  return new Date(w.y, w.mo - 1, w.d, w.h, w.mi, w.s);
+};
+const fromHomeFrame = (d: Date) => homeDate(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes());
 const clip = (s: string, n = 230) => (s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s);
 
 export async function loadReminderSettings(): Promise<ReminderSettings> {
@@ -61,8 +77,18 @@ export async function saveReminderSettings(s: ReminderSettings): Promise<void> {
   if (error) throw new Error(error.message);
 }
 
-/** Work out the reminders for the next week (pure: no database access). */
-export function planReminders(items: BriefItem[], rules: Parameters<typeof dailyAwareness>[2], now: Date, s: ReminderSettings): PlannedReminder[] {
+/**
+ * Work out the reminders for the next week (pure: no database access). `items`
+ * and `now` are in whatever frame the caller uses; `toInstant` turns a time in
+ * that frame into the real moment to send.
+ */
+export function planReminders(
+  items: BriefItem[],
+  rules: Parameters<typeof dailyAwareness>[2],
+  now: Date,
+  s: ReminderSettings,
+  toInstant: (d: Date) => Date = (d) => d
+): PlannedReminder[] {
   const out: PlannedReminder[] = [];
   if (!s.enabled) return out;
   const today = startOfDay(now);
@@ -86,7 +112,7 @@ export function planReminders(items: BriefItem[], rules: Parameters<typeof daily
         for (const note of notes) parts.push(note.text);
         out.push({
           key: `morning:${date}`,
-          send_at: when.toISOString(),
+          send_at: toInstant(when).toISOString(),
           title: `Briefing · ${dayLabel(day)}`,
           body: clip(parts.join(" ")),
           url: "/?view=briefing",
@@ -103,7 +129,7 @@ export function planReminders(items: BriefItem[], rules: Parameters<typeof daily
         if (!assigned && eve.proffer && eve.proffer.start > now) {
           out.push({
             key: `proffer:${date}`,
-            send_at: eve.proffer.start.toISOString(),
+            send_at: toInstant(eve.proffer.start).toISOString(),
             title: "Proffer window open",
             body: `Airline reserve tomorrow (${label}). Proffer for flying or RAP — the window closes at ${hhmm(eve.proffer.end)}.`,
             url: "/?view=briefing",
@@ -113,7 +139,7 @@ export function planReminders(items: BriefItem[], rules: Parameters<typeof daily
         if (!assigned && eve.lookout && eve.lookout > now) {
           out.push({
             key: `assign:${date}`,
-            send_at: eve.lookout.toISOString(),
+            send_at: toInstant(eve.lookout).toISOString(),
             title: "Watch for tomorrow's assignment",
             body: `Reserve tomorrow (${label}). Crew Scheduling posts next-day assignments from ${hhmm(eve.lookout)}${eve.confirmBy ? ` — confirm yours before ${hhmm(eve.confirmBy)}` : ""}.`,
             url: "/?view=briefing",
@@ -125,7 +151,7 @@ export function planReminders(items: BriefItem[], rules: Parameters<typeof daily
           if (when > now) {
             out.push({
               key: `confirm:${date}`,
-              send_at: when.toISOString(),
+              send_at: toInstant(when).toISOString(),
               title: "Confirm tomorrow's assignment",
               body: assigned
                 ? `Reserve tomorrow (${label}): you're assigned ${eve.flights.map((f) => `${f.flight!.origin}→${f.flight!.destination} ${hhmm(f.start)}`).join(", ")}. Make sure it's confirmed before ${hhmm(eve.confirmBy)}.`
@@ -154,12 +180,15 @@ export function syncReminders(force = false): Promise<number> {
   inFlight = (async () => {
     try {
       const now = new Date();
-      const [settings, rules, items] = await Promise.all([
+      const homeNow = toHomeFrame(now);
+      const [settings, rules, raw] = await Promise.all([
         loadReminderSettings(),
         loadAwarenessRules(),
-        loadBriefItems(startOfDay(now), addDays(startOfDay(now), DAYS_AHEAD + 1)),
+        loadBriefItems(addDays(startOfDay(now), -1), addDays(startOfDay(now), DAYS_AHEAD + 2)),
       ]);
-      const planned = planReminders(items, rules, now, settings);
+      // All-day items are already calendar dates; timed ones move into the home frame.
+      const items = raw.map((i) => (i.allDay ? i : { ...i, start: toHomeFrame(i.start), end: toHomeFrame(i.end) }));
+      const planned = planReminders(items, rules, homeNow, settings, fromHomeFrame);
       const { data: existing, error } = await supabase
         .from("reminders")
         .select("id, key")
