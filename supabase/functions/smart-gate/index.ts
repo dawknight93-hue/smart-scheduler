@@ -94,6 +94,79 @@ async function saveMessage(goalId: string, role: string, content: string): Promi
   if (error) throw new Error(`Failed to save ${role} message: ${error.message}`);
 }
 
+const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+const CLAUDE_MODEL = "claude-sonnet-5";
+
+type ChatTurn = { role: "user" | "assistant"; content: string };
+
+/** Claude needs alternating turns that start and end with the user. */
+function claudeTurns(turns: ChatTurn[]): ChatTurn[] {
+  const out: ChatTurn[] = [];
+  for (const t of turns) {
+    const content = (t.content ?? "").trim();
+    if (!content) continue;
+    const last = out[out.length - 1];
+    if (last && last.role === t.role) last.content += "\n\n" + content;
+    else out.push({ role: t.role, content });
+  }
+  if (!out.length || out[0].role !== "user") out.unshift({ role: "user", content: "(Start of our conversation.)" });
+  if (out[out.length - 1].role !== "user") out.push({ role: "user", content: "Please continue." });
+  return out;
+}
+
+/** Pull the JSON object out of a reply (Claude may wrap it in a code fence). */
+function parseReply(content: string, who: string): SmartGateLLMReply {
+  const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const body = fenced ? fenced[1] : content;
+  const start = body.indexOf("{");
+  const end = body.lastIndexOf("}");
+  let parsed: SmartGateLLMReply;
+  try {
+    if (start < 0 || end <= start) throw new Error("no object");
+    parsed = JSON.parse(body.slice(start, end + 1)) as SmartGateLLMReply;
+  } catch {
+    throw new GroqUpstreamError(`${who} returned non-JSON content.`);
+  }
+  if (typeof parsed.reply !== "string") throw new GroqUpstreamError(`${who} response missing 'reply' field.`);
+  return parsed;
+}
+
+async function callClaude(messages: MessageRow[], key: string): Promise<SmartGateLLMReply> {
+  const resp = await fetch(ANTHROPIC_URL, {
+    method: "POST",
+    headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 2000,
+      thinking: { type: "disabled" },
+      system: buildSystemPrompt() + "\n\nReply with the JSON object only — no code fence, no text before or after it.",
+      messages: claudeTurns(messages.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }))),
+    }),
+  });
+  if (!resp.ok) throw new Error(`Claude returned ${resp.status}: ${(await resp.text()).slice(0, 300)}`);
+  const data = await resp.json();
+  const text = ((data.content ?? []) as { type: string; text?: string }[])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text ?? "")
+    .join("")
+    .trim();
+  return parseReply(text, "Claude");
+}
+
+/** Claude Sonnet 5 when ANTHROPIC_API_KEY is set; Groq otherwise or if Claude fails. */
+async function callModel(messages: MessageRow[]): Promise<SmartGateLLMReply & { model: string }> {
+  const key = Deno.env.get("ANTHROPIC_API_KEY");
+  if (key) {
+    try {
+      return { ...(await callClaude(messages, key)), model: "Claude Sonnet 5" };
+    } catch (e) {
+      console.error("Claude failed, using Groq:", e);
+      return { ...(await callGroq(messages)), model: "Groq gpt-oss-120b (Claude unavailable)" };
+    }
+  }
+  return { ...(await callGroq(messages)), model: "Groq gpt-oss-120b (Claude key not set)" };
+}
+
 async function callGroq(messages: MessageRow[]): Promise<SmartGateLLMReply> {
   const apiKey = Deno.env.get("GROQ_API_KEY");
   if (!apiKey) throw new GroqConfigError("GROQ_API_KEY not configured");
@@ -153,7 +226,7 @@ class GroqUpstreamError extends Error {}
 async function handleChat(
   goalId: string,
   userMessage: string
-): Promise<SmartGateLLMReply & { smart: Record<string, string | null> }> {
+): Promise<SmartGateLLMReply & { model: string; smart: Record<string, string | null> }> {
   await fetchGoal(goalId);
   const messages = await fetchMessages(goalId);
 
@@ -161,7 +234,7 @@ async function handleChat(
 
   const updatedMessages = [...messages, { role: "user", content: userMessage } as MessageRow];
 
-  const llmReply = await callGroq(updatedMessages);
+  const llmReply = await callModel(updatedMessages);
 
   await saveMessage(goalId, "assistant", llmReply.reply);
 
@@ -250,7 +323,7 @@ Deno.serve(async (req: Request) => {
       case "chat": {
         if (!body.goal_id) throw new Error("goal_id is required.");
         if (!body.message) throw new Error("message is required.");
-        result = await handleChat(body.goal_id, body.message);
+        result = { ...(await handleChat(body.goal_id, body.message)) };
         break;
       }
 
