@@ -12,7 +12,6 @@ const supabase = createClient(
 );
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const COMPOUND_MODEL = "openai/gpt-oss-120b";
 const EXTRACTION_MODEL = "openai/gpt-oss-120b";
 
 interface GoalResearchRequest {
@@ -83,6 +82,115 @@ async function fetchWithRetry(
     await new Promise((resolve) => setTimeout(resolve, waitSec * 1000));
   }
   return lastResp!;
+}
+
+// ---------------------------------------------------------------------------
+// Model: Claude Sonnet 5 when ANTHROPIC_API_KEY is set, Groq otherwise (and as
+// the fallback if Claude errors), so goal planning never stops working.
+
+const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+const CLAUDE_MODEL = "claude-sonnet-5";
+const CLAUDE_LABEL = "Claude Sonnet 5";
+const GROQ_LABEL = "Groq gpt-oss-120b";
+
+type ChatTurn = { role: "user" | "assistant"; content: string };
+
+interface LLMResult {
+  text: string;
+  model: string;
+  warning?: string;
+}
+
+/** Claude needs alternating turns that start and end with the user. */
+function claudeTurns(turns: ChatTurn[]): ChatTurn[] {
+  const out: ChatTurn[] = [];
+  for (const t of turns) {
+    const content = (t.content ?? "").trim();
+    if (!content) continue;
+    const last = out[out.length - 1];
+    if (last && last.role === t.role) last.content += "\n\n" + content;
+    else out.push({ role: t.role, content });
+  }
+  if (!out.length || out[0].role !== "user") out.unshift({ role: "user", content: "(Start of our conversation.)" });
+  if (out[out.length - 1].role !== "user") out.push({ role: "user", content: "Please continue." });
+  return out;
+}
+
+async function claudeCall(system: string, turns: ChatTurn[], maxTokens: number, key: string): Promise<string> {
+  const resp = await fetchWithRetry(ANTHROPIC_URL, {
+    method: "POST",
+    headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: maxTokens,
+      thinking: { type: "disabled" },
+      system,
+      messages: claudeTurns(turns),
+    }),
+  });
+  if (!resp.ok) throw new Error(`Claude request failed (${resp.status}): ${(await resp.text()).slice(0, 300)}`);
+  const data = await resp.json();
+  const text = ((data.content ?? []) as { type: string; text?: string }[])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text ?? "")
+    .join("")
+    .trim();
+  if (!text) throw new Error("Claude returned an empty reply.");
+  return text;
+}
+
+async function groqCall(system: string, turns: ChatTurn[], json: boolean): Promise<string> {
+  const resp = await fetchWithRetry(GROQ_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${Deno.env.get("GROQ_API_KEY")}` },
+    body: JSON.stringify({
+      model: EXTRACTION_MODEL,
+      ...(json ? { response_format: { type: "json_object" } } : {}),
+      messages: [{ role: "system", content: system }, ...turns],
+    }),
+  });
+  if (!resp.ok) throw new Error(`Groq request failed: ${resp.status} ${await resp.text()}`);
+  return String((await resp.json()).choices?.[0]?.message?.content ?? "").trim();
+}
+
+/** Pull the JSON object out of a reply (Claude may wrap it in a code fence). */
+function parseJsonObject(text: string): any {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const body = fenced ? fenced[1] : text;
+  const start = body.indexOf("{");
+  const end = body.lastIndexOf("}");
+  if (start < 0 || end <= start) throw new Error("no JSON object");
+  return JSON.parse(body.slice(start, end + 1));
+}
+
+/**
+ * One model call. With json=true the reply is parsed; if Claude's reply isn't
+ * valid JSON (or Claude errors), the same request goes to Groq instead.
+ */
+async function llm(system: string, turns: ChatTurn[], opts: { json?: boolean; maxTokens?: number } = {}): Promise<LLMResult & { data?: any }> {
+  const json = !!opts.json;
+  const sys = json ? system + "\n\nReply with the JSON object only — no code fence, no text before or after it." : system;
+  const key = Deno.env.get("ANTHROPIC_API_KEY");
+  let warning: string | undefined;
+  if (key) {
+    try {
+      const text = await claudeCall(sys, turns, opts.maxTokens ?? 2000, key);
+      return json ? { text, model: CLAUDE_LABEL, data: parseJsonObject(text) } : { text, model: CLAUDE_LABEL };
+    } catch (e) {
+      console.error("Claude failed, using Groq:", e);
+      warning = String(e instanceof Error ? e.message : e).slice(0, 200);
+    }
+  }
+  const text = await groqCall(sys, turns, json);
+  const model = `${GROQ_LABEL} (${key ? "Claude unavailable" : "Claude key not set"})`;
+  if (!json) return { text, model, warning };
+  let data: any;
+  try {
+    data = parseJsonObject(text);
+  } catch {
+    data = undefined;
+  }
+  return { text, model, warning, data };
 }
 
 async function fetchGoal(goalId: string): Promise<GoalRow> {
@@ -186,7 +294,7 @@ function formatSearchContext(results: TavilyResult[]): string {
   return "Here are relevant web search results to ground your suggestions. Reference them by number when relevant, and include the URL when you mention a specific source:\n\n" + lines.join("\n\n");
 }
 
-async function callGroqCompound(
+async function callResearchModel(
   systemPrompt: string,
   history: MessageRow[],
   newUserMessage: string | null,
@@ -201,33 +309,16 @@ async function callGroqCompound(
     ? systemPrompt + "\n\n" + searchContext
     : systemPrompt;
 
-  const messages = [
-    { role: "system", content: systemContent },
-    ...history.map((m) => ({ role: m.role, content: m.content })),
-  ];
-  if (newUserMessage) messages.push({ role: "user", content: newUserMessage });
+  const turns: ChatTurn[] = history.map((m) => ({ role: m.role, content: m.content }));
+  if (newUserMessage) turns.push({ role: "user", content: newUserMessage });
 
-  const resp = await fetch(GROQ_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${Deno.env.get("GROQ_API_KEY")}`,
-    },
-    body: JSON.stringify({
-      model: COMPOUND_MODEL,
-      messages,
-    }),
-  });
-
-  if (!resp.ok) {
-    throw new Error(`Groq compound request failed: ${resp.status} ${await resp.text()}`);
-  }
-
-  const data = await resp.json();
-  const reply: string = data.choices?.[0]?.message?.content ?? "";
-
-  return { reply, sources };
+  const { text, model } = await llm(systemContent, turns, { maxTokens: 2000 });
+  lastModel = model;
+  return { reply: text, sources };
 }
+
+/** Which model answered the most recent chat turn (reported back to the app). */
+let lastModel: string | null = null;
 
 async function extractApproach(
   goal: GoalRow,
@@ -235,36 +326,15 @@ async function extractApproach(
 ): Promise<{ approach_chosen: boolean; approach: string | null }> {
   const transcript = buildExtractionTranscript(researchMessages);
 
-  const resp = await fetchWithRetry(GROQ_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${Deno.env.get("GROQ_API_KEY")}`,
-    },
-    body: JSON.stringify({
-      model: EXTRACTION_MODEL,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            "You extract structured state from a coaching conversation about choosing an approach to achieve a goal. " +
-            "Decide whether the user has clearly settled on one specific approach to pursue. " +
-            "Respond with a single JSON object and no other text, with keys: approach_chosen (boolean), approach (a short string naming and briefly describing the chosen approach, or null if not chosen yet).",
-        },
-        { role: "user", content: `Goal: ${goal.specific ?? "n/a"}\n\nTranscript:\n${transcript}` },
-      ],
-    }),
-  });
-
-  if (!resp.ok) {
-    throw new Error(`Groq extraction request failed: ${resp.status} ${await resp.text()}`);
-  }
-
-  const data = await resp.json();
-  const content: string = data.choices?.[0]?.message?.content ?? "{}";
+  const { data: parsed } = await llm(
+    "You extract structured state from a coaching conversation about choosing an approach to achieve a goal. " +
+      "Decide whether the user has clearly settled on one specific approach to pursue. " +
+      "Respond with a single JSON object and no other text, with keys: approach_chosen (boolean), approach (a short string naming and briefly describing the chosen approach, or null if not chosen yet).",
+    [{ role: "user", content: `Goal: ${goal.specific ?? "n/a"}\n\nTranscript:\n${transcript}` }],
+    { json: true, maxTokens: 600 },
+  );
   try {
-    const parsed = JSON.parse(content);
+    if (!parsed) throw new Error("unreadable");
     return {
       approach_chosen: Boolean(parsed.approach_chosen),
       approach: typeof parsed.approach === "string" ? parsed.approach : null,
@@ -280,37 +350,16 @@ async function extractCadence(
 ): Promise<{ sessions_per_week: number | null; label: string | null; confirmed: boolean }> {
   const transcript = buildExtractionTranscript(researchMessages);
 
-  const resp = await fetchWithRetry(GROQ_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${Deno.env.get("GROQ_API_KEY")}`,
-    },
-    body: JSON.stringify({
-      model: EXTRACTION_MODEL,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
+  const { data: parsed } = await llm(
             "You extract the weekly session frequency being discussed for a chosen approach to a goal. " +
             "Read the conversation and determine what weekly frequency is currently being discussed, even if tentative (e.g. 'probably 3 to 4 times a week'). " +
             "Also decide whether the user has clearly committed to one specific number (not a range or possibility). " +
             "Respond with a single JSON object and no other text, with keys: sessions_per_week (integer or null, use the midpoint of a range if discussed), label (a short display string like '4x/week' or '~3x/week?' or null), confirmed (boolean, true only if the user has committed to a specific number).",
-        },
-        { role: "user", content: `Goal: ${goal.specific ?? "n/a"}\nChosen approach: ${goal.approach ?? "n/a"}\n\nTranscript:\n${transcript}` },
-      ],
-    }),
-  });
-
-  if (!resp.ok) {
-    throw new Error(`Groq cadence extraction request failed: ${resp.status} ${await resp.text()}`);
-  }
-
-  const data = await resp.json();
-  const content: string = data.choices?.[0]?.message?.content ?? "{}";
+    [{ role: "user", content: `Goal: ${goal.specific ?? "n/a"}\nChosen approach: ${goal.approach ?? "n/a"}\n\nTranscript:\n${transcript}` }],
+    { json: true, maxTokens: 600 },
+  );
   try {
-    const parsed = JSON.parse(content);
+    if (!parsed) throw new Error("unreadable");
     return {
       sessions_per_week: typeof parsed.sessions_per_week === "number" ? parsed.sessions_per_week : null,
       label: typeof parsed.label === "string" ? parsed.label : null,
@@ -331,7 +380,7 @@ async function handleKickoff(goalId: string) {
 
   if (!goal.research_started) {
     const systemPrompt = buildResearchSystemPrompt(goal);
-    const { reply, sources } = await callGroqCompound(
+    const { reply, sources } = await callResearchModel(
       systemPrompt,
       [],
       "Please research and suggest a few concrete approaches for achieving this goal.",
@@ -348,7 +397,7 @@ async function handleKickoff(goalId: string) {
 
   const messages = await fetchAllMessages(goalId);
   const refreshed = await fetchGoal(goalId);
-  return { messages, goal_status: refreshed.status, approach: refreshed.approach, cadence_sessions_per_week: refreshed.cadence_sessions_per_week, cadence_label: refreshed.cadence_label, cadence_confirmed: refreshed.cadence_confirmed };
+  return { messages, goal_status: refreshed.status, approach: refreshed.approach, cadence_sessions_per_week: refreshed.cadence_sessions_per_week, cadence_label: refreshed.cadence_label, cadence_confirmed: refreshed.cadence_confirmed, model: lastModel };
 }
 
 async function handleChat(goalId: string, userMessage: string) {
@@ -359,7 +408,7 @@ async function handleChat(goalId: string, userMessage: string) {
   const researchHistory = allMessages.filter((m) => m.stage === "research" && m.content !== userMessage);
 
   const systemPrompt = buildResearchSystemPrompt(goal);
-  const { reply, sources } = await callGroqCompound(systemPrompt, researchHistory.slice(0, -1), userMessage, goal);
+  const { reply, sources } = await callResearchModel(systemPrompt, researchHistory.slice(0, -1), userMessage, goal);
   const fullReply = withSources(reply, sources);
   await saveMessage(goalId, "assistant", fullReply);
 
@@ -410,7 +459,7 @@ async function handleChat(goalId: string, userMessage: string) {
     }
   }
 
-  return { messages: updatedMessages, goal_status: goalStatus, approach, cadence_sessions_per_week: cadenceSessions, cadence_label: cadenceLabel, cadence_confirmed: cadenceConfirmed };
+  return { messages: updatedMessages, goal_status: goalStatus, approach, cadence_sessions_per_week: cadenceSessions, cadence_label: cadenceLabel, cadence_confirmed: cadenceConfirmed, model: lastModel };
 }
 
 // ---------------------------------------------------------------------------
@@ -454,23 +503,9 @@ async function handleCascade(goalId: string) {
     `Relevant: ${goal.relevant ?? "n/a"}\nTime-bound: ${goal.time_bound ?? "n/a"}\nDeadline: ${goal.deadline ? String(goal.deadline).slice(0, 10) : "not set"}\n` +
     `Chosen approach: ${goal.approach}\nCommitted cadence: ${goal.cadence_label ?? goal.cadence_sessions_per_week + "x/week"}`;
 
-  const resp = await fetchWithRetry(GROQ_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${Deno.env.get("GROQ_API_KEY")}` },
-    body: JSON.stringify({
-      model: EXTRACTION_MODEL,
-      response_format: { type: "json_object" },
-      messages: [{ role: "system", content: system }, { role: "user", content: user }],
-    }),
-  });
-  if (!resp.ok) throw new Error(`Planning request failed: ${resp.status} ${await resp.text()}`);
-  const content: string = (await resp.json()).choices?.[0]?.message?.content ?? "{}";
-  let parsed: any;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    throw new Error("The planner returned something unreadable — try Generate plan again.");
-  }
+  const planned = await llm(system, [{ role: "user", content: user }], { json: true, maxTokens: 4000 });
+  const parsed: any = planned.data;
+  if (!parsed) throw new Error("The planner returned something unreadable — try Generate plan again.");
 
   const isDate = (v: unknown) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
   const deadline = isDate(parsed.deadline) ? parsed.deadline : goal.deadline ? String(goal.deadline).slice(0, 10) : null;
@@ -501,7 +536,7 @@ async function handleCascade(goalId: string) {
 
   const { data: saved, error: saveErr } = await supabase.from("goals").update(update).eq("id", goalId).select("*").maybeSingle();
   if (saveErr) throw new Error(`Failed to save the plan: ${saveErr.message}`);
-  return { goal: saved };
+  return { goal: saved, model: planned.model };
 }
 
 /**
@@ -544,23 +579,9 @@ async function handleDaily(goalId: string, sessions: { ref: string; day: string;
     `Recent sessions: ${(recent ?? []).length ? (recent ?? []).map((r: any) => `${r.day} ${r.done ? "[done]" : "[not done]"} ${r.focus}`).join("; ") : "none yet"}\n` +
     `Sessions this week:\n${sessions.map((s) => `- ref ${s.ref}: ${s.day}, ${s.minutes} min`).join("\n")}`;
 
-  const resp = await fetchWithRetry(GROQ_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${Deno.env.get("GROQ_API_KEY")}` },
-    body: JSON.stringify({
-      model: EXTRACTION_MODEL,
-      response_format: { type: "json_object" },
-      messages: [{ role: "system", content: system }, { role: "user", content: user }],
-    }),
-  });
-  if (!resp.ok) throw new Error(`Daily plan request failed: ${resp.status} ${await resp.text()}`);
-  const content: string = (await resp.json()).choices?.[0]?.message?.content ?? "{}";
-  let parsed: any;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    throw new Error("The planner returned something unreadable — try again.");
-  }
+  const planned = await llm(system, [{ role: "user", content: user }], { json: true, maxTokens: 2500 });
+  const parsed: any = planned.data;
+  if (!parsed) throw new Error("The planner returned something unreadable — try again.");
   const refs = new Set(sessions.map((s) => s.ref));
   const items = (Array.isArray(parsed.items) ? parsed.items : [])
     .filter((i: any) => i && refs.has(String(i.ref)) && typeof i.focus === "string" && i.focus.trim())
@@ -569,7 +590,7 @@ async function handleDaily(goalId: string, sessions: { ref: string; day: string;
       focus: i.focus.trim().replace(/\.$/, "").slice(0, 120),
       steps: (Array.isArray(i.steps) ? i.steps : []).filter((x: unknown) => typeof x === "string" && x.trim()).map((x: string) => x.trim().slice(0, 120)).slice(0, 3),
     }));
-  return { items };
+  return { items, model: planned.model };
 }
 
 async function handleHistory(goalId: string) {
