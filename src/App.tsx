@@ -81,12 +81,14 @@ function App() {
       }`}
     >
       {/* Tabs — a block on the left on wider screens (frees the top for the calendar) */}
-      <aside className="hidden md:block w-44 shrink-0 border-r border-slate-800 bg-slate-900/60 md:sticky md:top-0 md:h-[100dvh]">
+      <aside className="hidden md:flex md:flex-col w-52 shrink-0 border-r border-slate-800 bg-slate-900/60 md:sticky md:top-0 md:h-[100dvh]">
         <nav className="p-3" aria-label="Sections">
           <div className="rounded-xl border border-slate-800 bg-slate-900 p-1.5 flex flex-col gap-0.5">
             {tabs.map((t) => tabButton(t, true))}
           </div>
         </nav>
+        {/* The Calendar puts its "not on your calendar" tray here. */}
+        <div id="sidebar-slot" className="flex-1 min-h-0 overflow-y-auto px-3 pb-3 empty:hidden" />
       </aside>
 
       {/* Tabs — top bar on phones, where a side column would crowd the calendar */}
