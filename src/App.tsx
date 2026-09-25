@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CalendarDays, CheckSquare, Target, ClipboardCheck, Sunrise } from "lucide-react";
 import { CalendarView } from "@/components/CalendarView";
 import { TasksView } from "@/components/TasksView";
@@ -9,11 +9,32 @@ import { useReviewDue } from "@/lib/useReviewDue";
 import { GoogleCallback } from "@/components/GoogleCallback";
 import { PrivacyPolicy } from "@/components/PrivacyPolicy";
 import { getWeekStart } from "@/lib/schedulingEngine";
+import { registerServiceWorker } from "@/lib/push";
+import { syncReminders } from "@/lib/reminders";
 
 type View = "briefing" | "calendar" | "tasks" | "goals" | "review";
+const VIEWS: View[] = ["briefing", "calendar", "tasks", "goals", "review"];
+
+/** A tapped notification opens the app at ?view=briefing. */
+function initialView(): View {
+  const v = new URLSearchParams(window.location.search).get("view") as View | null;
+  return v && VIEWS.includes(v) ? v : "calendar";
+}
 
 function App() {
-  const [view, setView] = useState<View>("calendar");
+  const [view, setView] = useState<View>(initialView);
+
+  // Service worker (for notifications) and the next week's reminders, on launch
+  // and whenever the app comes back to the foreground.
+  useEffect(() => {
+    if (window.location.pathname !== "/") return;
+    void registerServiceWorker();
+    const plan = () => void syncReminders().catch(() => undefined);
+    plan();
+    const onVisible = () => document.visibilityState === "visible" && plan();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, []);
   const [weekStart, setWeekStart] = useState(() => getWeekStart(new Date()));
   const reviewDue = useReviewDue(view);
 
