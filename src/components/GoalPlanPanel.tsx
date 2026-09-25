@@ -44,6 +44,7 @@ export function GoalPlanPanel({ goalId }: { goalId: string }) {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [planModel, setPlanModel] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -67,6 +68,7 @@ export function GoalPlanPanel({ goalId }: { goalId: string }) {
       const res = await fetch(RESEARCH_URL, { method: "POST", headers: HEADERS, body: JSON.stringify({ action: "cascade", goal_id: goalId }) });
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || `Request failed (${res.status})`);
+      setPlanModel(typeof data.model === "string" ? data.model : null);
       const { data: fresh } = await supabase.from("goals").select(PLAN_GOAL_COLUMNS).eq("id", goalId).maybeSingle();
       if (fresh) setGoal(fresh as PlanGoal);
     } catch (e) {
@@ -132,6 +134,7 @@ export function GoalPlanPanel({ goalId }: { goalId: string }) {
       </div>
 
       {error && <p className="text-sm text-rose-300 mb-2">{error}</p>}
+      {planModel && <p className="text-[11px] text-slate-500 mb-2">Plan written by {planModel}</p>}
 
       {hasPlan && (
         <>

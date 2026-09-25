@@ -303,6 +303,8 @@ function GoalChat({ goalId, onBack }: { goalId: string; onBack: () => void }) {
   const [cadenceLabel, setCadenceLabel] = useState<string | null>(null);
   const [cadenceConfirmed, setCadenceConfirmed] = useState(false);
   const [researchLoading, setResearchLoading] = useState(false);
+  // Which model wrote the latest coach reply (shown under the chat).
+  const [coachModel, setCoachModel] = useState<string | null>(null);
   const kickedOffRef = useRef(false);
 
     useEffect(() => {
@@ -315,6 +317,7 @@ function GoalChat({ goalId, onBack }: { goalId: string; onBack: () => void }) {
         if (cancelled) return;
         setMessages(data.messages || []);
         setSmart(data.smart || EMPTY_SMART);
+        if (typeof data.model === "string") setCoachModel(data.model);
         setStatus(data.status || "draft");
 
         const loadedStatus = data.status || "draft";
@@ -377,6 +380,7 @@ function GoalChat({ goalId, onBack }: { goalId: string; onBack: () => void }) {
         setCadenceSessions(data.cadence_sessions_per_week ?? null);
         setCadenceLabel(data.cadence_label ?? null);
         setCadenceConfirmed(Boolean(data.cadence_confirmed));
+        if (typeof data.model === "string") setCoachModel(data.model);
       })
       .catch((err) => {
         setError(err instanceof Error ? err.message : "Could not start research.");
@@ -412,6 +416,7 @@ function GoalChat({ goalId, onBack }: { goalId: string; onBack: () => void }) {
         setCadenceSessions(data.cadence_sessions_per_week ?? null);
         setCadenceLabel(data.cadence_label ?? null);
         setCadenceConfirmed(Boolean(data.cadence_confirmed));
+        if (typeof data.model === "string") setCoachModel(data.model);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "The coach didn't respond. Try again.");
@@ -502,6 +507,7 @@ function GoalChat({ goalId, onBack }: { goalId: string; onBack: () => void }) {
       </div>
 
       {error && <p className="text-sm text-red-400 mb-2">{error}</p>}
+      {coachModel && <p className="text-[11px] text-slate-500 mb-1.5">Last reply by {coachModel}</p>}
 
       {status === "draft" || status === "smart_approved" || status === "approach_chosen" || status === "active" ? (
         <div className="flex gap-2">
