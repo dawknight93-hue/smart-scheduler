@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
-import { addMemory, deleteMemory, loadMemory, updateMemory, type MemoryNote, type MemoryScope } from "@/lib/briefingMemory";
+import { addMemory, deleteMemory, loadMemory, updateMemory, type MemoryNote } from "@/lib/briefingMemory";
 
 const SOURCE_LABEL: Record<MemoryNote["source"], string> = { feedback: "From feedback", manual: "Added", seed: "Starter" };
 
@@ -8,7 +8,7 @@ const SOURCE_LABEL: Record<MemoryNote["source"], string> = { feedback: "From fee
  * The summary's memory: every active note is sent with each summary request,
  * so the writer follows your corrections from then on.
  */
-export function BriefingMemoryEditor({ onClose, scope = "briefing" }: { onClose: (changed: boolean) => void; scope?: MemoryScope }) {
+export function BriefingMemoryEditor({ onClose }: { onClose: (changed: boolean) => void }) {
   const [notes, setNotes] = useState<MemoryNote[]>([]);
   const [loading, setLoading] = useState(true);
   const [changed, setChanged] = useState(false);
@@ -20,11 +20,11 @@ export function BriefingMemoryEditor({ onClose, scope = "briefing" }: { onClose:
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    void loadMemory(scope).then((n) => {
+    void loadMemory().then((n) => {
       setNotes(n);
       setLoading(false);
     });
-  }, [scope]);
+  }, []);
 
   async function run(fn: () => Promise<void>) {
     setBusy(true);
@@ -46,13 +46,9 @@ export function BriefingMemoryEditor({ onClose, scope = "briefing" }: { onClose:
       <div className="w-full max-w-2xl max-h-[92dvh] overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 p-4 sm:p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start gap-3 mb-3">
           <div>
-            <h2 className="text-lg font-semibold text-slate-100">{scope === "planner" ? "Planner memory" : "Summary memory"}</h2>
+            <h2 className="text-lg font-semibold text-slate-100">Summary memory</h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              {active} active note{active === 1 ? "" : "s"}.{" "}
-              {scope === "planner"
-                ? "Every active note goes to the goal coach and planner (plans, measures, daily focus), so they follow your corrections from then on."
-                : "Every active note goes along with each summary, so the writer follows your corrections from then on."}{" "}
-              Turn one off to test without it.
+              {active} active note{active === 1 ? "" : "s"}. Every active note goes along with each summary, so the writer follows your corrections from then on. Turn one off to test without it.
             </p>
           </div>
           <button onClick={() => onClose(changed)} className="ml-auto p-1.5 rounded-lg hover:bg-slate-800" aria-label="Close">
@@ -146,7 +142,7 @@ export function BriefingMemoryEditor({ onClose, scope = "briefing" }: { onClose:
           <input
             value={newNote}
             onChange={(e) => setNewNote(e.target.value)}
-            placeholder={scope === "planner" ? "Add a standing correction, e.g. “Keep weekday task blocks before 11:00.”" : "Add a standing correction, e.g. “Mention my UTA weekends a week ahead.”"}
+            placeholder="Add a standing correction, e.g. “Mention my UTA weekends a week ahead.”"
             className="flex-1 min-w-0 rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-sm text-slate-100 placeholder:text-slate-500"
             onKeyDown={(e) => {
               if (e.key === "Enter" && newNote.trim()) (e.currentTarget.nextElementSibling as HTMLButtonElement | null)?.click();
@@ -156,7 +152,7 @@ export function BriefingMemoryEditor({ onClose, scope = "briefing" }: { onClose:
             disabled={busy || !newNote.trim()}
             onClick={() =>
               run(async () => {
-                const n = await addMemory(newNote, "manual", undefined, undefined, scope);
+                const n = await addMemory(newNote, "manual");
                 setNotes((ns) => [...ns, n]);
                 setNewNote("");
               })

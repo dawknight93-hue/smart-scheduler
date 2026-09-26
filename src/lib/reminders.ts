@@ -28,15 +28,9 @@ export interface ReminderSettings {
   morning: boolean;
   morning_time: string;
   reserve: boolean;
-  /** Sent by the server on its own: Sunday 21:30 Weekly Review. */
-  weekly: boolean;
-  /** Last day of the month, 20:00: monthly briefing. */
-  monthly: boolean;
-  /** A new flight shows up in the next few days (background Google sync). */
-  trips: boolean;
 }
 
-export const DEFAULT_SETTINGS: ReminderSettings = { enabled: true, morning: true, morning_time: "06:00", reserve: true, weekly: true, monthly: true, trips: true };
+export const DEFAULT_SETTINGS: ReminderSettings = { enabled: true, morning: true, morning_time: "06:00", reserve: true };
 
 export interface PlannedReminder {
   key: string;
@@ -75,7 +69,7 @@ const fromHomeFrame = (d: Date) => homeDate(d.getFullYear(), d.getMonth(), d.get
 const clip = (s: string, n = 230) => (s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s);
 
 export async function loadReminderSettings(): Promise<ReminderSettings> {
-  const { data } = await supabase.from("reminder_settings").select("*").eq("id", 1).maybeSingle();
+  const { data } = await supabase.from("reminder_settings").select("enabled, morning, morning_time, reserve").eq("id", 1).maybeSingle();
   return data ? { ...DEFAULT_SETTINGS, ...(data as ReminderSettings) } : DEFAULT_SETTINGS;
 }
 
