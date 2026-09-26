@@ -96,7 +96,16 @@ export function GoalsView() {
       .from("goals")
       .select("id, pillar, specific, measurable, achievable, relevant, time_bound, status, created_at, cadence_sessions_per_week, cadence_label, cadence_confirmed, completed_at, outcome_note")
       .order("created_at", { ascending: false });
-    if (!error && data) setGoals(data as GoalRow[]);
+    if (!error && data) {
+      const rows = data as GoalRow[];
+      // Cadence settled but left a step behind by an older coach chat: it's active.
+      const stuck = rows.filter((g) => g.status === "approach_chosen" && g.cadence_confirmed && (g.cadence_sessions_per_week ?? 0) > 0);
+      if (stuck.length) {
+        const { error: sErr } = await supabase.from("goals").update({ status: "active" }).in("id", stuck.map((g) => g.id));
+        if (!sErr) for (const g of stuck) g.status = "active";
+      }
+      setGoals(rows);
+    }
     setLoadingGoals(false);
   };
 

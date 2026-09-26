@@ -55,6 +55,13 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
       const { data, error: gErr } = await supabase.from("goals").select(PLAN_GOAL_COLUMNS);
       if (gErr) throw new Error(gErr.message);
       const all = (data as PlanGoal[]) ?? [];
+      // A goal whose weekly cadence is settled belongs in the plan. Older coach chats
+      // could leave one a step behind ("approach chosen"); move it on here.
+      const stuck = all.filter((g) => g.status === "approach_chosen" && g.cadence_confirmed && (g.cadence_sessions_per_week ?? 0) > 0);
+      if (stuck.length) {
+        const { error: sErr } = await supabase.from("goals").update({ status: "active" }).in("id", stuck.map((g) => g.id));
+        if (!sErr) for (const g of stuck) g.status = "active";
+      }
       setGoals(all);
       const [week, ms] = await Promise.all([loadWeekData(weekStart), loadMeasures()]);
       setMeasures(ms);
