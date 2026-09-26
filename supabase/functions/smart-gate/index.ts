@@ -131,7 +131,14 @@ function parseReply(content: string, who: string): SmartGateLLMReply {
   return parsed;
 }
 
-async function callClaude(messages: MessageRow[], key: string): Promise<SmartGateLLMReply> {
+/** His standing corrections for the coach and planner (Planner memory in the app). */
+async function plannerNotes(): Promise<string> {
+  const { data, error } = await supabase.from("briefing_memory").select("note").eq("scope", "planner").eq("active", true).order("created_at").limit(40);
+  const notes = error ? [] : ((data as { note: string }[]) ?? []).map((r) => r.note.slice(0, 300));
+  return notes.length ? "\n\nHis standing corrections for plans and coaching — always follow these:\n" + notes.map((n) => `- ${n}`).join("\n") : "";
+}
+
+async function callClaude(messages: MessageRow[], key: string, notes = ""): Promise<SmartGateLLMReply> {
   const resp = await fetch(ANTHROPIC_URL, {
     method: "POST",
     headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
@@ -139,7 +146,7 @@ async function callClaude(messages: MessageRow[], key: string): Promise<SmartGat
       model: CLAUDE_MODEL,
       max_tokens: 2000,
       thinking: { type: "disabled" },
-      system: buildSystemPrompt() + "\n\nReply with the JSON object only — no code fence, no text before or after it.",
+      system: buildSystemPrompt() + notes + "\n\nReply with the JSON object only — no code fence, no text before or after it.",
       messages: claudeTurns(messages.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }))),
     }),
   });
@@ -156,23 +163,24 @@ async function callClaude(messages: MessageRow[], key: string): Promise<SmartGat
 /** Claude Sonnet 5 when ANTHROPIC_API_KEY is set; Groq otherwise or if Claude fails. */
 async function callModel(messages: MessageRow[]): Promise<SmartGateLLMReply & { model: string }> {
   const key = Deno.env.get("ANTHROPIC_API_KEY");
+  const notes = await plannerNotes();
   if (key) {
     try {
-      return { ...(await callClaude(messages, key)), model: "Claude Sonnet 5" };
+      return { ...(await callClaude(messages, key, notes)), model: "Claude Sonnet 5" };
     } catch (e) {
       console.error("Claude failed, using Groq:", e);
-      return { ...(await callGroq(messages)), model: "Groq gpt-oss-120b (Claude unavailable)" };
+      return { ...(await callGroq(messages, notes)), model: "Groq gpt-oss-120b (Claude unavailable)" };
     }
   }
-  return { ...(await callGroq(messages)), model: "Groq gpt-oss-120b (Claude key not set)" };
+  return { ...(await callGroq(messages, notes)), model: "Groq gpt-oss-120b (Claude key not set)" };
 }
 
-async function callGroq(messages: MessageRow[]): Promise<SmartGateLLMReply> {
+async function callGroq(messages: MessageRow[], notes = ""): Promise<SmartGateLLMReply> {
   const apiKey = Deno.env.get("GROQ_API_KEY");
   if (!apiKey) throw new GroqConfigError("GROQ_API_KEY not configured");
 
   const groqMessages = [
-    { role: "system", content: buildSystemPrompt() },
+    { role: "system", content: buildSystemPrompt() + notes },
     ...messages.map((m) => ({ role: m.role, content: m.content })),
   ];
 
@@ -357,5 +365,4 @@ Deno.serve(async (req: Request) => {
     );
   }
 });
-
 
