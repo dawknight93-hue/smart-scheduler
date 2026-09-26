@@ -158,6 +158,25 @@ export function RemindersPanel({ onClose }: { onClose: () => void }) {
               />
             </div>
             <label className="flex items-start gap-2 text-sm text-slate-200">
+              <input type="checkbox" className="accent-blue-500 mt-1" checked={settings.weekly} onChange={(e) => void update({ weekly: e.target.checked })} />
+              <span>
+                Weekly Review — Sundays at 21:30
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-sm text-slate-200">
+              <input type="checkbox" className="accent-blue-500 mt-1" checked={settings.monthly} onChange={(e) => void update({ monthly: e.target.checked })} />
+              <span>
+                Monthly briefing — last day of the month at 20:00
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-sm text-slate-200">
+              <input type="checkbox" className="accent-blue-500 mt-1" checked={settings.trips} onChange={(e) => void update({ trips: e.target.checked })} />
+              <span>
+                New trip alerts
+                <span className="block text-xs text-slate-400">When a flight shows up on your calendar for the next few days (like a reserve assignment). Your calendars are checked every 15 minutes, even with the app closed.</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-sm text-slate-200">
               <input type="checkbox" className="accent-blue-500 mt-1" checked={settings.reserve} onChange={(e) => void update({ reserve: e.target.checked })} />
               <span>
                 Day before a reserve day
@@ -185,7 +204,7 @@ export function RemindersPanel({ onClose }: { onClose: () => void }) {
           ) : (
             <p className="text-xs text-slate-500">Nothing scheduled.</p>
           )}
-          <p className="mt-2 text-[11px] text-slate-500">Reminders are planned from your calendar each time you open the app, so open it at least once a day to keep them current.</p>
+          <p className="mt-2 text-[11px] text-slate-500">Detailed reminders (briefing contents, reserve times, numbers to log) are planned from your calendar each time you open the app. The weekly, monthly and trip reminders come from the server, and if the app wasn't opened, a plain morning nudge still arrives.</p>
           {recent.length > 0 && (
             <details className="mt-2">
               <summary className="cursor-pointer text-[11px] text-slate-400">Recently sent</summary>

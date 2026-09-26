@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus, Send, ArrowLeft, CheckCircle2, Loader2, Trash2 } from "lucide-react";
+import { PlannerFeedback } from "@/components/PlannerFeedback";
 import { supabase } from "@/lib/supabase";
 import { PILLARS, PILLAR_LABELS, getPillarColor, LifePillar } from "@/lib/types";
 import { GoalPlanPanel } from "@/components/GoalPlanPanel";
@@ -507,7 +508,16 @@ function GoalChat({ goalId, onBack }: { goalId: string; onBack: () => void }) {
       </div>
 
       {error && <p className="text-sm text-red-400 mb-2">{error}</p>}
-      {coachModel && <p className="text-[11px] text-slate-500 mb-1.5">Last reply by {coachModel}</p>}
+      {(coachModel || messages.some((m) => m.role === "assistant")) && (
+        <div className="mb-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+          {coachModel && <span className="text-[11px] text-slate-500">Last reply by {coachModel}</span>}
+          <PlannerFeedback
+            kind="coach"
+            label="Correct the coach"
+            excerpt={[...messages].reverse().find((m) => m.role === "assistant")?.content.slice(0, 500)}
+          />
+        </div>
+      )}
 
       {status === "draft" || status === "smart_approved" || status === "approach_chosen" || status === "active" ? (
         <div className="flex gap-2">
