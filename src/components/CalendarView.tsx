@@ -1438,31 +1438,91 @@ export function CalendarView({
     const item = dragItem;
     endDrag();
     if (!item) return;
+    await moveItemTo(item, targetDate);
+  }
 
-    const newStart = snapToSlot(targetDate);
-
-    if (newStart.getTime() === item.start.getTime() && newStart.getDate() === item.start.getDate()) {
-      return;
+  /**
+   * Puts a moved or resized item back exactly as it was. Events (and single days of
+   * a repeating item) get their old times back; a one-off task or habit gets its
+   * whole original window back, not just the slot it was in.
+   */
+  function restorerFor(item: PlacedItem): () => Promise<void> {
+    if (!item.isRecurringOccurrence && item.kind === "Task") {
+      const t = tasks.find((x) => x.id === item.id);
+      if (t) return async () => { await supabase.from("tasks").update({ search_start: t.search_start, deadline: t.deadline }).eq("id", t.id); };
     }
+    if (!item.isRecurringOccurrence && item.kind === "Habit") {
+      const h = habits.find((x) => x.id === item.id);
+      if (h) return async () => { await supabase.from("habits").update({ search_start: h.search_start, search_end: h.search_end }).eq("id", h.id); };
+    }
+    // updateItemTime keeps the passed item's own length, so this restores start and end.
+    return async () => { await updateItemTime(item, item.start); };
+  }
+
+  const timeLabel = (d: Date) =>
+    `${d.toLocaleDateString("en-US", { weekday: "short" })} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+
+  /** Move an item to a new start (drag on desktop, press-and-hold on the phone). */
+  async function moveItemTo(item: PlacedItem, targetDate: Date, offerUndo = false) {
+    const newStart = snapToSlot(targetDate);
+    if (newStart.getTime() === item.start.getTime()) return;
 
     const check = checkMove(item, newStart);
     if (check.blocked) {
       showDragMessage(check.blocked);
       return;
     }
-
     if (check.overlaps.length > 0) {
-      setOverlapConfirm({
-        item,
-        newStart,
-        overlapNames: check.overlaps,
-      });
+      setOverlapConfirm({ item, newStart, overlapNames: check.overlaps });
       return;
     }
-
+    const undo = offerUndo ? restorerFor(item) : null;
     const saved = await updateItemTime(item, newStart);
     if (!saved) return;
     if (check.notes.length) showDragMessage(`Saved to Google Calendar. ${check.notes.join(". ")} on the next sync.`, 6000);
+    else if (undo) {
+      showDoneToast(`Moved ${item.name} to ${timeLabel(newStart)}`, async () => {
+        await undo();
+        await loadData();
+        scheduleAutoPush();
+      });
+    }
+    loadData();
+    scheduleAutoPush();
+  }
+
+  /** Why a new end time isn't allowed (same rules as the desktop resize), or undefined. */
+  function checkResize(item: PlacedItem, newEnd: Date): string | undefined {
+    if (newEnd.getTime() < item.start.getTime() + SLOT_MIN * 60000) return "15 min minimum";
+    if (isQuietTime(item.start, newEnd)) return "Can't run into 21:00–09:00";
+    if (isUtaBlocked(item.pillar, item.context) && overlapsUta(item.start, newEnd, fixedEvents)) return `${utaBlockLabel(item.pillar, item.context)} items can't go on UTA days`;
+    return undefined;
+  }
+
+  /** Change an item's end time (resize handle). */
+  async function resizeItemTo(item: PlacedItem, newEnd: Date, offerUndo = false) {
+    if (newEnd.getTime() === item.end.getTime()) return;
+    const problem = checkResize(item, newEnd);
+    if (problem) {
+      showDragMessage(problem);
+      return;
+    }
+    const short = resizeShortfall(item, newEnd);
+    if (short) {
+      setResizeWarning({ item, newEnd, ...short });
+      return;
+    }
+    const undo = offerUndo ? restorerFor(item) : null;
+    const saved = await updateItemDuration(item, newEnd);
+    if (saved && undo) {
+      const mins = Math.round((newEnd.getTime() - item.start.getTime()) / 60000);
+      showDoneToast(`${item.name} now ends ${timeLabel(newEnd).slice(4)} (${formatSpan(mins)})`, async () => {
+        await undo();
+        await loadData();
+        scheduleAutoPush();
+      });
+    }
+    // Reload either way: on success to show the change, on failure to snap back.
     loadData();
     scheduleAutoPush();
   }
@@ -1611,6 +1671,10 @@ export function CalendarView({
             onOpenConnections={() => setShowConnections(true)}
             onSwitchDesktop={toggleViewMode}
             onOpenBriefing={onOpenBriefing}
+            checkMove={checkMove}
+            checkResize={checkResize}
+            onMoveItem={(item, start) => void moveItemTo(item, start, true)}
+            onResizeItem={(item, end) => void resizeItemTo(item, end, true)}
             miniMonth={(selected, onPick, onClose) => (
               <MiniMonthNavigator weekStart={getWeekStart(selected)} viewMode="day" selectedDay={selected} onPick={onPick} onClose={onClose} />
             )}
