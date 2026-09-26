@@ -1,8 +1,11 @@
 /**
- * Briefing memory: your corrections to the written summary. Every active note
- * goes along with each summary request, so the summary follows them from then on.
+ * Memory: your corrections, sent with every request so the AI follows them.
+ *   scope 'briefing' — the written Briefing summary
+ *   scope 'planner'  — the goal coach, plans, measures and daily focus
  */
 import { supabase } from "./supabase";
+
+export type MemoryScope = "briefing" | "planner";
 
 export interface MemoryNote {
   id: string;
@@ -12,6 +15,7 @@ export interface MemoryNote {
   kind: string | null;
   excerpt: string | null;
   created_at: string;
+  scope?: MemoryScope;
 }
 
 /** The first set, from your Section A test notes. */
@@ -24,11 +28,13 @@ const SEED: string[] = [
   "Use the exact event times from the facts, never the time the briefing was generated.",
 ];
 
-export async function loadMemory(): Promise<MemoryNote[]> {
+export async function loadMemory(scope: MemoryScope = "briefing"): Promise<MemoryNote[]> {
   const { data, error } = await supabase.from("briefing_memory").select("*").order("created_at");
   if (error) return [];
-  let rows = (data as MemoryNote[]) ?? [];
-  if (!rows.length) {
+  // Notes from before scopes existed are Briefing notes.
+  const all = (data as MemoryNote[]) ?? [];
+  let rows = all.filter((n) => (n.scope ?? "briefing") === scope);
+  if (!all.length && scope === "briefing") {
     // Seed once per page load, even if two panels ask at the same moment.
     seeded ??= (async () => {
       const ins = await supabase.from("briefing_memory").insert(SEED.map((note) => ({ note, source: "seed" }))).select("*");
@@ -41,10 +47,10 @@ export async function loadMemory(): Promise<MemoryNote[]> {
 
 let seeded: Promise<MemoryNote[]> | null = null;
 
-export async function addMemory(note: string, source: MemoryNote["source"], kind?: string, excerpt?: string): Promise<MemoryNote> {
+export async function addMemory(note: string, source: MemoryNote["source"], kind?: string, excerpt?: string, scope: MemoryScope = "briefing"): Promise<MemoryNote> {
   const { data, error } = await supabase
     .from("briefing_memory")
-    .insert({ note: note.trim(), source, kind: kind ?? null, excerpt: excerpt?.slice(0, 600) ?? null })
+    .insert({ note: note.trim(), source, kind: kind ?? null, excerpt: excerpt?.slice(0, 600) ?? null, ...(scope !== "briefing" ? { scope } : {}) })
     .select("*")
     .single();
   if (error) throw new Error(error.message);
