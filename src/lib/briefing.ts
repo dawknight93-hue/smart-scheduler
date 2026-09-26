@@ -445,6 +445,10 @@ export async function buildDaily(now = new Date()): Promise<DailyBriefing> {
   const goals = goalProgress(goalRows, range.weeks.find((w) => w.weekStart.getTime() === weekStart.getTime()), now, dailyItems, measures);
   for (const o of outcomes) {
     if (o.status.due) headsUp.push(`${o.measure.label} is due to log (${goalShortName(o.goal)})`);
+    const t = o.measure.target;
+    const v = o.status.latest?.value;
+    if (t !== null && v !== undefined && (o.measure.direction === "up" ? v >= t : v <= t))
+      headsUp.push(`Target reached: ${o.measure.label} ${v}${o.measure.unit ? ` ${o.measure.unit}` : ""} — mark "${goalShortName(o.goal)}" complete in Goals if you're done`);
   }
   // Earlier goal sessions this week nobody ticked done
   for (const g of goals) {
