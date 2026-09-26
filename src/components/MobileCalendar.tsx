@@ -73,8 +73,12 @@ function onDay(p: PlacedItem, day: Date): boolean {
   const s = startOfDay(day).getTime();
   const e = s + DAY_MS;
   if (p.isAllDay) {
-    // All-day ends are exclusive midnights.
-    return p.start.getTime() < e && p.end.getTime() > s;
+    // All-day items are stored at UTC midnights (end exclusive), the same way the
+    // desktop all-day row reads them; compare calendar dates, not instants.
+    const key = Date.UTC(day.getFullYear(), day.getMonth(), day.getDate());
+    const from = Date.UTC(p.start.getUTCFullYear(), p.start.getUTCMonth(), p.start.getUTCDate());
+    const to = Date.UTC(p.end.getUTCFullYear(), p.end.getUTCMonth(), p.end.getUTCDate());
+    return key >= from && key < Math.max(to, from + DAY_MS);
   }
   return p.start.getTime() >= s && p.start.getTime() < e;
 }
