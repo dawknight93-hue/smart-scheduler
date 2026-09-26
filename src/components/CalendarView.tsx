@@ -61,6 +61,7 @@ import { mirrorCalendarNames, defaultMirrorWindowStart, MIRROR_WEEKS } from "@/l
 import { layoutColumns, type ItemLayout } from "@/lib/calendarLayout";
 import { EFFORTS, EFFORT_LABELS, type Effort } from "@/lib/effort";
 import { rememberEffort } from "@/lib/effortMemory";
+import { MobileCalendar, loadMobileView, type MobileView } from "@/components/MobileCalendar";
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -300,11 +301,15 @@ const AUTO_SYNC_MIN_GAP_MS = 2 * 60 * 1000;
 export function CalendarView({
   weekStart,
   setWeekStart,
+  onOpenBriefing,
 }: {
   weekStart: Date;
   setWeekStart: (d: Date) => void;
+  onOpenBriefing?: () => void;
 }) {
   const { layout, isOverridden, toggle: toggleViewMode } = useCalendarViewMode();
+  // Phone layout: Schedule / Day / 3 Day / Week / Month (see MobileCalendar).
+  const [mobileView, setMobileView] = useState<MobileView>(loadMobileView);
   const [fixedEvents, setFixedEvents] = useState<FixedEvent[]>([]);
   const [enrouteBlocks, setEnrouteBlocks] = useState<StoredEnrouteBlock[]>([]);
   const [calendarConnections, setCalendarConnections] = useState<CalendarConnection[]>([]);
@@ -360,7 +365,13 @@ export function CalendarView({
     const diff = Math.floor((new Date().setHours(0, 0, 0, 0) - weekStart.getTime()) / (24 * 60 * 60 * 1000));
     return diff >= 0 && diff < 7 ? diff : 0;
   });
-  const [viewMode, setViewMode] = useState<"day" | "week" | "month">("week");
+  const [viewMode, setViewMode] = useState<"day" | "week" | "month">(() =>
+    layout === "mobile" && mobileView === "month" ? "month" : "week"
+  );
+  // On a phone, Month loads the month grid; every other view loads one week.
+  useEffect(() => {
+    if (layout === "mobile") setViewMode(mobileView === "month" ? "month" : "week");
+  }, [layout, mobileView]);
   // Day view shows the single-day agenda (same layout as mobile) on desktop.
   const showDayView = layout === "mobile" || viewMode === "day";
   const [showMiniMonth, setShowMiniMonth] = useState(false);
@@ -1571,6 +1582,43 @@ export function CalendarView({
 
   return (
     <>
+      {layout === "mobile" ? (
+        <>
+          <MobileCalendar
+            placed={placed}
+            loading={loading}
+            weekStart={weekStart}
+            setWeekStart={setWeekStart}
+            dayIndex={mobileDayIndex}
+            setDayIndex={setMobileDayIndex}
+            view={mobileView}
+            setView={setMobileView}
+            monthGridStart={monthGridStart}
+            now={now}
+            notScheduledCount={notScheduled.length}
+            renderTray={() => renderTray(false)}
+            onSelect={setSelectedItem}
+            onAddAt={(d) => {
+              setAddPrefillDate(d);
+              setShowAdd(true);
+            }}
+            syncing={syncing}
+            syncLabel={syncFreshness.label}
+            syncMessage={syncMessage ?? recheckMessage}
+            onSync={() => void syncGoogle()}
+            recheckingFlights={recheckingEnroute}
+            onRecheckFlights={() => void recheckFlights()}
+            onOpenConnections={() => setShowConnections(true)}
+            onSwitchDesktop={toggleViewMode}
+            onOpenBriefing={onOpenBriefing}
+            miniMonth={(selected, onPick, onClose) => (
+              <MiniMonthNavigator weekStart={getWeekStart(selected)} viewMode="day" selectedDay={selected} onPick={onPick} onClose={onClose} />
+            )}
+          />
+          {showConnections && <CalendarConnectionsPanel onClose={() => setShowConnections(false)} />}
+        </>
+      ) : (
+      <>
       {/* Header */}
       <header className="shrink-0 border-b border-slate-800 bg-slate-900/80 backdrop-blur-sm z-30">
         <div className="px-4 sm:px-6 py-3 flex items-center gap-3">
@@ -1749,15 +1797,15 @@ export function CalendarView({
                 isOverridden ? "bg-blue-600 hover:bg-blue-500" : "bg-slate-700 hover:bg-slate-600"
               }`}
               aria-label={
-                (layout === "mobile" ? "Switch to desktop view" : "Switch to mobile view") +
+                ((layout as CalendarViewMode) === "mobile" ? "Switch to desktop view" : "Switch to mobile view") +
                 (isOverridden ? " (manually set, tap to change)" : " (auto)")
               }
               title={
-                (layout === "mobile" ? "Switch to desktop view" : "Switch to mobile view") +
+                ((layout as CalendarViewMode) === "mobile" ? "Switch to desktop view" : "Switch to mobile view") +
                 (isOverridden ? " — manually set, tap to change" : " — following screen size automatically")
               }
             >
-              {layout === "mobile" ? (
+              {(layout as CalendarViewMode) === "mobile" ? (
                 <Monitor className="w-5 h-5" />
               ) : (
                 <Smartphone className="w-5 h-5" />
@@ -1783,7 +1831,7 @@ export function CalendarView({
               <span className={layout === "desktop" ? "hidden sm:inline" : "hidden"}>Add Item</span>
             </button>
             {/* Overflow menu (mobile only) */}
-            <div className={layout === "mobile" ? "relative" : "relative sm:hidden"}>
+            <div className={(layout as CalendarViewMode) === "mobile" ? "relative" : "relative sm:hidden"}>
               <button
                 onClick={() => setShowOverflow(!showOverflow)}
                 className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700 transition-colors"
@@ -2195,6 +2243,8 @@ export function CalendarView({
 
         {showConnections && <CalendarConnectionsPanel onClose={() => setShowConnections(false)} />}
       </div>
+      </>
+      )}
 
       {/* Add modal */}
       {showAdd && (
@@ -2280,7 +2330,7 @@ export function CalendarView({
 
       {/* Completed — with Undo */}
       {doneToast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2 rounded-lg bg-emerald-600/95 text-white text-sm font-medium shadow-lg max-w-[90vw]">
+        <div className="fixed bottom-[calc(88px+env(safe-area-inset-bottom))] md:bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2 rounded-lg bg-emerald-600/95 text-white text-sm font-medium shadow-lg max-w-[90vw]">
           <CheckCircle2 className="w-4 h-4 shrink-0" />
           <span className="truncate">{doneToast.text}</span>
           <button
@@ -2298,7 +2348,7 @@ export function CalendarView({
 
       {/* Drag inline message */}
       {dragMessage && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg bg-rose-500/90 text-white text-sm font-medium shadow-lg">
+        <div className="fixed bottom-[calc(88px+env(safe-area-inset-bottom))] md:bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg bg-rose-500/90 text-white text-sm font-medium shadow-lg">
           {dragMessage}
         </div>
       )}
@@ -2492,13 +2542,14 @@ function ItemDetail({
   const [confirmDelete, setConfirmDelete] = useState(false);
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/55 backdrop-blur-sm sm:p-4"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-sm bg-slate-900 border border-slate-700 rounded-2xl p-5 shadow-2xl"
+        className="w-full sm:max-w-sm max-h-[88dvh] overflow-y-auto bg-slate-900 border-t sm:border border-slate-700 rounded-t-3xl sm:rounded-2xl px-5 pt-2 sm:pt-5 pb-[calc(20px+env(safe-area-inset-bottom))] sm:pb-5 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
+        <div className="sm:hidden mx-auto mb-3 h-1.5 w-10 rounded-full bg-slate-700" />
         <div className="flex items-start justify-between mb-3">
           <div className="flex items-center gap-2">
             <span className={`w-3 h-3 rounded-full ${colors.dot}`} />
