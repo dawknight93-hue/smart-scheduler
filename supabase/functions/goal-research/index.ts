@@ -15,10 +15,14 @@ const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const EXTRACTION_MODEL = "openai/gpt-oss-120b";
 
 interface GoalResearchRequest {
-  action: "kickoff" | "chat" | "history" | "cascade" | "daily";
+  action: "kickoff" | "chat" | "history" | "cascade" | "daily" | "measures";
   goal_id?: string;
   message?: string;
   sessions?: { ref: string; day: string; minutes: number }[];
+  /** daily: the effort measure these sessions serve (a goal can have several). */
+  measure_label?: string;
+  /** measures: his calendars, so a count-mode measure can name one. */
+  calendars?: { id: string; name: string }[];
 }
 
 interface TavilyResult {
@@ -544,7 +548,7 @@ async function handleCascade(goalId: string) {
  * each approved session this week, written from the goal's next checkpoint and
  * what got done in recent sessions. Returns the lines; the app saves them.
  */
-async function handleDaily(goalId: string, sessions: { ref: string; day: string; minutes: number }[]) {
+async function handleDaily(goalId: string, sessions: { ref: string; day: string; minutes: number }[], measureLabel?: string) {
   if (!sessions.length) return { items: [] };
   const { data: goal, error } = await supabase
     .from("goals")
@@ -574,7 +578,7 @@ async function handleDaily(goalId: string, sessions: { ref: string; day: string;
     "Respond with one JSON object only: {\"items\": [{\"ref\": string, \"focus\": string, \"steps\": [string]}]} with exactly one item per session ref given.";
   const user =
     `Pillar: ${goal.pillar}\nGoal: ${goal.specific ?? "n/a"}\nMeasure: ${goal.measurable ?? "n/a"}\nDeadline: ${goal.deadline ? String(goal.deadline).slice(0, 10) : goal.time_bound ?? "n/a"}\n` +
-    `Approach: ${goal.approach ?? "n/a"}\nSession name: ${goal.weekly_target ?? "Session"} (${goal.cadence_label ?? ""})\n` +
+    `Approach: ${goal.approach ?? "n/a"}\nSession name: ${measureLabel ?? goal.weekly_target ?? "Session"}${measureLabel ? "" : ` (${goal.cadence_label ?? ""})`}\n` +
     `Next checkpoints: ${open.length ? open.map((m) => `${m.title} by ${m.due}${m.metric ? ` (${m.metric})` : ""}`).join("; ") : "none left"}\n` +
     `Recent sessions: ${(recent ?? []).length ? (recent ?? []).map((r: any) => `${r.day} ${r.done ? "[done]" : "[not done]"} ${r.focus}`).join("; ") : "none yet"}\n` +
     `Sessions this week:\n${sessions.map((s) => `- ref ${s.ref}: ${s.day}, ${s.minutes} min`).join("\n")}`;
@@ -591,6 +595,96 @@ async function handleDaily(goalId: string, sessions: { ref: string; day: string;
       steps: (Array.isArray(i.steps) ? i.steps : []).filter((x: unknown) => typeof x === "string" && x.trim()).map((x: string) => x.trim().slice(0, 120)).slice(0, 3),
     }));
   return { items, model: planned.model };
+}
+
+// ---------------------------------------------------------------------------
+// Measures: how progress on a goal is measured (suggestions for the user to accept).
+
+const MEASURE_CONTEXTS = ["desk", "home", "phone", "errand", "other"];
+const TIMES = ["any", "morning", "afternoon", "evening"];
+const EFFORT_LEVELS = ["focus", "routine", "light"];
+
+async function handleMeasures(goalId: string, calendars: { id: string; name: string }[]) {
+  const { data: goal, error } = await supabase
+    .from("goals")
+    .select("id, pillar, specific, measurable, achievable, relevant, time_bound, approach, deadline, cadence_label, cadence_sessions_per_week, milestones")
+    .eq("id", goalId)
+    .maybeSingle();
+  if (error) throw new Error(`Failed to load goal: ${error.message}`);
+  if (!goal) throw new Error("Goal not found.");
+  const { data: existing } = await supabase
+    .from("goal_measures")
+    .select("kind, label, plan_mode, sessions_per_week, session_minutes, unit")
+    .eq("goal_id", goalId)
+    .eq("status", "active");
+
+  const today = new Date().toISOString().slice(0, 10);
+  const system =
+    "You design how progress on one personal goal is measured, for a planner app. Today is " + today + ". The user is Oshane, an airline First Officer based in MIA with a family and a military reserve career; his energy is highest in the morning, lower in the afternoon, lowest after 20:30. " +
+    "Propose 2 to 4 measures that together show whether the goal is working, choosing from two kinds. " +
+    "EFFORT measures are things he does every week that are fully under his control (sessions of a habit, blocks of time for a kind of work, a short recurring check). Express time budgets as sessions: pick a session length that suits the work — 45 to 90 minutes for focused work, 10 to 20 minutes for quick recurring checks — and give hours_per_week when the natural target is a time budget (for example 4 hours a week becomes 3 sessions of 80 minutes). " +
+    "Use plan_mode 'count' only when the chosen approach is an app or service that already puts each session on one of his calendars by itself (then set count_calendar_id to that calendar's id and an optional count_keyword found in those event titles); otherwise use 'schedule'. Pick context (desk, home, phone, errand, other), preferred_time (any, morning, afternoon, evening) and effort (focus = needs his sharpest hours, routine = needs attention, light = quick and easy). " +
+    "OUTCOME measures are numbers he can check objectively in under a minute (a scale reading, a count of open items, a score, a balance, minutes on a timed test). Give unit, direction ('down' if lower is better, 'up' if higher is better), baseline (only if the goal text states the current value, else null), target, log_every ('weekly' for most, 'daily' or 'monthly' when that fits better) and log_weekday (0 = Sunday … 6 = Saturday) for weekly logs, and checkpoints as dated numeric targets on the way — reuse the goal's existing milestones when they contain numbers, never in the past, the last one being the goal's target on its deadline. " +
+    "Only propose an outcome measure when it can be measured objectively; never invent a number he couldn't read off something. Don't repeat a measure he already has. Each measure gets a short name (1 to 3 words) and a one-sentence 'why' in plain words. " +
+    "Respond with one JSON object only: {\"measures\": [{\"kind\": \"effort\"|\"outcome\", \"label\": string, \"why\": string, " +
+    "\"plan_mode\": \"schedule\"|\"count\"|null, \"sessions_per_week\": integer|null, \"session_minutes\": integer|null, \"hours_per_week\": number|null, \"context\": string|null, \"preferred_time\": string|null, \"effort\": string|null, \"count_calendar_id\": string|null, \"count_keyword\": string|null, " +
+    "\"unit\": string|null, \"direction\": \"down\"|\"up\"|null, \"baseline\": number|null, \"target\": number|null, \"log_every\": string|null, \"log_weekday\": integer|null, \"checkpoints\": [{\"due\": \"YYYY-MM-DD\", \"target\": number}]}]}.";
+  const user =
+    `Pillar: ${goal.pillar}\nSpecific: ${goal.specific ?? "n/a"}\nMeasurable: ${goal.measurable ?? "n/a"}\nAchievable: ${goal.achievable ?? "n/a"}\nRelevant: ${goal.relevant ?? "n/a"}\n` +
+    `Time-bound: ${goal.time_bound ?? "n/a"}\nDeadline: ${goal.deadline ? String(goal.deadline).slice(0, 10) : "not set"}\nChosen approach: ${goal.approach ?? "n/a"}\n` +
+    `Committed cadence: ${goal.cadence_label ?? (goal.cadence_sessions_per_week ? goal.cadence_sessions_per_week + "x/week" : "none")}\n` +
+    `Milestones: ${((goal.milestones ?? []) as Milestone[]).map((m) => `${m.due} ${m.title}${m.metric ? ` (${m.metric})` : ""}`).join("; ") || "none"}\n` +
+    `Measures he already has: ${((existing ?? []) as any[]).map((m) => `${m.kind} "${m.label}"${m.sessions_per_week ? ` ${m.sessions_per_week}/week` : ""}${m.unit ? ` in ${m.unit}` : ""}`).join("; ") || "none"}\n` +
+    `His calendars: ${calendars.map((c) => `${c.name} (id ${c.id})`).join("; ") || "none"}`;
+
+  const out = await llm(system, [{ role: "user", content: user }], { json: true, maxTokens: 3000 });
+  const parsed: any = out.data;
+  if (!parsed) throw new Error("The planner returned something unreadable — try again.");
+  const isDate = (v: unknown) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : typeof v === "string" && v.trim() && Number.isFinite(Number(v)) ? Number(v) : null);
+  const calIds = new Set(calendars.map((c) => c.id));
+  const measures = (Array.isArray(parsed.measures) ? parsed.measures : [])
+    .filter((m: any) => m && (m.kind === "effort" || m.kind === "outcome") && typeof m.label === "string" && m.label.trim())
+    .slice(0, 4)
+    .map((m: any) => {
+      const base = { kind: m.kind, label: m.label.trim().slice(0, 40), why: typeof m.why === "string" ? m.why.trim().slice(0, 240) : null };
+      if (m.kind === "effort") {
+        const count = m.plan_mode === "count" && calIds.has(m.count_calendar_id);
+        let sessions = n(m.sessions_per_week);
+        let minutes = n(m.session_minutes);
+        const hours = n(m.hours_per_week);
+        if (hours && hours > 0 && !sessions) sessions = Math.max(1, Math.round((hours * 60) / 75));
+        if (hours && hours > 0 && sessions && !minutes) minutes = Math.round((hours * 60) / sessions / 5) * 5;
+        return {
+          ...base,
+          plan_mode: count ? "count" : "schedule",
+          sessions_per_week: sessions ? Math.min(14, Math.max(1, Math.round(sessions))) : null,
+          session_minutes: count ? null : minutes ? Math.min(240, Math.max(5, Math.round(minutes / 5) * 5)) : 30,
+          hours_per_week: count ? null : hours,
+          context: MEASURE_CONTEXTS.includes(m.context) ? m.context : "other",
+          preferred_time: TIMES.includes(m.preferred_time) ? m.preferred_time : "any",
+          effort: EFFORT_LEVELS.includes(m.effort) ? m.effort : null,
+          count_calendar_id: count ? m.count_calendar_id : null,
+          count_keyword: count && typeof m.count_keyword === "string" && m.count_keyword.trim() ? m.count_keyword.trim().slice(0, 40) : null,
+        };
+      }
+      return {
+        ...base,
+        unit: typeof m.unit === "string" ? m.unit.trim().slice(0, 16) : null,
+        direction: m.direction === "up" ? "up" : "down",
+        baseline: n(m.baseline),
+        target: n(m.target),
+        log_every: ["daily", "weekly", "monthly"].includes(m.log_every) ? m.log_every : "weekly",
+        log_weekday: Number.isInteger(m.log_weekday) && m.log_weekday >= 0 && m.log_weekday <= 6 ? m.log_weekday : 0,
+        checkpoints: (Array.isArray(m.checkpoints) ? m.checkpoints : [])
+          .filter((c: any) => c && isDate(c.due) && c.due >= today && n(c.target) !== null)
+          .map((c: any) => ({ due: c.due, target: n(c.target) }))
+          .sort((a: any, b: any) => a.due.localeCompare(b.due))
+          .slice(0, 12),
+      };
+    })
+    .filter((m: any) => m.kind === "outcome" || m.sessions_per_week);
+  return { measures, model: out.model };
 }
 
 async function handleHistory(goalId: string) {
@@ -630,10 +724,15 @@ Deno.serve(async (req: Request) => {
         result = await handleCascade(body.goal_id);
         break;
       }
+      case "measures": {
+        if (!body.goal_id) throw new Error("goal_id is required.");
+        result = await handleMeasures(body.goal_id, Array.isArray(body.calendars) ? body.calendars.slice(0, 20) : []);
+        break;
+      }
       case "daily": {
         if (!body.goal_id) throw new Error("goal_id is required.");
         if (!Array.isArray(body.sessions)) throw new Error("sessions is required.");
-        result = await handleDaily(body.goal_id, body.sessions.slice(0, 14));
+        result = await handleDaily(body.goal_id, body.sessions.slice(0, 14), typeof body.measure_label === "string" ? body.measure_label.slice(0, 60) : undefined);
         break;
       }
       default:
