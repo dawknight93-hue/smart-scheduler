@@ -44,7 +44,7 @@ const PILLAR_KEYWORDS: Record<LifePillar, string[]> = {
   mental: ["therapy", "counseling", "aa meeting", "game night", "gaming"],
 };
 
-const FLIGHT_LEG_PATTERN = /([A-Z]{3})\u200b?\s*(?:\u2192|->)\s*\u200b?([A-Z]{3})/;
+const FLIGHT_LEG_PATTERN = /[A-Z]{3}\s*(?:â|->)\s*[A-Z]{3}/;
 
 function guessPillarFromTitle(title: string): LifePillar | null {
   const lower = title.toLowerCase();
@@ -95,7 +95,7 @@ async function resolvePillarForNewEvent(title: string): Promise<LifePillar | nul
 
 
 interface SyncRequest {
-  action: "oauth-exchange" | "pull" | "push" | "mirror" | "status" | "disconnect" | "delete" | "update-source-event" | "background-pull";
+  action: "oauth-exchange" | "pull" | "push" | "mirror" | "status" | "disconnect" | "delete" | "update-source-event";
   code?: string;
   weekStart?: string;
   rangeDays?: number;
@@ -536,8 +536,6 @@ async function pullEvents(
   }
 
   let totalPulled = 0;
-  // Events added to the app this run (for trip alerts).
-  const newItems: { id: string; name: string; start: string; end: string; allDay: boolean }[] = [];
   // Every Google event id seen in each calendar this run, so events that were
   // deleted in Google or moved to another calendar can be removed afterwards.
   const seenIds = new Set<string>();
@@ -648,7 +646,6 @@ async function pullEvents(
           .maybeSingle();
 
         if (insertErr || !inserted) continue;
-        newItems.push({ id: inserted.id, name: ev.summary ?? "Untitled event", start: evStart.toISOString(), end: evEnd.toISOString(), allDay: isAllDay });
 
         await supabase.from("gcal_event_map").insert({
           google_event_id: ev.id,
@@ -695,73 +692,7 @@ async function pullEvents(
     }
   }
 
-  return { eventsPulled: totalPulled, eventsRemoved: totalRemoved, newItems };
-}
-
-// ---- Background pull (pg_cron, every 15 min) ---------------------------------
-// Keeps the app's copy of Google fresh while the app is closed, and sends a
-// trip alert when new flights appear in the next few days (e.g. a reserve
-// assignment posted by Crew Scheduling).
-
-const easternParts = new Intl.DateTimeFormat("en-US", {
-  timeZone: HOME_TIME_ZONE,
-  hourCycle: "h23",
-  weekday: "short",
-  month: "short",
-  day: "numeric",
-  year: "numeric",
-  hour: "2-digit",
-  minute: "2-digit",
-});
-function eastern(iso: string) {
-  const p = Object.fromEntries(easternParts.formatToParts(new Date(iso)).map((x) => [x.type, x.value]));
-  return { day: `${p.weekday}, ${p.month} ${p.day}`, time: `${p.hour}:${p.minute}` };
-}
-
-async function backgroundPull() {
-  const { data: token } = await supabase.from("gcal_oauth_tokens").select("id").limit(1).maybeSingle();
-  if (!token) return { skipped: "Google not connected" };
-  const { data: conns } = await supabase.from("calendar_connections").select("calendar_id, role, enabled, name");
-  const connections = ((conns as { calendar_id: string; role: string; enabled: boolean; name: string }[]) ?? []).filter((c) => c.enabled);
-  const from = new Date(Date.now() - DAY_MS);
-  const result = await pullEvents(connections, from.toISOString(), 21);
-  if (result.newItems?.length || (result as { eventsRemoved?: number }).eventsRemoved) {
-    await supabase.from("gcal_sync_runs").insert({ direction: "pull", status: "success", events_pulled: result.newItems?.length ?? 0 });
-  }
-
-  // Trip alerts
-  const { data: settings } = await supabase.from("reminder_settings").select("enabled, trips").eq("id", 1).maybeSingle();
-  if (!settings?.enabled || settings.trips === false) return { ...result, alerts: 0 };
-  const now = Date.now();
-  const soon = now + 4 * DAY_MS;
-  const flights = (result.newItems ?? [])
-    .filter((i) => !i.allDay && FLIGHT_LEG_PATTERN.test(i.name))
-    .filter((i) => Date.parse(i.start) > now && Date.parse(i.start) < soon)
-    .sort((a, b) => a.start.localeCompare(b.start));
-  const byDay = new Map<string, typeof flights>();
-  for (const f of flights) {
-    const d = eastern(f.start).day;
-    byDay.set(d, [...(byDay.get(d) ?? []), f]);
-  }
-  let alerts = 0;
-  for (const [day, legs] of byDay) {
-    const list = legs
-      .map((l) => {
-        const m = FLIGHT_LEG_PATTERN.exec(l.name);
-        return `${m ? `${m[1]}→${m[2]}` : l.name} ${eastern(l.start).time}`;
-      })
-      .join(", ");
-    const { error } = await supabase.from("reminders").insert({
-      key: `trip:${legs[0].id}`,
-      send_at: new Date().toISOString(),
-      title: "New trip on your calendar",
-      body: `${day}: ${list}. Open the app to check it and confirm your assignment.`,
-      url: "/?view=briefing",
-      kind: "trip",
-    });
-    if (!error) alerts++;
-  }
-  return { ...result, alerts };
+  return { eventsPulled: totalPulled, eventsRemoved: totalRemoved };
 }
 
 async function pushEvents(
@@ -1085,11 +1016,6 @@ Deno.serve(async (req: Request) => {
         break;
       }
 
-      case "background-pull": {
-        result = { success: true, ...(await backgroundPull()) };
-        break;
-      }
-
       case "update-source-event": {
         if (!body.googleEventId || !body.calendarId || !body.start || !body.end) {
           throw new Error("googleEventId, calendarId, start and end are required.");
@@ -1118,6 +1044,8 @@ Deno.serve(async (req: Request) => {
     );
   }
 });
+
+
 
 
 

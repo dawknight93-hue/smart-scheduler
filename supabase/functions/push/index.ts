@@ -102,73 +102,7 @@ async function sendToAll(payload: Payload) {
   return results;
 }
 
-// ---- Reminders the server schedules itself (no app needed) ------------------
-// Weekly Review (Sun 21:30), monthly briefing (last day of the month, 20:00),
-// and a plain morning briefing nudge when the app didn't plan one (it plans the
-// detailed one each time it's opened).
-
-const HOME_TZ = "America/New_York";
-const homeFmt = new Intl.DateTimeFormat("en-US", {
-  timeZone: HOME_TZ,
-  hourCycle: "h23",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  weekday: "short",
-});
-const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-
-function homeNow(d = new Date()) {
-  const p = Object.fromEntries(homeFmt.formatToParts(d).map((x) => [x.type, x.value]));
-  const y = +p.year, mo = +p.month, day = +p.day;
-  return { y, mo, day, mins: (+p.hour % 24) * 60 + +p.minute, weekday: p.weekday, date: `${p.year}-${p.month}-${p.day}` };
-}
-
-const toMins = (hm: string) => {
-  const [h, m] = hm.split(":").map(Number);
-  return (h || 0) * 60 + (m || 0);
-};
-
-async function scheduleServerReminders() {
-  const { data: s } = await supabase.from("reminder_settings").select("*").eq("id", 1).maybeSingle();
-  if (!s?.enabled) return;
-  const h = homeNow();
-  // A 15-minute window, so a late or skipped cron minute still catches it; keys stop repeats.
-  const within = (hm: string) => h.mins >= toMins(hm) && h.mins < toMins(hm) + 15;
-  const lastDay = new Date(Date.UTC(h.y, h.mo, 0)).getUTCDate() === h.day;
-  const rows: Record<string, unknown>[] = [];
-  if (s.weekly !== false && h.weekday === "Sun" && within("21:30")) {
-    rows.push({ key: `weekly:${h.date}`, title: "Weekly Review", body: "Sunday 21:30 — look back at this week and approve next week's plan.", url: "/?view=review", kind: "weekly" });
-  }
-  if (s.monthly !== false && lastDay && within("20:00")) {
-    rows.push({
-      key: `monthly:${h.date}`,
-      title: "Monthly briefing",
-      body: `Last day of ${MONTHS[h.mo - 1]} — look back at the month and ahead to ${MONTHS[h.mo % 12]}.`,
-      url: "/?view=briefing",
-      kind: "monthly",
-    });
-  }
-  if (s.morning !== false && typeof s.morning_time === "string" && within(s.morning_time)) {
-    const { data: planned } = await supabase.from("reminders").select("id").eq("key", `morning:${h.date}`).maybeSingle();
-    if (!planned) {
-      const label = new Date(Date.UTC(h.y, h.mo - 1, h.day, 12)).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
-      rows.push({ key: `morning:${h.date}`, title: `Briefing · ${label}`, body: "Open Smart Scheduler for today's briefing.", url: "/?view=briefing", kind: "morning" });
-    }
-  }
-  if (!rows.length) return;
-  const now = new Date().toISOString();
-  await supabase.from("reminders").upsert(rows.map((r) => ({ ...r, send_at: now })), { onConflict: "key", ignoreDuplicates: true });
-}
-
 async function sendDue() {
-  try {
-    await scheduleServerReminders();
-  } catch (e) {
-    console.error("server reminders:", e);
-  }
   const now = new Date();
   // Too late to be useful: mark and skip.
   await supabase
@@ -256,4 +190,6 @@ Deno.serve(async (req: Request) => {
     return new Response(JSON.stringify({ error: message }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
   }
 });
+
+
 
