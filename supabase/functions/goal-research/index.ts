@@ -157,6 +157,17 @@ async function groqCall(system: string, turns: ChatTurn[], json: boolean): Promi
   return String((await resp.json()).choices?.[0]?.message?.content ?? "").trim();
 }
 
+/** His standing corrections for the coach and planner (Planner memory in the app). */
+let notesCache: { at: number; text: string } | null = null;
+async function plannerNotes(): Promise<string> {
+  if (notesCache && Date.now() - notesCache.at < 30000) return notesCache.text;
+  const { data, error } = await supabase.from("briefing_memory").select("note").eq("scope", "planner").eq("active", true).order("created_at").limit(40);
+  const notes = error ? [] : ((data as { note: string }[]) ?? []).map((r) => r.note.slice(0, 300));
+  const text = notes.length ? "\n\nHis standing corrections for plans and coaching — always follow these:\n" + notes.map((n) => `- ${n}`).join("\n") : "";
+  notesCache = { at: Date.now(), text };
+  return text;
+}
+
 /** Pull the JSON object out of a reply (Claude may wrap it in a code fence). */
 function parseJsonObject(text: string): any {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -173,7 +184,8 @@ function parseJsonObject(text: string): any {
  */
 async function llm(system: string, turns: ChatTurn[], opts: { json?: boolean; maxTokens?: number } = {}): Promise<LLMResult & { data?: any }> {
   const json = !!opts.json;
-  const sys = json ? system + "\n\nReply with the JSON object only — no code fence, no text before or after it." : system;
+  const withNotes = system + (await plannerNotes());
+  const sys = json ? withNotes + "\n\nReply with the JSON object only — no code fence, no text before or after it." : withNotes;
   const key = Deno.env.get("ANTHROPIC_API_KEY");
   let warning: string | undefined;
   if (key) {
@@ -751,7 +763,6 @@ Deno.serve(async (req: Request) => {
     });
   }
 });
-
 
 
 
