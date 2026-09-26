@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Activity, Archive, Check, Loader2, Pencil, Plus, Sparkles, Target, X } from "lucide-react";
+import { Activity, Archive, BookOpen, Check, Loader2, Pencil, Plus, Sparkles, Target, X } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import type { ContextTag } from "@/lib/types";
 import { EFFORTS, EFFORT_LABELS, type Effort } from "@/lib/effort";
@@ -28,6 +28,8 @@ import {
   type NewMeasure,
 } from "@/lib/measures";
 import { OutcomeTracker } from "@/components/MeasureWidgets";
+import { PlannerFeedback } from "@/components/PlannerFeedback";
+import { BriefingMemoryEditor } from "@/components/BriefingMemoryEditor";
 
 const RESEARCH_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/goal-research`;
 const HEADERS = {
@@ -98,6 +100,7 @@ export function GoalPlanPanel({ goalId }: { goalId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [planModel, setPlanModel] = useState<string | null>(null);
   const [editing, setEditing] = useState<(Partial<GoalMeasure> & { goal_id: string }) | null>(null);
+  const [memoryOpen, setMemoryOpen] = useState(false);
 
   const reload = useCallback(async () => {
     const [g, c, ms] = await Promise.all([
@@ -201,7 +204,14 @@ export function GoalPlanPanel({ goalId }: { goalId: string }) {
       </div>
 
       {error && <p className="text-sm text-rose-300 mb-2">{error}</p>}
-      {planModel && <p className="text-[11px] text-slate-500 mb-2">Written by {planModel}</p>}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-2">
+        {planModel && <span className="text-[11px] text-slate-500">Written by {planModel}</span>}
+        <PlannerFeedback kind="plan" excerpt={`${goal.specific ?? ""} | checkpoints: ${(goal.milestones ?? []).map((m) => `${m.due} ${m.title}`).join("; ")} | measures: ${measures.filter((m) => m.status !== "archived").map((m) => m.label).join(", ")}`} />
+        <button onClick={() => setMemoryOpen(true)} className="flex items-center gap-1 text-[11px] text-slate-400 hover:text-slate-200">
+          <BookOpen className="w-3 h-3" /> Planner memory
+        </button>
+      </div>
+      {memoryOpen && <BriefingMemoryEditor scope="planner" onClose={() => setMemoryOpen(false)} />}
 
       {hasPlan && (
         <>
