@@ -4,6 +4,8 @@ import type { AwarenessNote, AwareItem, DailyAwareness, DutyStats } from "@/lib/
 import { AwarenessRulesEditor } from "@/components/AwarenessRulesEditor";
 import { BriefingMemoryEditor } from "@/components/BriefingMemoryEditor";
 import { RemindersPanel } from "@/components/RemindersPanel";
+import { OutcomeTracker } from "@/components/MeasureWidgets";
+import { fmt, outcomeStatus, planKey } from "@/lib/measures";
 import { addMemory, loadMemory } from "@/lib/briefingMemory";
 import { getPillarColor } from "@/lib/types";
 import { goalShortName } from "@/lib/goalPlanning";
@@ -327,8 +329,8 @@ function Daily({
   onAddRule: (i: AwareItem) => void;
 }) {
   const [tickError, setTickError] = useState<string | null>(null);
-  async function tick(goalId: string, e: DayEntry, done: boolean) {
-    const g = b.goals.find((x) => x.goal.id === goalId);
+  async function tick(key: string, e: DayEntry, done: boolean) {
+    const g = b.goals.find((x) => planKey(x.goal) === key);
     if (!g) return;
     setTickError(null);
     try {
@@ -339,7 +341,7 @@ function Daily({
       onChange({
         ...b,
         goals: b.goals.map((x) =>
-          x.goal.id !== goalId
+          planKey(x.goal) !== key
             ? x
             : { ...x, done: x.done + (done === e.done ? 0 : done ? 1 : -1), today: x.today.map((t) => (t.key === e.key ? { ...t, done } : t)) }
         ),
@@ -398,7 +400,7 @@ function Daily({
         </Section>
       )}
 
-      {b.goals.length > 0 && (
+      {(b.goals.length > 0 || b.outcomes.length > 0) && (
         <Section icon={<Target className="w-4 h-4 text-blue-300" />} title="Goals this week">
           {tickError && <p className="mb-2 text-xs text-rose-300">{tickError}</p>}
           <ul className="space-y-3">
@@ -406,10 +408,13 @@ function Daily({
               const c = getPillarColor(g.goal.pillar);
               const pct = g.target ? Math.min(100, Math.round((g.done / g.target) * 100)) : 0;
               return (
-                <li key={g.goal.id}>
+                <li key={planKey(g.goal)}>
                   <div className="flex items-center gap-2 text-sm">
                     <span className={`w-2 h-2 rounded-full ${c.dot}`} />
-                    <span className="truncate text-slate-200">{goalShortName(g.goal)}</span>
+                    <span className="truncate text-slate-200">
+                      {goalShortName(g.goal)}
+                      {g.goal.measure_label && <span className="text-slate-400"> · {g.goal.measure_label}</span>}
+                    </span>
                     <span className="ml-auto tabular-nums text-slate-300">{g.done}/{g.target}</span>
                   </div>
                   <div className="mt-1 h-1.5 rounded-full bg-slate-800">
@@ -422,7 +427,7 @@ function Daily({
                           <input
                             type="checkbox"
                             checked={e.done}
-                            onChange={(ev) => tick(g.goal.id, e, ev.target.checked)}
+                            onChange={(ev) => tick(planKey(g.goal), e, ev.target.checked)}
                             className="mt-1 accent-emerald-500"
                             aria-label={`Mark ${e.focus ?? e.title} done`}
                           />
@@ -444,6 +449,22 @@ function Daily({
               );
             })}
           </ul>
+          {b.outcomes.length > 0 && (
+            <div className={`${b.goals.length ? "mt-3 border-t border-slate-800 pt-3" : ""} space-y-2`}>
+              <p className="text-[11px] uppercase tracking-wide text-slate-500">Numbers you log</p>
+              {b.outcomes.map((o) => (
+                <OutcomeTracker
+                  key={o.measure.id}
+                  measure={o.measure}
+                  entries={o.status.entries}
+                  onChange={(es) =>
+                    onChange({ ...b, outcomes: b.outcomes.map((x) => (x.measure.id === o.measure.id ? { ...x, status: outcomeStatus(x.measure, es) } : x)) })
+                  }
+                />
+              ))}
+              <p className="text-[11px] text-slate-500">A new number shows up in the summary the next time the briefing loads.</p>
+            </div>
+          )}
         </Section>
       )}
 
@@ -543,9 +564,12 @@ function Period({ b, onOpenReview }: { b: PeriodBriefing; onOpenReview: () => vo
         {b.kind === "weekly" && back.goalLines.length > 0 && (
           <ul className="mb-2 space-y-1">
             {back.goalLines.map((g) => (
-              <li key={g.goal.id} className="flex items-center gap-2 text-sm">
+              <li key={planKey(g.goal)} className="flex items-center gap-2 text-sm">
                 <span className={`w-2 h-2 rounded-full ${getPillarColor(g.goal.pillar).dot}`} />
-                <span className="truncate text-slate-200">{goalShortName(g.goal)}</span>
+                <span className="truncate text-slate-200">
+                  {goalShortName(g.goal)}
+                  {g.goal.measure_label && <span className="text-slate-400"> · {g.goal.measure_label}</span>}
+                </span>
                 <span className="ml-auto tabular-nums text-xs text-slate-400" title="Sessions on the calendar">
                   {g.held} of {g.target} {sessionNoun(g.goal)} on the calendar
                 </span>
@@ -557,6 +581,27 @@ function Period({ b, onOpenReview }: { b: PeriodBriefing; onOpenReview: () => vo
                 <span className="w-24 text-right text-xs text-slate-500">{g.status ? `review ${g.status}` : "not reviewed"}</span>
               </li>
             ))}
+          </ul>
+        )}
+        {back.outcomes.length > 0 && (
+          <ul className="mb-2 space-y-1">
+            {back.outcomes.map((o) => {
+              const st = o.status;
+              const unit = o.measure.unit ? ` ${o.measure.unit}` : "";
+              return (
+                <li key={o.measure.id} className="flex items-center gap-2 text-sm">
+                  <span className={`w-2 h-2 rounded-full ${getPillarColor(o.goal.pillar).dot}`} />
+                  <span className="truncate text-slate-200">{o.measure.label}</span>
+                  <span className="ml-auto tabular-nums text-xs text-slate-400">
+                    {st.latest ? `${fmt(st.latest.value)}${unit}` : "nothing logged"}
+                    {st.change !== null && o.measure.baseline !== null ? ` (${st.change >= 0 ? "+" : ""}${fmt(Math.round(st.change * 10) / 10)} since start)` : ""}
+                  </span>
+                  {st.next && st.onTrack !== null && (
+                    <span className={`w-24 text-right text-xs ${st.onTrack ? "text-emerald-300" : "text-amber-300"}`}>{st.onTrack ? "on track" : "behind"}</span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
         {b.kind === "monthly" && back.reviewsByGoal.length > 0 && (

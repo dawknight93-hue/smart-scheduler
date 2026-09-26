@@ -14,6 +14,7 @@ import {
   milestonesDueSoon,
   planWeek,
   recordReview,
+  reviewForPlan,
   setMilestoneDone,
   verifyWeek,
   type GoalWeekPlan,
@@ -23,6 +24,8 @@ import {
   type WeekReviewRow,
 } from "@/lib/goalPlanning";
 import { goalDayEntries, loadDailyItems, setCountedDone, setSessionDone, writeDailyPlan, type DailyItem, type DayEntry } from "@/lib/goalDaily";
+import { effortGoals, loadEntries, loadMeasures, planKey, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
+import { OutcomeTracker } from "@/components/MeasureWidgets";
 
 const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 const dayLabel = (d: Date) => d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
@@ -40,6 +43,8 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
   const [verifying, setVerifying] = useState(false);
   const [items, setItems] = useState<DailyItem[]>([]);
   const [rewriting, setRewriting] = useState<string | null>(null);
+  const [measures, setMeasures] = useState<GoalMeasure[]>([]);
+  const [entries, setEntries] = useState<MeasureEntry[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -50,9 +55,11 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
       if (gErr) throw new Error(gErr.message);
       const all = (data as PlanGoal[]) ?? [];
       setGoals(all);
-      const week = await loadWeekData(weekStart);
-      const ready = all.filter((g) => g.status === "active" && g.plan_mode && (g.cadence_sessions_per_week ?? 0) > 0);
-      setPlans(planWeek(ready, week));
+      const [week, ms] = await Promise.all([loadWeekData(weekStart), loadMeasures()]);
+      setMeasures(ms);
+      setEntries(await loadEntries(ms.filter((m) => m.kind === "outcome" && m.status === "active").map((m) => m.id)));
+      // One card per effort measure (goals without measures keep their single weekly target).
+      setPlans(planWeek(effortGoals(all, ms), week));
       setReviews(await loadReviews(weekStart));
       setItems(await loadDailyItems(weekStart, addDays(weekStart, 7)));
       setRemoved(new Set());
@@ -75,13 +82,17 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
   );
   const pendingCadence = goals.filter((g) => g.status === "approach_chosen" || g.status === "cadence_pending" || (g.status === "active" && !g.cadence_sessions_per_week));
   const needsPlan = goals.filter((g) => g.status === "active" && (g.cadence_sessions_per_week ?? 0) > 0 && !g.plan_mode);
-  const reviewFor = (goalId: string) => reviews.find((r) => r.goal_id === goalId);
-  const allReviewed = plans.length > 0 && plans.every((p) => reviewFor(p.goal.id));
+  const firstMeasure = (goalId: string) => measures.find((m) => m.goal_id === goalId && m.kind === "effort" && m.status === "active")?.id;
+  const reviewFor = (g: PlanGoal) => reviewForPlan(reviews, g, firstMeasure(g.id));
+  const allReviewed = plans.length > 0 && plans.every((p) => reviewFor(p.goal));
+  const outcomesFor = (goalId: string) => measures.filter((m) => m.goal_id === goalId && m.kind === "outcome" && m.status === "active");
+  // Goals measured only by numbers you log (no weekly effort to plan).
+  const outcomeOnly = goals.filter((g) => g.status === "active" && outcomesFor(g.id).length > 0 && !plans.some((p) => p.goal.id === g.id));
   const weekEnd = addDays(weekStart, 6);
   const isThisWeek = getWeekStart(now).getTime() === weekStart.getTime();
 
   async function approve(plan: GoalWeekPlan) {
-    setBusyGoal(plan.goal.id);
+    setBusyGoal(planKey(plan.goal));
     setError(null);
     try {
       const sessions = plan.proposed.filter((s) => !removed.has(s.key));
@@ -96,10 +107,10 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
   }
 
   async function skip(plan: GoalWeekPlan) {
-    setBusyGoal(plan.goal.id);
+    setBusyGoal(planKey(plan.goal));
     try {
       const have = plan.goal.plan_mode === "count" ? plan.counted.length : plan.existing.length;
-      await recordReview(plan.goal.id, weekStart, plan.target, have, "skipped");
+      await recordReview(plan.goal.id, weekStart, plan.target, have, "skipped", undefined, plan.goal.measure_id ?? "");
       setReviews(await loadReviews(weekStart));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save");
@@ -116,7 +127,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
       const doneByGoal = new Map<string, number>();
       for (const p of plans) {
         const n = goalDayEntries(p.goal, sessionsOf(p), p.counted, fresh).filter((e) => e.done).length;
-        doneByGoal.set(p.goal.id, n);
+        doneByGoal.set(planKey(p.goal), n);
       }
       setVerify(verifyWeek(plans.map((p) => p.goal), week, doneByGoal));
     } catch (e) {
@@ -163,7 +174,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
   }
 
   async function rewriteFocus(plan: GoalWeekPlan) {
-    setRewriting(plan.goal.id);
+    setRewriting(planKey(plan.goal));
     setError(null);
     try {
       const sessions = sessionsOf(plan).map((s) => ({ habitId: s.id, start: s.start, end: s.end }));
@@ -244,14 +255,18 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
             <p className="text-sm text-slate-400">No active goals with a plan yet.</p>
           )}
 
-          {plans.map((plan) => (
+          {plans.map((plan, idx) => (
             <GoalCard
-              key={plan.goal.id}
+              key={planKey(plan.goal)}
               plan={plan}
               weekStart={weekStart}
-              review={reviewFor(plan.goal.id)}
+              review={reviewFor(plan.goal)}
+              firstOfGoal={plans.findIndex((p) => p.goal.id === plan.goal.id) === idx}
+              outcomes={outcomesFor(plan.goal.id)}
+              entries2={entries}
+              onEntries={setEntries}
               removed={removed}
-              busy={busyGoal === plan.goal.id}
+              busy={busyGoal === planKey(plan.goal)}
               onRemove={(s) => setRemoved((r) => new Set(r).add(s.key))}
               onApprove={() => approve(plan)}
               onSkip={() => skip(plan)}
@@ -259,8 +274,26 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
               entries={goalDayEntries(plan.goal, sessionsOf(plan), plan.counted, items)}
               onDone={(e, done) => toggleDone(plan, e, done)}
               onRewrite={() => rewriteFocus(plan)}
-              rewriting={rewriting === plan.goal.id}
+              rewriting={rewriting === planKey(plan.goal)}
             />
+          ))}
+
+          {outcomeOnly.map((g) => (
+            <div key={g.id} className="rounded-xl border border-slate-700 bg-slate-900/60 p-4">
+              <div className="flex items-start gap-2 mb-2">
+                <span className={`mt-1.5 w-2.5 h-2.5 rounded-full shrink-0 ${getPillarColor(g.pillar).dot}`} />
+                <div>
+                  <div className="text-xs text-slate-400">{PILLAR_LABELS[g.pillar]}</div>
+                  <p className="text-sm font-medium text-slate-100">{goalShortName(g)}</p>
+                  <p className="text-xs text-slate-400 mt-0.5">No weekly effort to plan — just the numbers you log.</p>
+                </div>
+              </div>
+              <div className="space-y-2">
+                {outcomesFor(g.id).map((m) => (
+                  <OutcomeTracker key={m.id} measure={m} entries={entries} onChange={setEntries} />
+                ))}
+              </div>
+            </div>
           ))}
 
           {plans.length > 0 && (
@@ -282,12 +315,12 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
               {verify && (
                 <ul className="mt-3 space-y-1.5">
                   {verify.map((v) => {
-                    const g = plans.find((p) => p.goal.id === v.goalId)?.goal;
+                    const g = plans.find((p) => planKey(p.goal) === v.key)?.goal;
                     const ok = v.held >= v.target;
                     return (
-                      <li key={v.goalId} className="flex items-center gap-2 text-sm">
+                      <li key={v.key} className="flex items-center gap-2 text-sm">
                         {ok ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <AlertTriangle className="w-4 h-4 text-amber-400" />}
-                        <span className="text-slate-200 truncate">{g ? goalShortName(g) : v.goalId}</span>
+                        <span className="text-slate-200 truncate">{g ? (g.measure_label ? `${g.measure_label} — ${goalShortName(g)}` : goalShortName(g)) : v.goalId}</span>
                         <span className="ml-auto tabular-nums text-slate-400">
                           {v.held}/{v.target}
                           <span className={v.done >= v.target ? "text-emerald-300" : ""}> · {v.done} done</span>
@@ -320,10 +353,18 @@ function GoalCard({
   onDone,
   onRewrite,
   rewriting,
+  firstOfGoal,
+  outcomes,
+  entries2,
+  onEntries,
 }: {
   plan: GoalWeekPlan;
   weekStart: Date;
   review?: WeekReviewRow;
+  firstOfGoal: boolean;
+  outcomes: GoalMeasure[];
+  entries2: MeasureEntry[];
+  onEntries: (e: MeasureEntry[]) => void;
   removed: Set<string>;
   busy: boolean;
   onRemove: (s: ProposedSession) => void;
@@ -350,6 +391,7 @@ function GoalCard({
         <div className="min-w-0 flex-1">
           <div className="text-xs text-slate-400">{PILLAR_LABELS[g.pillar]}</div>
           <p className="text-sm font-medium text-slate-100">{goalShortName(g)}</p>
+          {g.measure_label && <p className="text-xs font-medium text-blue-300 mt-0.5">{g.measure_label}</p>}
           <p className="text-xs text-slate-400 mt-0.5">
             Target: {plan.target}× {g.weekly_target ?? "session"}
             {!isCount && g.session_minutes ? ` · ${g.session_minutes} min` : ""}
@@ -416,7 +458,16 @@ function GoalCard({
         </div>
       )}
 
-      {due.length > 0 && (
+      {firstOfGoal && outcomes.length > 0 && (
+        <div className="mt-3 border-t border-slate-800 pt-2 space-y-2">
+          <p className="text-[11px] uppercase tracking-wide text-slate-500">Numbers to log</p>
+          {outcomes.map((m) => (
+            <OutcomeTracker key={m.id} measure={m} entries={entries2} onChange={onEntries} />
+          ))}
+        </div>
+      )}
+
+      {firstOfGoal && due.length > 0 && (
         <div className="mt-3 border-t border-slate-800 pt-2">
           <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Checkpoints coming up</p>
           {due.map((m) => (
