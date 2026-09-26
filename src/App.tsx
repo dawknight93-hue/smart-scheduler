@@ -72,9 +72,30 @@ function App() {
     );
   };
 
+  // Phones: iOS-style tab bar along the bottom (thumb reach), labelled "Today" for the briefing.
+  const bottomTab = (t: (typeof tabs)[number]) => {
+    const Icon = t.icon;
+    const active = view === t.id;
+    return (
+      <button
+        key={t.id}
+        onClick={() => setView(t.id)}
+        aria-current={active ? "page" : undefined}
+        className={`relative flex flex-col items-center justify-center gap-0.5 min-h-[50px] text-[11px] ${active ? "text-blue-300 font-semibold" : "text-slate-400 font-medium"}`}
+      >
+        <Icon className="w-6 h-6" strokeWidth={active ? 2.2 : 1.8} />
+        {t.id === "briefing" ? "Today" : t.label}
+        {t.id === "review" && reviewDue && !active && (
+          <span className="absolute top-1.5 right-[calc(50%-18px)] w-2 h-2 rounded-full bg-amber-400" aria-label="Weekly Review due" />
+        )}
+      </button>
+    );
+  };
+
   return (
     <div
-      className={`w-full overflow-x-clip bg-slate-950 text-slate-100 flex flex-col md:flex-row ${
+      style={{ paddingTop: "env(safe-area-inset-top)" }}
+      className={`w-full overflow-x-clip bg-slate-950 text-slate-100 flex flex-col md:flex-row pb-[calc(58px+env(safe-area-inset-bottom))] md:pb-0 ${
         // Calendar: fixed to the screen so only the hour grid scrolls and the
         // tabs, header, day names and all-day row stay frozen.
         view === "calendar" ? "h-[100dvh] overflow-y-hidden" : "min-h-screen"
@@ -91,9 +112,13 @@ function App() {
         <div id="sidebar-slot" className="flex-1 min-h-0 overflow-y-auto px-3 pb-3 empty:hidden" />
       </aside>
 
-      {/* Tabs — top bar on phones, where a side column would crowd the calendar */}
-      <nav className="md:hidden shrink-0 border-b border-slate-800 bg-slate-900/80 backdrop-blur-sm sticky top-0 z-40" aria-label="Sections">
-        <div className="px-4 py-2 flex items-center gap-1 overflow-x-auto">{tabs.map((t) => tabButton(t, false))}</div>
+      {/* Tabs — a bottom tab bar on phones, like an iPhone app */}
+      <nav
+        className="md:hidden fixed bottom-0 inset-x-0 z-40 border-t border-slate-800 bg-slate-900/95 backdrop-blur-md grid grid-cols-5 px-1 pt-1"
+        style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 4px)" }}
+        aria-label="Sections"
+      >
+        {tabs.map(bottomTab)}
       </nav>
 
       <div className="flex-1 min-w-0 min-h-0 flex flex-col">
@@ -101,6 +126,7 @@ function App() {
         <CalendarView
           weekStart={weekStart}
           setWeekStart={setWeekStart}
+          onOpenBriefing={() => setView("briefing")}
         />
       ) : view === "tasks" ? (
         <TasksView weekStart={weekStart} />
