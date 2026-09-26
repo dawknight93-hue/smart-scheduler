@@ -2,6 +2,7 @@ import { useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2, Plus, TrendingDown, TrendingUp, Trash2 } from "lucide-react";
 import { formatLocalDate } from "@/lib/recurrence";
 import { addEntry, deleteEntry, fmt, outcomeStatus, WEEKDAYS, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
+import { completeGoal } from "@/lib/goalCompletion";
 
 const shortDate = (s: string) => {
   const [y, m, d] = s.split("-").map(Number);
@@ -50,6 +51,9 @@ export function OutcomeTracker({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmDel, setConfirmDel] = useState<string | null>(null);
+  // Set when a logged number reaches the goal's target: offer to finish the goal.
+  const [reached, setReached] = useState<null | "ask" | "done">(null);
+  const [reachedValue, setReachedValue] = useState<number | null>(null);
   const unit = measure.unit ? ` ${measure.unit}` : "";
   const cmp = measure.direction === "up" ? "≥" : "≤";
   const Trend = measure.direction === "up" ? TrendingUp : TrendingDown;
@@ -63,6 +67,10 @@ export function OutcomeTracker({
       const e = await addEntry(measure, v, date);
       onChange([...entries, e]);
       setValue("");
+      if (measure.target !== null && (measure.direction === "up" ? v >= measure.target : v <= measure.target)) {
+        setReachedValue(v);
+        setReached("ask");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't save");
     } finally {
@@ -150,6 +158,33 @@ export function OutcomeTracker({
         </button>
       </div>
       {error && <p className="mt-1 text-xs text-rose-300">{error}</p>}
+      {reached === "ask" && (
+        <div className="mt-2 rounded-lg border border-emerald-600/40 bg-emerald-600/10 p-2.5">
+          <p className="text-sm text-emerald-300">
+            That's your target ({measure.direction === "up" ? "≥" : "≤"} {fmt(measure.target!)}
+            {unit}). Mark the goal complete?
+          </p>
+          <div className="mt-1.5 flex gap-2">
+            <button
+              onClick={async () => {
+                try {
+                  await completeGoal(measure.goal_id, `Reached ${fmt(reachedValue ?? measure.target!)}${unit} (${measure.label})`);
+                  setReached("done");
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : "Couldn't save");
+                }
+              }}
+              className="rounded-lg bg-emerald-600 px-2.5 py-1 text-xs text-white hover:bg-emerald-500"
+            >
+              Mark complete
+            </button>
+            <button onClick={() => setReached(null)} className="rounded-lg px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800">
+              Not yet
+            </button>
+          </div>
+        </div>
+      )}
+      {reached === "done" && <p className="mt-2 text-xs text-emerald-300">Goal marked complete — its upcoming sessions were taken off your calendar.</p>}
 
       {showHistory && mine.length > 0 && (
         <details className="mt-2">

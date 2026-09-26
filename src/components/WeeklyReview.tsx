@@ -26,6 +26,7 @@ import {
 import { goalDayEntries, loadDailyItems, setCountedDone, setSessionDone, writeDailyPlan, type DailyItem, type DayEntry } from "@/lib/goalDaily";
 import { effortGoals, loadEntries, loadMeasures, planKey, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
 import { OutcomeTracker } from "@/components/MeasureWidgets";
+import { completeGoal } from "@/lib/goalCompletion";
 
 const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 const dayLabel = (d: Date) => d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
@@ -137,18 +138,20 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
     }
   }
 
-  async function resolveMissed(goal: PlanGoal, stillPursuing: boolean) {
+  async function resolveMissed(goal: PlanGoal, stillPursuing: boolean | "reached") {
     setBusyGoal(goal.id);
     try {
-      if (stillPursuing) {
+      if (stillPursuing === "reached") {
+        await completeGoal(goal.id);
+      } else if (stillPursuing) {
         // Rev J: a fresh goal at Draft, carrying the pillar and where this one left off.
         const done = (goal.milestones ?? []).filter((m) => m.done).map((m) => m.title);
         const note = `Continuing from: ${goalShortName(goal)}${done.length ? ` (reached: ${done.join("; ")})` : ""}`;
         const { error: e1 } = await supabase.from("goals").insert({ pillar: goal.pillar, status: "draft", specific: null, relevant: note });
         if (e1) throw new Error(e1.message);
-        await supabase.from("goals").update({ status: "missed" }).eq("id", goal.id);
+        await supabase.from("goals").update({ status: "missed", completed_at: new Date().toISOString() }).eq("id", goal.id);
       } else {
-        await supabase.from("goals").update({ status: "abandoned" }).eq("id", goal.id);
+        await supabase.from("goals").update({ status: "abandoned", completed_at: new Date().toISOString() }).eq("id", goal.id);
       }
       await load();
     } catch (e) {
@@ -226,8 +229,9 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
             <div key={g.id} className="rounded-xl border border-rose-500/30 bg-rose-500/5 p-4">
               <div className="flex items-center gap-2 mb-1 text-rose-300 text-sm font-semibold"><Flag className="w-4 h-4" /> Deadline passed</div>
               <p className="text-sm text-slate-200 mb-1">{goalShortName(g)}</p>
-              <p className="text-xs text-slate-400 mb-3">Are you still pursuing this? If so, a new goal starts at the SMART Gate from where this one left off.</p>
-              <div className="flex gap-2">
+              <p className="text-xs text-slate-400 mb-3">Did you reach it? If not, are you still pursuing it? A new goal starts at the SMART Gate from where this one left off.</p>
+              <div className="flex flex-wrap gap-2">
+                <button disabled={busyGoal === g.id} onClick={() => resolveMissed(g, "reached")} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm hover:bg-emerald-500 disabled:opacity-50">I reached it — mark complete</button>
                 <button disabled={busyGoal === g.id} onClick={() => resolveMissed(g, true)} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-500 disabled:opacity-50">Yes — start a new goal</button>
                 <button disabled={busyGoal === g.id} onClick={() => resolveMissed(g, false)} className="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-300 text-sm hover:bg-slate-700 disabled:opacity-50">No — let it go</button>
               </div>

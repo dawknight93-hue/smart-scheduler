@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus, Send, ArrowLeft, CheckCircle2, Loader2, Trash2 } from "lucide-react";
 import { PlannerFeedback } from "@/components/PlannerFeedback";
+import { GoalCompletionBar } from "@/components/GoalCompletionBar";
+import { STATUS_LABELS } from "@/lib/goalCompletion";
 import { supabase } from "@/lib/supabase";
 import { PILLARS, PILLAR_LABELS, getPillarColor, LifePillar } from "@/lib/types";
 import { GoalPlanPanel } from "@/components/GoalPlanPanel";
@@ -20,6 +22,8 @@ interface GoalRow {
   relevant: string | null;
   time_bound: string | null;
   status: string;
+  completed_at?: string | null;
+  outcome_note?: string | null;
   created_at: string;
   cadence_sessions_per_week: number | null;
   cadence_label: string | null;
@@ -90,7 +94,7 @@ export function GoalsView() {
     setLoadingGoals(true);
     const { data, error } = await supabase
       .from("goals")
-      .select("id, pillar, specific, measurable, achievable, relevant, time_bound, status, created_at, cadence_sessions_per_week, cadence_label, cadence_confirmed")
+      .select("id, pillar, specific, measurable, achievable, relevant, time_bound, status, created_at, cadence_sessions_per_week, cadence_label, cadence_confirmed, completed_at, outcome_note")
       .order("created_at", { ascending: false });
     if (!error && data) setGoals(data as GoalRow[]);
     setLoadingGoals(false);
@@ -143,19 +147,34 @@ export function GoalsView() {
           <p className="text-sm">Start one and the SMART Gate coach will help you shape it.</p>
         </div>
       ) : (
-        <div className="grid gap-3">
-          {goals.map((goal) => (
-            <GoalCard
-              key={goal.id}
-              goal={goal}
-              onClick={() => setActiveGoalId(goal.id)}
-              onDelete={async () => {
-                if (!window.confirm("Delete this goal and all its conversation history?")) return;
-                await supabase.from("goals").delete().eq("id", goal.id);
-                loadGoals();
-              }}
-            />
-          ))}
+        <div className="space-y-6">
+          {(
+            [
+              { key: "open", title: null, list: goals.filter((g) => !["complete", "abandoned"].includes(g.status)) },
+              { key: "done", title: "Completed", list: goals.filter((g) => g.status === "complete") },
+              { key: "closed", title: "Let go", list: goals.filter((g) => g.status === "abandoned") },
+            ] as const
+          ).map((sec) =>
+            sec.list.length === 0 ? null : (
+              <div key={sec.key}>
+                {sec.title && <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">{sec.title} · {sec.list.length}</h2>}
+                <div className="grid gap-3">
+                  {sec.list.map((goal) => (
+                    <GoalCard
+                      key={goal.id}
+                      goal={goal}
+                      onClick={() => setActiveGoalId(goal.id)}
+                      onDelete={async () => {
+                        if (!window.confirm("Delete this goal and all its conversation history?")) return;
+                        await supabase.from("goals").delete().eq("id", goal.id);
+                        loadGoals();
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+            )
+          )}
         </div>
       )}
     </div>
@@ -166,7 +185,9 @@ function GoalCard({ goal, onClick, onDelete }: { goal: GoalRow; onClick: () => v
   const colors = getPillarColor(goal.pillar);
   const title = goal.specific || "New draft goal";
   const statusLabel =
-    goal.status === "smart_approved" ? "SMART approved" : goal.status === "approach_chosen" ? "Approach chosen" : goal.status === "draft" ? "In SMART Gate" : goal.status;
+    goal.status === "complete" && goal.completed_at
+      ? `Completed ${new Date(goal.completed_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`
+      : STATUS_LABELS[goal.status] ?? goal.status;
 
   return (
     <div
@@ -189,7 +210,8 @@ function GoalCard({ goal, onClick, onDelete }: { goal: GoalRow; onClick: () => v
           </span>
         )}
       </div>
-      <p className="text-sm text-slate-200 line-clamp-2 pr-8">{title}</p>
+      <p className={`text-sm line-clamp-2 pr-8 ${goal.status === "complete" || goal.status === "abandoned" ? "text-slate-400" : "text-slate-200"}`}>{title}</p>
+      {goal.outcome_note && <p className="mt-0.5 text-xs text-emerald-300/90 line-clamp-1">{goal.outcome_note}</p>}
       <button
         onClick={(e) => {
           e.stopPropagation();
@@ -559,7 +581,8 @@ function GoalChat({ goalId, onBack }: { goalId: string; onBack: () => void }) {
         </div>
       )}
 
-      {status === "active" && <GoalPlanPanel goalId={goalId} />}
+      <GoalCompletionBar goalId={goalId} status={status} onChanged={setStatus} />
+      {(status === "active" || status === "complete") && <GoalPlanPanel key={status} goalId={goalId} />}
     </div>
   );
 }
