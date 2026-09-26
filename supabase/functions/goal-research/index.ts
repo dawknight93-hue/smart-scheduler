@@ -434,13 +434,16 @@ async function handleChat(goalId: string, userMessage: string) {
 
   let goalStatus = goal.status;
   let approach = goal.approach;
-  if (extraction.approach_chosen && extraction.approach) {
-    const { error: updateError } = await supabase
-      .from("goals")
-      .update({ approach: extraction.approach, status: "approach_chosen" })
-      .eq("id", goalId);
+  // Only a goal that hasn't got its approach yet moves forward to "approach_chosen".
+  // Chatting with the coach later must never push an active (or finished) goal back
+  // a step: that used to drop confirmed goals out of the Weekly Review.
+  const beforeApproach = goal.status === "draft" || goal.status === "smart_approved";
+  if (extraction.approach_chosen && extraction.approach && (beforeApproach || goal.status === "approach_chosen")) {
+    const patch: Record<string, unknown> = { approach: extraction.approach };
+    if (beforeApproach) patch.status = "approach_chosen";
+    const { error: updateError } = await supabase.from("goals").update(patch).eq("id", goalId);
     if (updateError) throw new Error(`Failed to update goal: ${updateError.message}`);
-    goalStatus = "approach_chosen";
+    if (beforeApproach) goalStatus = "approach_chosen";
     approach = extraction.approach;
   }
 
@@ -448,6 +451,13 @@ async function handleChat(goalId: string, userMessage: string) {
   let cadenceSessions: number | null = refreshedGoal.cadence_sessions_per_week;
   let cadenceLabel: string | null = refreshedGoal.cadence_label;
   let cadenceConfirmed = refreshedGoal.cadence_confirmed;
+
+  // Heal goals the old behaviour left stuck: cadence settled but status one step back.
+  if (refreshedGoal.status === "approach_chosen" && refreshedGoal.cadence_confirmed && refreshedGoal.cadence_sessions_per_week) {
+    const { error: healError } = await supabase.from("goals").update({ status: "active" }).eq("id", goalId);
+    if (healError) throw new Error(`Failed to activate goal: ${healError.message}`);
+    goalStatus = "active";
+  }
 
   if (refreshedGoal.status === "approach_chosen" && !refreshedGoal.cadence_confirmed) {
     const cadence = await extractCadence(refreshedGoal, updatedResearchHistory);
