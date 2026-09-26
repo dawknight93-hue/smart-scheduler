@@ -8,6 +8,7 @@ import { runEngine, addDays, getWeekStart, enrouteAsBusy, WORK_START_HOUR, WORK_
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate } from "./recurrence";
 import type { ContextTag, FixedEvent, Habit, LifePillar, Task } from "./types";
 import { loadDailyItems, writeDailyPlan, type DailySession } from "./goalDaily";
+import { ownsHabit, planKey } from "./measures";
 
 /** Order goals compete for time in the Weekly Review (Flight Manual, Rev G). */
 export const GOAL_PRIORITY: LifePillar[] = ["spiritual", "family", "physical", "civ_career", "mil_career", "mental", "financial"];
@@ -45,6 +46,10 @@ export interface PlanGoal {
   count_calendar_id: string | null;
   count_keyword: string | null;
   cascade_generated_at: string | null;
+  /** Set on a planning view built from one of the goal's effort measures (see measures.ts). */
+  measure_id?: string;
+  measure_label?: string;
+  measure_effort?: "focus" | "routine" | "light" | null;
 }
 
 export const PLAN_GOAL_COLUMNS =
@@ -269,7 +274,7 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date()): G
   for (const goal of sortByPriority(goals)) {
     const target = goal.cadence_sessions_per_week ?? 0;
     const existing = week.habits.filter(
-      (h) => h.goal_id === goal.id && new Date(h.search_start) >= week.weekStart && new Date(h.search_start) < week.weekEnd
+      (h) => ownsHabit(goal, h) && new Date(h.search_start) >= week.weekStart && new Date(h.search_start) < week.weekEnd
     );
     if (goal.plan_mode === "count") {
       plans.push({ goal, target, existing: [], counted: countGoalEvents(goal, week), proposed: [], unplaced: 0 });
@@ -294,7 +299,7 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date()): G
         const earliest = new Date(Math.max(winStart.getTime(), roundUp15(now).getTime()));
         if (winEnd.getTime() - earliest.getTime() < minutes * 60000) continue;
         const candidate: Habit = {
-          id: `proposal-${goal.id}-${i}`,
+          id: `proposal-${planKey(goal)}-${i}`,
           name: goal.weekly_target ?? "Session",
           tier: 1,
           duration_min: minutes,
@@ -352,6 +357,8 @@ export async function approveGoalWeek(plan: GoalWeekPlan, sessions: ProposedSess
       context: g.session_context ?? "other",
       pillar: g.pillar,
       goal_id: g.id,
+      measure_id: g.measure_id ?? null,
+      ...(g.measure_effort ? { effort: g.measure_effort, effort_auto: false } : {}),
     }));
     const { data, error } = await supabase.from("habits").insert(rows).select("id, search_start, search_end");
     if (error) throw new Error(error.message);
@@ -360,7 +367,7 @@ export async function approveGoalWeek(plan: GoalWeekPlan, sessions: ProposedSess
     }
   }
   const scheduled = g.plan_mode === "count" ? plan.counted.length : plan.existing.length + sessions.length;
-  await recordReview(g.id, weekStart, plan.target, scheduled, scheduled >= plan.target ? "approved" : "short");
+  await recordReview(g.id, weekStart, plan.target, scheduled, scheduled >= plan.target ? "approved" : "short", undefined, g.measure_id ?? "");
 
   if (g.plan_mode !== "count") {
     try {
@@ -376,20 +383,36 @@ export async function approveGoalWeek(plan: GoalWeekPlan, sessions: ProposedSess
   }
 }
 
-export async function recordReview(goalId: string, weekStart: Date, target: number, scheduled: number, status: "approved" | "skipped" | "short", note?: string) {
+export async function recordReview(
+  goalId: string,
+  weekStart: Date,
+  target: number,
+  scheduled: number,
+  status: "approved" | "skipped" | "short",
+  note?: string,
+  measureKey = ""
+) {
   const { error } = await supabase.from("goal_week_reviews").upsert(
-    { goal_id: goalId, week_start: formatLocalDate(weekStart), target_count: target, scheduled_count: scheduled, status, note: note ?? null, reviewed_at: new Date().toISOString() },
-    { onConflict: "goal_id,week_start" }
+    { goal_id: goalId, measure_key: measureKey, week_start: formatLocalDate(weekStart), target_count: target, scheduled_count: scheduled, status, note: note ?? null, reviewed_at: new Date().toISOString() },
+    { onConflict: "goal_id,week_start,measure_key" }
   );
   if (error) throw new Error(error.message);
 }
 
 export interface WeekReviewRow {
   goal_id: string;
+  /** The effort measure reviewed ('' for reviews from before measures). */
+  measure_key?: string;
   week_start: string;
   target_count: number;
   scheduled_count: number;
   status: "approved" | "skipped" | "short";
+}
+
+/** The review row for a planning view ('' rows belong to a goal's first measure). */
+export function reviewForPlan(reviews: WeekReviewRow[], g: Pick<PlanGoal, "id" | "measure_id">, firstMeasureId?: string): WeekReviewRow | undefined {
+  const key = g.measure_id ?? "";
+  return reviews.find((r) => r.goal_id === g.id && ((r.measure_key ?? "") === key || (!r.measure_key && (!g.measure_id || g.measure_id === firstMeasureId))));
 }
 
 export async function loadReviews(weekStart: Date): Promise<WeekReviewRow[]> {
@@ -403,6 +426,8 @@ export async function loadReviews(weekStart: Date): Promise<WeekReviewRow[]> {
 
 export interface VerifyResult {
   goalId: string;
+  /** planKey of the planning view (measure id, or goal id). */
+  key: string;
   target: number;
   held: number;
   offCalendar: number;
@@ -415,16 +440,17 @@ export function verifyWeek(goals: PlanGoal[], week: WeekData, doneByGoal: Map<st
   const placedIds = new Set(r.placed.map((p) => p.id));
   return sortByPriority(goals).map((g) => {
     const target = g.cadence_sessions_per_week ?? 0;
-    const done = doneByGoal.get(g.id) ?? 0;
+    const key = planKey(g);
+    const done = doneByGoal.get(key) ?? 0;
     if (g.plan_mode === "count") {
       const n = countGoalEvents(g, week).length;
-      return { goalId: g.id, target, held: n, offCalendar: 0, done };
+      return { goalId: g.id, key, target, held: n, offCalendar: 0, done };
     }
     const mine = week.habits.filter(
-      (h) => h.goal_id === g.id && new Date(h.search_start) >= week.weekStart && new Date(h.search_start) < week.weekEnd
+      (h) => ownsHabit(g, h) && new Date(h.search_start) >= week.weekStart && new Date(h.search_start) < week.weekEnd
     );
     const held = mine.filter((h) => placedIds.has(h.id)).length;
-    return { goalId: g.id, target, held, offCalendar: mine.length - held, done };
+    return { goalId: g.id, key, target, held, offCalendar: mine.length - held, done };
   });
 }
 

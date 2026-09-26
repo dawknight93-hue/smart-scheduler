@@ -41,6 +41,7 @@ export function factCheck(summary: string, facts: string): FactCheckResult {
   const f = facts.replace(/\s+/g, " ");
   const fl = f.toLowerCase();
   const hasWeather = /airport weather:/i.test(f);
+  const hasLogged = f.includes("LOGGED NUMBERS") && /latest logged/.test(f);
   const removed: Removed[] = [];
   const kept: string[] = [];
 
@@ -68,12 +69,14 @@ export function factCheck(summary: string, facts: string): FactCheckResult {
     // Weather without an airport-weather line
     if (!hasWeather && /\b(weather|forecast|thunderstorms?|rain|snow|gusts?|visibility|wind(?!\s+down))\b/i.test(s)) reasons.push("mentions weather, but there's no airport weather today");
 
-    // Current-weight claims (the app has no weigh-ins)
+    // Current-weight claims — only allowed when he's logged numbers (then the
+    // number check above makes sure each one is in the facts).
     if (
+      !hasLogged &&
       /\d{2,3}(?:\.\d)?\s*(?:lb|lbs|pounds)\b/i.test(s) &&
       /\b(you(?:'|’)?re|you are|you(?:'|’)?ve|currently|now at|down to|you weigh|weighing|weighed in|reached|hit (?:your|the)|already (?:under|below|at)|comfortably (?:under|below)|(?:under|below) (?:the|your)|lost \d)/i.test(s)
     ) {
-      reasons.push("claims a current weight — there are no weigh-ins");
+      reasons.push("claims a current weight — nothing has been logged");
     }
 
     // Never allowed to claim sessions were completed when the facts say they weren't tracked

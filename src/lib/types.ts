@@ -46,6 +46,8 @@ export interface Habit {
   name: string;
   /** Set when the Weekly Review created this habit as a session for a goal. */
   goal_id?: string | null;
+  /** The goal's effort measure this session serves (goals can have several). */
+  measure_id?: string | null;
   tier: number;
   duration_min: number;
   search_start: string;

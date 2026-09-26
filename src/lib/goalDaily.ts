@@ -60,6 +60,7 @@ async function askForFocus(goal: PlanGoal, sessions: DailySession[]): Promise<Ma
       body: JSON.stringify({
         action: "daily",
         goal_id: goal.id,
+        measure_label: goal.measure_label,
         sessions: sessions.map((s) => ({ ref: s.habitId, day: dayText(s.start), minutes: Math.round((s.end.getTime() - s.start.getTime()) / 60000) })),
       }),
     });

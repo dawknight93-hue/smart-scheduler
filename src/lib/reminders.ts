@@ -21,6 +21,7 @@ import { loadAwarenessRules } from "./awarenessRules";
 import { dayLabel, hhmm, loadBriefItems, type BriefItem } from "./briefing";
 import { formatLocalDate } from "./recurrence";
 import { homeDate, homeWallParts } from "./schedulingEngine";
+import { loadEntries, loadMeasures, periodStart, type GoalMeasure, type MeasureEntry } from "./measures";
 
 export interface ReminderSettings {
   enabled: boolean;
@@ -87,7 +88,9 @@ export function planReminders(
   rules: Parameters<typeof dailyAwareness>[2],
   now: Date,
   s: ReminderSettings,
-  toInstant: (d: Date) => Date = (d) => d
+  toInstant: (d: Date) => Date = (d) => d,
+  /** Numbers to log on a given day ("Weight"), for the morning reminder. */
+  logsFor: (day: Date) => string[] = () => []
 ): PlannedReminder[] {
   const out: PlannedReminder[] = [];
   if (!s.enabled) return out;
@@ -108,6 +111,8 @@ export function planReminders(
         if (first && !first.flight) parts.push(`First up ${hhmm(first.start)} ${first.name.replace(/^[\s,]+/, "")}.`);
         if (!timed.length) parts.push("Nothing timed on the calendar.");
         else if (timed.length > 1) parts.push(`${timed.length} things today.`);
+        const logs = logsFor(day);
+        if (logs.length) parts.unshift(`Log today: ${logs.join(", ")}.`);
         const notes = dailyAwareness(items, when, rules).notes.slice(0, 2);
         for (const note of notes) parts.push(note.text);
         out.push({
@@ -167,6 +172,34 @@ export function planReminders(
   return out.sort((a, b) => a.send_at.localeCompare(b.send_at));
 }
 
+/**
+ * Which numbers are due to log on a day: a daily measure every day, a weekly one
+ * on its weekday, a monthly one on the 1st — unless already logged this period.
+ */
+async function logDays(now: Date): Promise<(day: Date) => string[]> {
+  const [measures, goals] = await Promise.all([loadMeasures(), supabase.from("goals").select("id, status")]);
+  const active = new Set(((goals.data as { id: string; status: string }[]) ?? []).filter((g) => g.status === "active").map((g) => g.id));
+  const outs = measures.filter((m) => m.kind === "outcome" && m.status === "active" && m.log_every && active.has(m.goal_id));
+  const entries = await loadEntries(outs.map((m) => m.id));
+  return (day: Date) => {
+    const out: string[] = [];
+    for (const m of outs) {
+      if (!isLogDay(m, day)) continue;
+      const since = periodStart(m, day);
+      const done = entries.some((e: MeasureEntry) => e.measure_id === m.id && e.logged_on >= since && e.logged_on <= formatLocalDate(day));
+      // Only today's period can already be done; later days are always "log then".
+      if (!done || day > now) out.push(m.label);
+    }
+    return out;
+  };
+}
+
+function isLogDay(m: GoalMeasure, day: Date): boolean {
+  if (m.log_every === "daily") return true;
+  if (m.log_every === "monthly") return day.getDate() === 1;
+  return day.getDay() === (m.log_weekday ?? 1);
+}
+
 let lastSync = 0;
 let inFlight: Promise<number> | null = null;
 
@@ -188,7 +221,8 @@ export function syncReminders(force = false): Promise<number> {
       ]);
       // All-day items are already calendar dates; timed ones move into the home frame.
       const items = raw.map((i) => (i.allDay ? i : { ...i, start: toHomeFrame(i.start), end: toHomeFrame(i.end) }));
-      const planned = planReminders(items, rules, homeNow, settings, fromHomeFrame);
+      const logsFor = await logDays(homeNow);
+      const planned = planReminders(items, rules, homeNow, settings, fromHomeFrame, logsFor);
       const { data: existing, error } = await supabase
         .from("reminders")
         .select("id, key")
