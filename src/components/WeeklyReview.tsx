@@ -24,7 +24,7 @@ import {
   type WeekReviewRow,
 } from "@/lib/goalPlanning";
 import { goalDayEntries, loadDailyItems, setCountedDone, setSessionDone, writeDailyPlan, type DailyItem, type DayEntry } from "@/lib/goalDaily";
-import { effortGoals, loadEntries, loadMeasures, planKey, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
+import { daysText, effortGoals, loadEntries, loadMeasures, planKey, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
 import { OutcomeTracker } from "@/components/MeasureWidgets";
 import { completeGoal } from "@/lib/goalCompletion";
 import { blockRanges, loadLifeBlocks, DEFAULT_BLOCKS } from "@/lib/lifeBlocks";
@@ -98,7 +98,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
   const needsPlan = goals.filter((g) => g.status === "active" && (g.cadence_sessions_per_week ?? 0) > 0 && !g.plan_mode);
   const firstMeasure = (goalId: string) => measures.find((m) => m.goal_id === goalId && m.kind === "effort" && m.status === "active")?.id;
   const reviewFor = (g: PlanGoal) => reviewForPlan(reviews, g, firstMeasure(g.id));
-  const allReviewed = plans.length > 0 && plans.every((p) => reviewFor(p.goal));
+  const allReviewed = plans.length > 0 && plans.every((p) => p.startsNext || reviewFor(p.goal));
   const outcomesFor = (goalId: string) => measures.filter((m) => m.goal_id === goalId && m.kind === "outcome" && m.status === "active");
   // Goals measured only by numbers you log (no weekly effort to plan).
   const outcomeOnly = goals.filter((g) => g.status === "active" && outcomesFor(g.id).length > 0 && !plans.some((p) => p.goal.id === g.id));
@@ -477,9 +477,16 @@ function GoalCard({
               })}
             </ul>
           )}
+          {plan.startsNext && (
+            <p className="text-xs text-slate-300 mt-1">
+              Added this week — it starts next week
+              {g.days?.length ? ` on ${daysText(g.days)}` : ""}. Nothing to schedule here; open next week's review to place its sessions.
+            </p>
+          )}
           {plan.unplaced > 0 && !review && (
             <p className="text-xs text-amber-300 mt-1.5">
-              {plan.unplaced} session{plan.unplaced > 1 ? "s" : ""} couldn't fit this week (preferred time, UTA days and higher-priority goals come first).
+              {plan.unplaced} session{plan.unplaced > 1 ? "s" : ""} couldn't fit this week (
+              {g.days?.length ? `only ${daysText(g.days)}, ` : ""}preferred time, UTA days and higher-priority goals come first).
             </p>
           )}
         </div>
@@ -507,7 +514,7 @@ function GoalCard({
         </div>
       )}
 
-      {!review && (
+      {!review && !plan.startsNext && (
         <div className="mt-3 flex gap-2">
           <button onClick={onApprove} disabled={busy} className="flex-1 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-500 disabled:opacity-50">
             {busy ? "Saving…" : isCount ? "Confirm" : kept.length ? `Approve & add ${kept.length} to calendar` : "Approve"}
@@ -517,7 +524,7 @@ function GoalCard({
           </button>
         </div>
       )}
-      {!review && afterApproval < plan.target && (
+      {!review && !plan.startsNext && afterApproval < plan.target && (
         <p className="mt-1.5 text-[11px] text-slate-500">Approving now records this week as short ({afterApproval}/{plan.target}).</p>
       )}
     </div>

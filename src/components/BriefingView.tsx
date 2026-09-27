@@ -412,18 +412,18 @@ function Daily({
                   <div className="flex items-center gap-2 text-sm">
                     <span className={`w-2 h-2 rounded-full shrink-0 ${c.dot}`} />
                     <span className="truncate font-medium text-slate-100">{goalShortName(first.goal)}</span>
-                    {group.length === 1 && <span className="ml-auto tabular-nums text-slate-300">{first.done}/{first.target}</span>}
+                    {group.length === 1 && <span className="ml-auto tabular-nums text-slate-300">{first.startsNext ? "next week" : `${first.done}/${first.target}`}</span>}
                   </div>
                   <ul className={`space-y-2 ${group.length > 1 ? "mt-1.5 pl-4 border-l border-slate-800 ml-[3px]" : ""}`}>
                     {group.map((g) => {
-                      const met = !!g.pace && g.target === 0;
-                      const pct = met ? 100 : g.target ? Math.min(100, Math.round((g.done / g.target) * 100)) : 0;
+                      const met = (!!g.pace || !!g.startsNext) && g.target === 0;
+                      const pct = g.startsNext ? 0 : met ? 100 : g.target ? Math.min(100, Math.round((g.done / g.target) * 100)) : 0;
                       return (
                         <li key={planKey(g.goal)}>
                           {group.length > 1 && (
                             <div className="flex items-center gap-2 text-sm">
                               <span className="truncate text-slate-300">{g.goal.measure_label ?? g.goal.weekly_target ?? "Sessions"}</span>
-                              <span className="ml-auto tabular-nums text-slate-300">{met ? (g.pace?.quota === 0 ? "next " + g.pace.period : "booked") : `${g.done}/${g.target}`}</span>
+                              <span className="ml-auto tabular-nums text-slate-300">{g.startsNext ? "next week" : met ? (g.pace?.quota === 0 ? "next " + g.pace.period : "booked") : `${g.done}/${g.target}`}</span>
                             </div>
                           )}
                           <div className="mt-1 h-1.5 rounded-full bg-slate-800">
@@ -450,7 +450,9 @@ function Daily({
                             </ul>
                           )}
                           <p className="mt-1 text-xs text-slate-400">
-                            {g.pace && g.pace.period !== "day"
+                            {g.startsNext
+                              ? "Added this week — it starts next week"
+                              : g.pace && g.pace.period !== "day"
                               ? g.pace.quota === 0
                                 ? `${g.pace.perPeriod} a ${g.pace.period} · added partway through ${g.pace.label}, so it starts next ${g.pace.period}`
                                 : `${g.pace.perPeriod} a ${g.pace.period} · ${g.pace.label}: ${g.pace.bookedBefore + g.scheduled} of ${g.pace.quota} on the calendar${g.target > 0 ? ` · ${g.target} due this week` : ""} · ${g.done} ticked done`

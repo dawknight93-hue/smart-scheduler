@@ -16,6 +16,7 @@ import {
   WEEKDAYS,
   PERIODS,
   PERIOD_WORD,
+  DAY_SHORT,
   describeEffort,
   describeOutcome,
   loadEntries,
@@ -495,6 +496,33 @@ function MeasureEditor({
                   {(d.period ?? "week") !== "week" && (d.period ?? "week") !== "day" ? " · the Weekly Review spreads them across the " + PERIOD_WORD[d.period ?? "week"] : ""}
                 </p>
               ) : null}
+              <div className="text-xs text-slate-400">
+                Days <span className="text-slate-500">(optional — leave all off for any day)</span>
+                <div className="mt-1 flex gap-1">
+                  {[1, 2, 3, 4, 5, 6, 0].map((wd) => {
+                    const on = (d.days ?? []).includes(wd);
+                    return (
+                      <button
+                        key={wd}
+                        type="button"
+                        aria-pressed={on}
+                        onClick={() => {
+                          const cur = new Set(d.days ?? []);
+                          if (cur.has(wd)) cur.delete(wd);
+                          else cur.add(wd);
+                          set({ days: cur.size ? [...cur].sort() : null });
+                        }}
+                        className={`flex-1 rounded-lg border py-1.5 text-[11px] font-semibold ${on ? "border-blue-500 bg-blue-500/15 text-blue-200" : "border-slate-700 bg-slate-800 text-slate-400"}`}
+                      >
+                        {DAY_SHORT[wd]}
+                      </button>
+                    );
+                  })}
+                </div>
+                {(d.days?.length ?? 0) > 0 && (d.period ?? "week") === "week" && (d.sessions_per_week ?? 0) > (d.days?.length ?? 0) && (
+                  <p className="mt-1 text-[11px] text-amber-300">More sessions than days — pick more days or fewer sessions.</p>
+                )}
+              </div>
               <div className="grid grid-cols-3 gap-2">
                 <label className="text-xs text-slate-400">
                   Where
