@@ -263,8 +263,8 @@ export const REPORT_BUFFER_MIN = 45;
 /** Ground time away from home shorter than this is a connection (on duty), not a layover. */
 export const CONNECTION_MAX_HOURS = 3;
 const AWAY_BLOCKED_CONTEXTS: ContextTag[] = ["home", "errand"];
-const FLIGHT_TITLE = /([A-Z]{3})\u200b?\u2192\u200b?([A-Z]{3})\s*\u2022/;
-const HOME_BASE = "MIA";
+export const FLIGHT_TITLE = /([A-Z]{3})\u200b?\u2192\u200b?([A-Z]{3})\s*\u2022/;
+export const HOME_BASE = "MIA";
 const HOUR_MS = 3600000;
 const DAY_MS = 24 * HOUR_MS;
 

@@ -8,7 +8,8 @@ import { runEngine, addDays, getWeekStart, enrouteAsBusy, WORK_START_HOUR, WORK_
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate } from "./recurrence";
 import type { ContextTag, FixedEvent, Habit, LifePillar, Task } from "./types";
 import { loadDailyItems, writeDailyPlan, type DailySession } from "./goalDaily";
-import { ownsHabit, planKey } from "./measures";
+import { ownsHabit, planKey, periodBounds, type Period } from "./measures";
+import { blockedBusy, type BlockRange } from "./lifeBlocks";
 
 /** Order goals compete for time in the Weekly Review (Flight Manual, Rev G). */
 export const GOAL_PRIORITY: LifePillar[] = ["spiritual", "family", "physical", "civ_career", "mil_career", "mental", "financial"];
@@ -50,10 +51,15 @@ export interface PlanGoal {
   measure_id?: string;
   measure_label?: string;
   measure_effort?: "focus" | "routine" | "light" | null;
+  /** What `cadence_sessions_per_week` counts per (effort measures; goals are weekly). */
+  period?: Period;
+  /** Big life blocks this goal must avoid (see lifeBlocks.ts); empty = any. */
+  blocked_blocks?: string[] | null;
+  blocks_asked?: boolean;
 }
 
 export const PLAN_GOAL_COLUMNS =
-  "id, pillar, specific, time_bound, status, approach, deadline, cadence_sessions_per_week, cadence_label, cadence_confirmed, milestones, weekly_target, plan_mode, session_minutes, session_context, preferred_time, count_calendar_id, count_keyword, cascade_generated_at";
+  "id, pillar, specific, time_bound, status, approach, deadline, cadence_sessions_per_week, cadence_label, cadence_confirmed, milestones, weekly_target, plan_mode, session_minutes, session_context, preferred_time, count_calendar_id, count_keyword, cascade_generated_at, blocked_blocks, blocks_asked";
 
 export const PREFERRED_WINDOWS: Record<PreferredTime, [number, number]> = {
   any: [WORK_START_HOUR, WORK_END_HOUR],
@@ -209,6 +215,11 @@ export interface CountedEvent {
 }
 
 export function countGoalEvents(goal: PlanGoal, week: WeekData): CountedEvent[] {
+  return countGoalEventsIn(goal, week, week.weekStart, week.weekEnd);
+}
+
+/** Events counted from the goal's calendar between two dates (week data reaches back ~60 days). */
+export function countGoalEventsIn(goal: PlanGoal, week: WeekData, from: Date, to: Date): CountedEvent[] {
   if (!goal.count_calendar_id) return [];
   const kw = goal.count_keyword?.trim().toLowerCase();
   const seen = new Set<string>();
@@ -220,7 +231,7 @@ export function countGoalEvents(goal: PlanGoal, week: WeekData): CountedEvent[] 
     // All-day events are stored at UTC midnight of their date — read that date, not the local instant.
     const allDay = !!fe?.is_all_day;
     const start = allDay ? new Date(raw.getUTCFullYear(), raw.getUTCMonth(), raw.getUTCDate()) : raw;
-    if (start < week.weekStart || start >= week.weekEnd) continue;
+    if (start < from || start >= to) continue;
     const name = fe?.name ?? m.item_name;
     if (kw && !name.toLowerCase().includes(kw)) continue;
     seen.add(m.item_id);
@@ -239,9 +250,49 @@ export interface ProposedSession {
   end: Date;
 }
 
+/** How a monthly/quarterly/yearly (or daily) count turns into this week's target. */
+export interface PeriodPace {
+  period: Period;
+  /** Count per period. */
+  quota: number;
+  /** Sessions already on the calendar in this period before this week. */
+  bookedBefore: number;
+  label: string; // "October", "Q4 2026", "2026"
+}
+
+const PERIOD_LABEL = (period: Period, d: Date) =>
+  period === "month" ? d.toLocaleDateString("en-US", { month: "long" }) : period === "quarter" ? `Q${Math.floor(d.getMonth() / 3) + 1} ${d.getFullYear()}` : String(d.getFullYear());
+
+/**
+ * This week's target for a planning view. Weekly counts are the count; a daily
+ * count is 7× it. Monthly, quarterly and yearly counts are paced across the
+ * period: by the end of this week, the share of the period gone by (rounded up)
+ * should be booked — so "1 a month" lands in the first week that has room, and
+ * "3 a quarter" spreads out instead of piling into week one. The period is the
+ * one holding most of this week (its Thursday).
+ */
+export function weeklyTarget(goal: PlanGoal, week: WeekData): { target: number; pace?: PeriodPace } {
+  const n = goal.cadence_sessions_per_week ?? 0;
+  const period = goal.period ?? "week";
+  if (period === "week") return { target: n };
+  if (period === "day") return { target: n * 7 };
+  const mid = addDays(week.weekStart, 3);
+  const [ps, pe] = periodBounds(period, mid);
+  const weekEnd = week.weekEnd < pe ? week.weekEnd : pe;
+  const frac = Math.min(1, Math.max(0, (weekEnd.getTime() - ps.getTime()) / (pe.getTime() - ps.getTime())));
+  const dueByWeekEnd = Math.min(n, Math.ceil(n * frac - 1e-9));
+  const bookedBefore =
+    goal.plan_mode === "count"
+      ? countGoalEventsIn(goal, week, ps, week.weekStart).length
+      : week.habits.filter((h) => ownsHabit(goal, h) && new Date(h.search_start) >= ps && new Date(h.search_start) < week.weekStart).length;
+  return { target: Math.max(0, dueByWeekEnd - bookedBefore), pace: { period, quota: n, bookedBefore, label: PERIOD_LABEL(period, mid) } };
+}
+
 export interface GoalWeekPlan {
   goal: PlanGoal;
   target: number;
+  /** Set when the goal's count is per day/month/quarter/year. */
+  pace?: PeriodPace;
   /** Sessions for this goal already on the calendar this week (schedule mode). */
   existing: Habit[];
   /** Events counted from the source calendar (count mode). */
@@ -262,7 +313,7 @@ function asBusy(id: string, name: string, start: Date, end: Date): FixedEvent {
  * across the week (one per day where possible) inside the goal's preferred
  * time of day, and never in the past.
  */
-export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date()): GoalWeekPlan[] {
+export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), blocks: BlockRange[] = []): GoalWeekPlan[] {
   // Everything the scheduler already places this week counts as busy.
   const base = runEngine(week.weekStart, week.busy, week.habits, week.tasks);
   const busy: FixedEvent[] = [
@@ -272,14 +323,16 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date()): G
 
   const plans: GoalWeekPlan[] = [];
   for (const goal of sortByPriority(goals)) {
-    const target = goal.cadence_sessions_per_week ?? 0;
+    const { target, pace } = weeklyTarget(goal, week);
     const existing = week.habits.filter(
       (h) => ownsHabit(goal, h) && new Date(h.search_start) >= week.weekStart && new Date(h.search_start) < week.weekEnd
     );
     if (goal.plan_mode === "count") {
-      plans.push({ goal, target, existing: [], counted: countGoalEvents(goal, week), proposed: [], unplaced: 0 });
+      plans.push({ goal, target, pace, existing: [], counted: countGoalEvents(goal, week), proposed: [], unplaced: 0 });
       continue;
     }
+    // Big life blocks this goal stays out of count as busy for it alone.
+    const avoid = blockedBusy(blocks, goal.blocked_blocks);
     const need = Math.max(0, target - existing.length);
     const minutes = goal.session_minutes ?? 30;
     const [fromH, toH] = PREFERRED_WINDOWS[goal.preferred_time ?? "any"];
@@ -308,7 +361,7 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date()): G
           context: goal.session_context ?? "other",
           pillar: goal.pillar,
         };
-        const r = runEngine(week.weekStart, busy, [candidate], []);
+        const r = runEngine(week.weekStart, avoid.length ? [...busy, ...avoid] : busy, [candidate], []);
         const p = r.placed.find((x) => x.id === candidate.id);
         if (p) placed = { key: candidate.id, goalId: goal.id, start: p.start, end: p.end };
       }
@@ -320,7 +373,7 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date()): G
         unplaced++;
       }
     }
-    plans.push({ goal, target, existing, counted: [], proposed, unplaced });
+    plans.push({ goal, target, pace, existing, counted: [], proposed, unplaced });
   }
   return plans;
 }
@@ -439,7 +492,7 @@ export function verifyWeek(goals: PlanGoal[], week: WeekData, doneByGoal: Map<st
   const r = runEngine(week.weekStart, week.busy, week.habits, week.tasks);
   const placedIds = new Set(r.placed.map((p) => p.id));
   return sortByPriority(goals).map((g) => {
-    const target = g.cadence_sessions_per_week ?? 0;
+    const { target } = weeklyTarget(g, week);
     const key = planKey(g);
     const done = doneByGoal.get(key) ?? 0;
     if (g.plan_mode === "count") {

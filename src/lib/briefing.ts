@@ -15,6 +15,7 @@ import {
   reviewForPlan,
   sortByPriority,
   verifyWeek,
+  weeklyTarget,
   type PlanGoal,
   type WeekData,
   type WeekReviewRow,
@@ -363,7 +364,7 @@ function goalProgress(goals: PlanGoal[], week: WeekData | undefined, now: Date, 
     const next = (g.milestones ?? []).filter((m) => !m.done && new Date(`${m.due}T23:59:00`) >= today).sort((a, b) => a.due.localeCompare(b.due))[0];
     return {
       goal: g,
-      target: g.cadence_sessions_per_week ?? 0,
+      target: weeklyTarget(g, week).target,
       done: entries.filter((e) => e.done).length,
       past: entries.filter(isPast).length,
       scheduled: entries.length,

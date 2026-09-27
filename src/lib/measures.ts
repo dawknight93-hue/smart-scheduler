@@ -22,6 +22,10 @@ export type MeasureKind = "effort" | "outcome";
 export type MeasureStatus = "active" | "suggested" | "archived";
 export type Direction = "down" | "up";
 export type LogEvery = "daily" | "weekly" | "monthly";
+/** What an effort measure's count is per. `sessions_per_week` holds the count. */
+export type Period = "day" | "week" | "month" | "quarter" | "year";
+export const PERIODS: Period[] = ["day", "week", "month", "quarter", "year"];
+export const PERIOD_WORD: Record<Period, string> = { day: "day", week: "week", month: "month", quarter: "quarter", year: "year" };
 
 export interface Checkpoint {
   due: string; // YYYY-MM-DD
@@ -38,7 +42,9 @@ export interface GoalMeasure {
   why: string | null;
   // effort
   plan_mode: PlanMode | null;
+  /** The count per `period` (named for when every effort was weekly). */
   sessions_per_week: number | null;
+  period: Period;
   session_minutes: number | null;
   hours_per_week: number | null;
   context: ContextTag | null;
@@ -83,6 +89,7 @@ function normalize(m: GoalMeasure): GoalMeasure {
     target: num(m.target),
     log_weekday: num(m.log_weekday),
     preferred_time: m.preferred_time ?? "any",
+    period: PERIODS.includes(m.period) ? m.period : "week",
     checkpoints: (Array.isArray(m.checkpoints) ? m.checkpoints : [])
       .map((c) => ({ due: String(c.due).slice(0, 10), target: Number(c.target) }))
       .filter((c) => /^\d{4}-\d{2}-\d{2}$/.test(c.due) && Number.isFinite(c.target))
@@ -220,6 +227,7 @@ export function effortGoals(goals: PlanGoal[], measures: GoalMeasure[]): PlanGoa
         measure_id: m.id,
         measure_label: m.label,
         measure_effort: m.effort,
+        period: m.period ?? "week",
         plan_mode: m.plan_mode,
         cadence_sessions_per_week: m.sessions_per_week,
         session_minutes: m.session_minutes,
@@ -252,10 +260,11 @@ export function splitHours(hours: number, sessions?: number | null): { sessions:
 
 export function describeEffort(m: GoalMeasure, calendarName?: string): string {
   const n = m.sessions_per_week ?? 0;
-  if (m.plan_mode === "count") return `${n}× a week · counted from ${calendarName ?? "a calendar"}${m.count_keyword ? ` (titles with “${m.count_keyword}”)` : ""}`;
+  const per = PERIOD_WORD[m.period ?? "week"];
+  if (m.plan_mode === "count") return `${n}× a ${per} · counted from ${calendarName ?? "a calendar"}${m.count_keyword ? ` (titles with “${m.count_keyword}”)` : ""}`;
   const mins = m.session_minutes ?? 30;
   const hours = (n * mins) / 60;
-  return `${n} × ${mins} min a week (${Number.isInteger(hours) ? hours : hours.toFixed(1)} h) · scheduled by the app`;
+  return `${n} × ${mins} min a ${per} (${Number.isInteger(hours) ? hours : hours.toFixed(1)} h) · scheduled by the app`;
 }
 
 export function describeOutcome(m: GoalMeasure): string {
@@ -374,4 +383,161 @@ export function outcomeFact(m: GoalMeasure, s: OutcomeStatus, day: (iso: string)
   if (lastPast) parts.push(`checkpoint ${cmp} ${fmt(lastPast.target)}${unit} on ${day(lastPast.due)} was ${lastPast.met === null ? "not logged" : lastPast.met ? "met" : "missed"}`);
   if (s.due) parts.push(`an entry is due (since ${day(s.dueSince!)})`);
   return parts.join("; ");
+}
+
+// ---------------------------------------------------------------------------
+// Pace ladder: what a number needs to do this week/month/quarter/year
+
+export type PaceLevel = "week" | "month" | "quarter" | "year";
+
+/** [start, end) of the calendar week (Mon), month, quarter or year containing d. */
+export function periodBounds(level: PaceLevel | Period, d: Date): [Date, Date] {
+  const y = d.getFullYear();
+  const mo = d.getMonth();
+  if (level === "day") {
+    const s = new Date(y, mo, d.getDate());
+    return [s, new Date(y, mo, d.getDate() + 1)];
+  }
+  if (level === "week") {
+    const back = (d.getDay() + 6) % 7;
+    const s = new Date(y, mo, d.getDate() - back);
+    return [s, new Date(s.getFullYear(), s.getMonth(), s.getDate() + 7)];
+  }
+  if (level === "month") return [new Date(y, mo, 1), new Date(y, mo + 1, 1)];
+  if (level === "quarter") {
+    const q = Math.floor(mo / 3) * 3;
+    return [new Date(y, q, 1), new Date(y, q + 3, 1)];
+  }
+  return [new Date(y, 0, 1), new Date(y + 1, 0, 1)];
+}
+
+export interface PaceRow {
+  level: PaceLevel | "goal";
+  label: string;
+  /** Period end (or the deadline, if sooner). */
+  end: Date;
+  /** Where the number should be by `end` to stay on pace. */
+  targetAtEnd: number;
+  /** The number at the start of the period (last entry before it, or the start value). */
+  startValue: number;
+  /** Change this period needs. */
+  needed: number;
+  /** Change so far this period (null = nothing logged yet). */
+  soFar: number | null;
+  onTrack: boolean | null;
+  /** Change needed per period of this length from here to the deadline, at an even pace. */
+  rate: number | null;
+  /** Short name of the current period ("Oct", "Q4", "2026"). */
+  short: string;
+}
+
+const PERIOD_DAYS: Record<PaceLevel, number> = { week: 7, month: 30.44, quarter: 91.31, year: 365.25 };
+
+/**
+ * Splits the road from the start value to the target into the periods that
+ * suit how far away the deadline is — weeks when it's close, months and
+ * quarters inside two years, quarters and years beyond — so "save 6k by next
+ * year" reads as "this month +$400, this quarter +$1,200, by the deadline 20k".
+ * Checkpoints, when set, bend the line (pace follows them).
+ */
+export function paceLadder(m: GoalMeasure, allEntries: MeasureEntry[], deadline: string | null | undefined, now = new Date()): PaceRow[] {
+  if (m.target === null) return [];
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const entries = allEntries
+    .filter((e) => e.measure_id === m.id && e.logged_on <= formatLocalDate(today))
+    .sort((a, b) => a.logged_on.localeCompare(b.logged_on) || a.created_at.localeCompare(b.created_at));
+  const startValue = m.baseline ?? entries[0]?.value ?? null;
+  if (startValue === null) return [];
+  const startDate = parseDay((entries[0]?.logged_on && entries[0].logged_on < m.created_at.slice(0, 10) ? entries[0].logged_on : m.created_at).slice(0, 10));
+  const endDate = deadline
+    ? (() => {
+        const d = new Date(deadline);
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+      })()
+    : m.checkpoints.length
+      ? parseDay(m.checkpoints[m.checkpoints.length - 1].due)
+      : null;
+  if (!endDate || endDate <= today) return [];
+
+  // The line to follow: start → checkpoints → target on the deadline.
+  const pts: { t: number; v: number }[] = [{ t: startDate.getTime(), v: startValue }];
+  for (const c of m.checkpoints) {
+    const t = parseDay(c.due).getTime();
+    if (t > startDate.getTime() && t < endDate.getTime()) pts.push({ t, v: c.target });
+  }
+  pts.push({ t: endDate.getTime(), v: m.target });
+  const at = (d: Date) => {
+    const t = d.getTime();
+    if (t <= pts[0].t) return pts[0].v;
+    for (let i = 1; i < pts.length; i++) {
+      if (t <= pts[i].t) {
+        const a = pts[i - 1];
+        const b = pts[i];
+        return a.v + ((b.v - a.v) * (t - a.t)) / Math.max(1, b.t - a.t);
+      }
+    }
+    return pts[pts.length - 1].v;
+  };
+
+  const latest = entries[entries.length - 1] ?? null;
+  const daysLeft = (endDate.getTime() - today.getTime()) / DAY;
+  const remaining = m.target - (latest?.value ?? startValue);
+  const levels: PaceLevel[] = daysLeft <= 56 ? ["week"] : daysLeft <= 183 ? ["week", "month"] : daysLeft <= 730 ? ["month", "quarter", "year"] : ["quarter", "year"];
+  const rows: PaceRow[] = [];
+  const onPaceNow = at(today);
+  for (const level of levels) {
+    const [ps, pe] = periodBounds(level, today);
+    const end = pe > endDate ? endDate : new Date(pe.getTime() - 1);
+    const before = [...entries].reverse().find((e) => parseDay(e.logged_on) < ps);
+    const sv = before ? before.value : startValue;
+    const targetAtEnd = at(end);
+    const label =
+      level === "week"
+        ? "This week"
+        : level === "month"
+          ? ps.toLocaleDateString("en-US", { month: "long" })
+          : level === "quarter"
+            ? `Q${Math.floor(ps.getMonth() / 3) + 1} ${ps.getFullYear()}`
+            : String(ps.getFullYear());
+    const short =
+      level === "week" ? "This week" : level === "month" ? ps.toLocaleDateString("en-US", { month: "short" }) : level === "quarter" ? `Q${Math.floor(ps.getMonth() / 3) + 1}` : String(ps.getFullYear());
+    rows.push({
+      level,
+      short,
+      rate: remaining * Math.min(1, PERIOD_DAYS[level] / Math.max(1, daysLeft)),
+      label: pe > endDate ? `${label} (to deadline)` : label,
+      end,
+      targetAtEnd,
+      startValue: sv,
+      needed: targetAtEnd - sv,
+      soFar: latest ? latest.value - sv : null,
+      onTrack: latest ? better(m, latest.value, onPaceNow) : null,
+    });
+  }
+  const from = latest?.value ?? startValue;
+  rows.push({
+    level: "goal",
+    short: "Goal",
+    rate: null,
+    label: `By ${endDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`,
+    end: endDate,
+    targetAtEnd: m.target,
+    startValue: startValue,
+    needed: m.target - from,
+    soFar: latest ? latest.value - startValue : null,
+    onTrack: latest ? better(m, latest.value, onPaceNow) : null,
+  });
+  return rows;
+}
+
+/** A value with its unit — money units read "$14,500", others "207.4 lb". */
+export function withUnit(v: number, unit: string | null | undefined): string {
+  const u = (unit ?? "").trim();
+  const big = Math.abs(v) >= 1000;
+  const num = big ? Math.round(v).toLocaleString("en-US") : fmt(Math.round(v * 10) / 10);
+  if (/^(\$|usd|dollars?)$/i.test(u)) {
+    const a = Math.abs(v);
+    return `${v < 0 ? "-" : ""}$${a >= 100 ? Math.round(a).toLocaleString("en-US") : a.toFixed(a % 1 ? 2 : 0)}`;
+  }
+  return u ? `${num} ${u}` : num;
 }
