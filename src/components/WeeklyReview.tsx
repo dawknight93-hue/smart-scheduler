@@ -412,7 +412,9 @@ function GoalCard({
           <p className="text-xs text-slate-400 mt-0.5">
             {plan.pace
               ? `${plan.pace.perPeriod}× ${g.weekly_target ?? "session"} a ${plan.pace.period === "day" ? "day" : plan.pace.period}`
-              : `Target: ${plan.target}× ${g.weekly_target ?? "session"}`}
+              : plan.startsNext
+                ? `${g.cadence_sessions_per_week ?? 0}× ${g.weekly_target ?? "session"} a ${g.period === "day" ? "day" : "week"}${g.days?.length ? ` on ${daysText(g.days)}` : ""}`
+                : `Target: ${plan.target}× ${g.weekly_target ?? "session"}${g.days?.length ? ` on ${daysText(g.days)}` : ""}`}
             {!isCount && g.session_minutes ? ` · ${g.session_minutes} min` : ""}
             {isCount ? " · counted from your calendar" : " · scheduled by the app"}
           </p>
