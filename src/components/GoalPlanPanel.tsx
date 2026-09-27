@@ -14,6 +14,8 @@ import {
 } from "@/lib/goalPlanning";
 import {
   WEEKDAYS,
+  PERIODS,
+  PERIOD_WORD,
   describeEffort,
   describeOutcome,
   loadEntries,
@@ -28,6 +30,7 @@ import {
   type NewMeasure,
 } from "@/lib/measures";
 import { OutcomeTracker } from "@/components/MeasureWidgets";
+import { GoalBlocksPanel } from "@/components/BigBlocks";
 import { PlannerFeedback } from "@/components/PlannerFeedback";
 import { BriefingMemoryEditor } from "@/components/BriefingMemoryEditor";
 
@@ -68,6 +71,7 @@ function blankMeasure(goalId: string, kind: "effort" | "outcome", position: numb
     why: null,
     plan_mode: kind === "effort" ? "schedule" : null,
     sessions_per_week: kind === "effort" ? 3 : null,
+    period: "week",
     session_minutes: kind === "effort" ? 60 : null,
     hours_per_week: null,
     context: kind === "effort" ? "desk" : null,
@@ -213,6 +217,15 @@ export function GoalPlanPanel({ goalId }: { goalId: string }) {
       </div>
       {memoryOpen && <BriefingMemoryEditor scope="planner" onClose={() => setMemoryOpen(false)} />}
 
+      <div className="mb-3">
+        <GoalBlocksPanel
+          goalId={goalId}
+          blocked={goal.blocked_blocks ?? []}
+          asked={!!goal.blocks_asked}
+          onSaved={(list) => setGoal({ ...goal, blocked_blocks: list, blocks_asked: true })}
+        />
+      </div>
+
       {hasPlan && (
         <>
           {goal.deadline && (
@@ -324,7 +337,7 @@ export function GoalPlanPanel({ goalId }: { goalId: string }) {
               </div>
             ) : (
               <div key={m.id} className="relative">
-                <OutcomeTracker measure={m} entries={entries} onChange={setEntries} showHistory />
+                <OutcomeTracker measure={m} entries={entries} onChange={setEntries} showHistory deadline={goal.deadline} />
                 <div className="absolute top-2 right-2">
                   <MeasureActions onEdit={() => setEditing(m)} onArchive={() => setStatus(m, "archived")} small />
                 </div>
@@ -387,7 +400,7 @@ function MeasureEditor({
   async function save() {
     setError(null);
     if (!d.label?.trim()) return setError("Give it a name.");
-    if (isEffort && !(d.sessions_per_week && d.sessions_per_week > 0)) return setError("How many times a week?");
+    if (isEffort && !(d.sessions_per_week && d.sessions_per_week > 0)) return setError(`How many times a ${PERIOD_WORD[d.period ?? "week"]}?`);
     if (isEffort && d.plan_mode === "count" && !d.count_calendar_id) return setError("Pick the calendar to count from.");
     if (!isEffort && d.target === null && !(d.checkpoints ?? []).length) return setError("Set a target or at least one checkpoint.");
     setSaving(true);
@@ -405,7 +418,7 @@ function MeasureEditor({
 
   return (
     <div className="mb-3 rounded-lg border border-blue-500/40 bg-slate-950/60 p-3 space-y-3">
-      <div className="text-xs font-semibold text-slate-300">{isEffort ? "Effort — something you do each week" : "Number to log — shows whether it's working"}</div>
+      <div className="text-xs font-semibold text-slate-300">{isEffort ? "Effort — something you do on a rhythm" : "Number to log — shows whether it's working"}</div>
       <label className="block text-xs text-slate-400">
         Name
         <input className={`${field} mt-1`} value={d.label ?? ""} placeholder={isEffort ? "e.g. Task block, Email check, Run" : "e.g. Weight, Open tasks, Inbox count"} onChange={(e) => set({ label: e.target.value })} />
@@ -425,20 +438,43 @@ function MeasureEditor({
               </button>
             ))}
           </div>
+          <label className="block text-xs text-slate-400">
+            How often
+            <div className="mt-1 grid grid-cols-5 gap-1">
+              {PERIODS.map((p) => (
+                <button
+                  key={p}
+                  onClick={() => {
+                    setHours("");
+                    set({ period: p, hours_per_week: p === "week" ? d.hours_per_week ?? null : null });
+                  }}
+                  className={`rounded-lg border px-1 py-1.5 text-[11px] font-medium ${
+                    (d.period ?? "week") === p ? "border-blue-500 bg-blue-500/10 text-blue-200" : "border-slate-700 bg-slate-800 text-slate-300"
+                  }`}
+                >
+                  per {PERIOD_WORD[p]}
+                </button>
+              ))}
+            </div>
+          </label>
           {d.plan_mode === "schedule" ? (
             <>
               <div className="grid grid-cols-3 gap-2">
+                {(d.period ?? "week") === "week" ? (
+                  <label className="text-xs text-slate-400">
+                    Hours / week
+                    <input className={`${field} mt-1`} type="number" min={0} step={0.5} value={hours} placeholder="e.g. 4" onChange={(e) => applyHours(e.target.value)} />
+                  </label>
+                ) : (
+                  <div />
+                )}
                 <label className="text-xs text-slate-400">
-                  Hours / week
-                  <input className={`${field} mt-1`} type="number" min={0} step={0.5} value={hours} placeholder="e.g. 4" onChange={(e) => applyHours(e.target.value)} />
-                </label>
-                <label className="text-xs text-slate-400">
-                  Sessions / week
+                  Sessions / {PERIOD_WORD[d.period ?? "week"]}
                   <input
                     className={`${field} mt-1`}
                     type="number"
                     min={1}
-                    max={14}
+                    max={(d.period ?? "week") === "year" ? 365 : (d.period ?? "week") === "quarter" ? 90 : 31}
                     value={d.sessions_per_week ?? ""}
                     onChange={(e) => {
                       const n = numOrNull(e.target.value);
@@ -455,7 +491,8 @@ function MeasureEditor({
               </div>
               {d.sessions_per_week && d.session_minutes ? (
                 <p className="text-[11px] text-slate-500">
-                  {d.sessions_per_week} × {d.session_minutes} min = {Math.round(((d.sessions_per_week * d.session_minutes) / 60) * 10) / 10} h a week
+                  {d.sessions_per_week} × {d.session_minutes} min = {Math.round(((d.sessions_per_week * d.session_minutes) / 60) * 10) / 10} h a {PERIOD_WORD[d.period ?? "week"]}
+                  {(d.period ?? "week") !== "week" && (d.period ?? "week") !== "day" ? " · the Weekly Review spreads them across the " + PERIOD_WORD[d.period ?? "week"] : ""}
                 </p>
               ) : null}
               <div className="grid grid-cols-3 gap-2">
@@ -489,8 +526,8 @@ function MeasureEditor({
           ) : (
             <div className="grid grid-cols-3 gap-2">
               <label className="text-xs text-slate-400">
-                Times / week
-                <input className={`${field} mt-1`} type="number" min={1} max={14} value={d.sessions_per_week ?? ""} onChange={(e) => set({ sessions_per_week: numOrNull(e.target.value) })} />
+                Times / {PERIOD_WORD[d.period ?? "week"]}
+                <input className={`${field} mt-1`} type="number" min={1} value={d.sessions_per_week ?? ""} onChange={(e) => set({ sessions_per_week: numOrNull(e.target.value) })} />
               </label>
               <label className="text-xs text-slate-400">
                 Calendar

@@ -27,6 +27,11 @@ import { goalDayEntries, loadDailyItems, setCountedDone, setSessionDone, writeDa
 import { effortGoals, loadEntries, loadMeasures, planKey, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
 import { OutcomeTracker } from "@/components/MeasureWidgets";
 import { completeGoal } from "@/lib/goalCompletion";
+import { blockRanges, loadLifeBlocks, DEFAULT_BLOCKS } from "@/lib/lifeBlocks";
+
+// Names of the big life blocks, for "Stays out of: …" (filled on load).
+let blockNames: Record<string, string> = Object.fromEntries(DEFAULT_BLOCKS.map((b) => [b.key, b.label]));
+const blockLabel = (key: string) => blockNames[key] ?? key.replace(/_/g, " ");
 
 const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 const dayLabel = (d: Date) => d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
@@ -63,11 +68,12 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
         if (!sErr) for (const g of stuck) g.status = "active";
       }
       setGoals(all);
-      const [week, ms] = await Promise.all([loadWeekData(weekStart), loadMeasures()]);
+      const [week, ms, blocks] = await Promise.all([loadWeekData(weekStart), loadMeasures(), loadLifeBlocks()]);
+      blockNames = Object.fromEntries(blocks.map((b) => [b.key, b.label]));
       setMeasures(ms);
       setEntries(await loadEntries(ms.filter((m) => m.kind === "outcome" && m.status === "active").map((m) => m.id)));
       // One card per effort measure (goals without measures keep their single weekly target).
-      setPlans(planWeek(effortGoals(all, ms), week));
+      setPlans(planWeek(effortGoals(all, ms), week, new Date(), blockRanges(blocks, week.busy, week.weekStart, week.weekEnd)));
       setReviews(await loadReviews(weekStart));
       setItems(await loadDailyItems(weekStart, addDays(weekStart, 7)));
       setRemoved(new Set());
@@ -301,7 +307,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
               </div>
               <div className="space-y-2">
                 {outcomesFor(g.id).map((m) => (
-                  <OutcomeTracker key={m.id} measure={m} entries={entries} onChange={setEntries} />
+                  <OutcomeTracker key={m.id} measure={m} entries={entries} onChange={setEntries} deadline={g.deadline} />
                 ))}
               </div>
             </div>
@@ -404,10 +410,19 @@ function GoalCard({
           <p className="text-sm font-medium text-slate-100">{goalShortName(g)}</p>
           {g.measure_label && <p className="text-xs font-medium text-blue-300 mt-0.5">{g.measure_label}</p>}
           <p className="text-xs text-slate-400 mt-0.5">
-            Target: {plan.target}× {g.weekly_target ?? "session"}
+            {plan.pace
+              ? `${plan.pace.quota}× ${g.weekly_target ?? "session"} a ${plan.pace.period === "day" ? "day" : plan.pace.period}`
+              : `Target: ${plan.target}× ${g.weekly_target ?? "session"}`}
             {!isCount && g.session_minutes ? ` · ${g.session_minutes} min` : ""}
             {isCount ? " · counted from your calendar" : " · scheduled by the app"}
           </p>
+          {plan.pace && plan.pace.period !== "day" && (
+            <p className="text-xs text-slate-300 mt-0.5">
+              {plan.pace.label}: {plan.pace.bookedBefore} of {plan.pace.quota} booked before this week ·{" "}
+              {plan.target > 0 ? `${plan.target} due this week` : "nothing more due this week"}
+            </p>
+          )}
+          {!!g.blocked_blocks?.length && <p className="text-[11px] text-slate-500 mt-0.5">Stays out of: {g.blocked_blocks.map(blockLabel).join(", ")}</p>}
         </div>
         {review && (
           <span
@@ -473,7 +488,7 @@ function GoalCard({
         <div className="mt-3 border-t border-slate-800 pt-2 space-y-2">
           <p className="text-[11px] uppercase tracking-wide text-slate-500">Numbers to log</p>
           {outcomes.map((m) => (
-            <OutcomeTracker key={m.id} measure={m} entries={entries2} onChange={onEntries} />
+            <OutcomeTracker key={m.id} measure={m} entries={entries2} onChange={onEntries} deadline={g.deadline} />
           ))}
         </div>
       )}

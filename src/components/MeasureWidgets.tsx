@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2, Plus, TrendingDown, TrendingUp, Trash2 } from "lucide-react";
 import { formatLocalDate } from "@/lib/recurrence";
-import { addEntry, deleteEntry, fmt, outcomeStatus, WEEKDAYS, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
+import { addEntry, deleteEntry, fmt, outcomeStatus, paceLadder, withUnit, WEEKDAYS, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
 import { completeGoal } from "@/lib/goalCompletion";
 
 const shortDate = (s: string) => {
@@ -39,13 +39,17 @@ export function OutcomeTracker({
   entries,
   onChange,
   showHistory = false,
+  deadline,
 }: {
   measure: GoalMeasure;
   entries: MeasureEntry[];
   onChange: (entries: MeasureEntry[]) => void;
   showHistory?: boolean;
+  /** The goal's deadline, for the week/month/quarter/year pace. */
+  deadline?: string | null;
 }) {
   const s = outcomeStatus(measure, entries);
+  const ladder = paceLadder(measure, entries, deadline);
   const [value, setValue] = useState("");
   const [date, setDate] = useState(() => formatLocalDate(new Date()));
   const [busy, setBusy] = useState(false);
@@ -140,6 +144,45 @@ export function OutcomeTracker({
         </div>
         <Sparkline m={measure} entries={mine} />
       </div>
+
+      {ladder.length > 0 && (
+        <div className="mt-2 grid gap-1" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(118px, 1fr))" }}>
+          {ladder.map((r) => {
+            const sign = (v: number) => (v > 0 ? "+" : v < 0 ? "−" : "±");
+            const amt = (v: number) => `${sign(v)}${withUnit(Math.abs(v), measure.unit)}`;
+            const ahead = r.soFar !== null && (measure.direction === "up" ? r.soFar >= r.needed : r.soFar <= r.needed);
+            const per = r.level === "week" ? "week" : r.level === "month" ? "month" : r.level === "quarter" ? "quarter" : "";
+            const title = r.level === "goal" ? r.label : r.level === "year" ? `By end of ${r.short}` : `Per ${per}`;
+            return (
+              <div key={r.level} className={`rounded-md px-2 py-1.5 min-w-0 ${r.level === "goal" ? "bg-slate-900 border border-slate-700" : "bg-slate-900/60"}`}>
+                <div className="text-[10px] uppercase tracking-wide text-slate-500 truncate">{title}</div>
+                {r.level === "goal" ? (
+                  <>
+                    <div className="text-xs font-semibold text-slate-100 tabular-nums truncate">{withUnit(r.targetAtEnd, measure.unit)}</div>
+                    <div className="text-[10.5px] text-slate-400 tabular-nums truncate">
+                      {(measure.direction === "up" ? r.needed > 0 : r.needed < 0) ? `${amt(r.needed)} to go` : "reached"}
+                    </div>
+                  </>
+                ) : r.level === "year" ? (
+                  <>
+                    <div className="text-xs font-semibold text-slate-100 tabular-nums truncate">{withUnit(r.targetAtEnd, measure.unit)}</div>
+                    <div className={`text-[10.5px] tabular-nums truncate ${ahead ? "text-emerald-300" : "text-slate-400"}`}>
+                      {r.soFar === null ? `${amt(r.needed)} this year` : `${amt(r.soFar)} of ${amt(r.needed)}`}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="text-xs font-semibold text-slate-100 tabular-nums truncate">{r.rate !== null ? amt(r.rate) : "—"}</div>
+                    <div className={`text-[10.5px] tabular-nums truncate ${r.soFar === null ? "text-slate-500" : ahead ? "text-emerald-300" : "text-slate-400"}`}>
+                      {r.short}: {r.soFar === null ? `aim ${withUnit(r.targetAtEnd, measure.unit)}` : `${amt(r.soFar)} so far`}
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <input
