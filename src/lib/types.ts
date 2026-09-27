@@ -58,6 +58,8 @@ export interface Habit {
   effort?: "focus" | "routine" | "light" | null;
   /** True when the effort was guessed, false when you set it. */
   effort_auto?: boolean;
+  /** You confirmed this one may sit on a UTA day (the usual rule is skipped). */
+  uta_override?: boolean;
   recurrence_enabled?: boolean;
   recurrence_frequency?: "daily" | "weekly" | "monthly" | null;
   recurrence_interval?: number | null;
@@ -74,6 +76,8 @@ export interface Habit {
 export interface Task {
   id: string;
   name: string;
+  /** You confirmed this one may sit on a UTA day (the usual rule is skipped). */
+  uta_override?: boolean;
   tier: number;
   duration_min: number;
   search_start: string;
@@ -168,6 +172,8 @@ export interface PlacedItem {
   occurrenceDate?: string;
   occurrenceCompleted?: boolean;
   recurrenceSummary?: string;
+  /** Allowed on UTA days because you overrode the rule for it. */
+  utaOverride?: boolean;
 }
 
 /** Why the engine couldn't place an item in the week being scheduled. */

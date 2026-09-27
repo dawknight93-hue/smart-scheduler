@@ -382,6 +382,7 @@ interface BatchedTask {
   pillar: LifePillar | null;
   effort: Effort;
   effortAuto: boolean;
+  utaOk?: boolean;
 }
 
 function taskEffort(t: Task): { effort: Effort; auto: boolean } {
@@ -406,6 +407,7 @@ function batchShortTasks(taskList: Task[]): BatchedTask[] {
       memberId: t.id,
       effort: taskEffort(t).effort,
       effortAuto: taskEffort(t).auto,
+      utaOk: !!t.uta_override,
     }));
 
   const byContext = new Map<ContextTag, Task[]>();
@@ -442,6 +444,7 @@ function batchShortTasks(taskList: Task[]): BatchedTask[] {
         memberIds: group.map((g) => g.id),
         effort: maxEffort(group.map((g) => taskEffort(g).effort)),
         effortAuto: group.length > 1 || taskEffort(group[0]).auto,
+        utaOk: group.every((g) => !!g.uta_override),
       });
       i = j;
     }
@@ -466,6 +469,8 @@ interface Placeable {
   pillar: LifePillar | null;
   effort: Effort;
   effortAuto: boolean;
+  /** You overrode the UTA rule for this one. */
+  utaOk?: boolean;
 }
 
 export function runEngine(
@@ -519,6 +524,7 @@ export function runEngine(
       room: 0,
       kind: "Habit",
       isBatch: false,
+      utaOk: !!h.uta_override,
       effort: h.effort ?? guessEffort({ name: h.name, context: h.context, durationMin: h.duration_min, pillar: h.pillar }).effort,
       effortAuto: !h.effort || h.effort_auto !== false,
     });
@@ -544,6 +550,7 @@ export function runEngine(
       memberIds: b.memberIds,
       effort: b.effort,
       effortAuto: b.effortAuto,
+      utaOk: b.utaOk,
     });
   }
 
@@ -555,7 +562,7 @@ export function runEngine(
   const plan = buildPlanContext(fixedEvents);
 
   for (const p of placeables) {
-    const isHomeOnly = isUtaBlocked(p.pillar, p.context);
+    const isHomeOnly = isUtaBlocked(p.pillar, p.context) && !p.utaOk;
     const needsHome = p.pillar === "family" || AWAY_BLOCKED_CONTEXTS.includes(p.context);
     const effectiveBusy =
       isHomeOnly || needsHome
@@ -588,6 +595,7 @@ export function runEngine(
         effort: p.effort,
         effortAuto: p.effortAuto,
         placementReason: why,
+        ...(p.utaOk ? { utaOverride: true } : {}),
       });
     } else {
       // A window that starts after this week belongs to a later week's plan.
