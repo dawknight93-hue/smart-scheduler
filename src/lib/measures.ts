@@ -197,7 +197,18 @@ async function syncGoalFromMeasures(goalId: string): Promise<void> {
 export async function saveSuggestions(goalId: string, proposals: Partial<NewMeasure>[], afterPosition: number): Promise<GoalMeasure[]> {
   await supabase.from("goal_measures").delete().eq("goal_id", goalId).eq("status", "suggested");
   if (!proposals.length) return [];
-  const rows = proposals.map((p, i) => ({ ...measureRow(p), goal_id: goalId, status: "suggested", position: afterPosition + 1 + i }));
+  // One request inserts every row, so every row must carry the same columns:
+  // a column one row leaves out would be sent as null for it (not its default),
+  // e.g. an effort suggestion has no checkpoints and an outcome has no period.
+  const rows = proposals.map((p, i) => ({
+    ...measureRow(p),
+    goal_id: goalId,
+    status: "suggested",
+    position: afterPosition + 1 + i,
+    period: p.kind === "effort" && p.period && PERIODS.includes(p.period) ? p.period : "week",
+    preferred_time: p.preferred_time ?? "any",
+    checkpoints: Array.isArray(p.checkpoints) ? p.checkpoints : [],
+  }));
   const { data, error } = await supabase.from("goal_measures").insert(rows).select("*");
   if (error) throw new Error(error.message);
   return ((data as GoalMeasure[]) ?? []).map(normalize);
