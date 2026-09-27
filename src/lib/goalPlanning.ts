@@ -349,10 +349,14 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), bl
 
   const plans: GoalWeekPlan[] = [];
   for (const goal of sortByPriority(goals)) {
-    const { target, pace, startsNext } = weeklyTarget(goal, week);
+    const wt = weeklyTarget(goal, week);
+    const { pace } = wt;
     const existing = week.habits.filter(
       (h) => ownsHabit(goal, h) && new Date(h.search_start) >= week.weekStart && new Date(h.search_start) < week.weekEnd
     );
+    // Already has sessions this week (you placed them anyway): it has started, count those.
+    const startsNext = wt.startsNext && existing.length === 0;
+    const target = wt.startsNext && existing.length ? existing.length : wt.target;
     if (goal.plan_mode === "count") {
       plans.push({ goal, target, pace, startsNext, existing: [], counted: countGoalEvents(goal, week), proposed: [], unplaced: 0 });
       continue;

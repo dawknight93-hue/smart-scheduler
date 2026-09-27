@@ -369,7 +369,7 @@ function goalProgress(goals: PlanGoal[], week: WeekData | undefined, now: Date, 
     const next = (g.milestones ?? []).filter((m) => !m.done && new Date(`${m.due}T23:59:00`) >= today).sort((a, b) => a.due.localeCompare(b.due))[0];
     return {
       goal: g,
-      ...(({ target, pace, startsNext }) => ({ target, pace, startsNext }))(weeklyTarget(g, week)),
+      ...(({ target, pace, startsNext }) => (startsNext && entries.length ? { target: entries.length, pace } : { target, pace, startsNext }))(weeklyTarget(g, week)),
       done: entries.filter((e) => e.done).length,
       past: entries.filter(isPast).length,
       scheduled: entries.length,
