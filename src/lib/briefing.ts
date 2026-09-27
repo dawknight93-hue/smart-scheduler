@@ -16,6 +16,7 @@ import {
   sortByPriority,
   verifyWeek,
   weeklyTarget,
+  type PeriodPace,
   type PlanGoal,
   type WeekData,
   type WeekReviewRow,
@@ -333,6 +334,8 @@ function loggedLines(outcomes: OutcomeLine[]): string[] {
 export interface GoalProgress {
   goal: PlanGoal;
   target: number;
+  /** Set for counts per day/month/quarter/year (see weeklyTarget). */
+  pace?: PeriodPace;
   /** Sessions ticked done this week (Daily level). */
   done: number;
   /** Sessions whose time has already come this week. */
@@ -364,7 +367,7 @@ function goalProgress(goals: PlanGoal[], week: WeekData | undefined, now: Date, 
     const next = (g.milestones ?? []).filter((m) => !m.done && new Date(`${m.due}T23:59:00`) >= today).sort((a, b) => a.due.localeCompare(b.due))[0];
     return {
       goal: g,
-      target: weeklyTarget(g, week).target,
+      ...(({ target, pace }) => ({ target, pace }))(weeklyTarget(g, week)),
       done: entries.filter((e) => e.done).length,
       past: entries.filter(isPast).length,
       scheduled: entries.length,
