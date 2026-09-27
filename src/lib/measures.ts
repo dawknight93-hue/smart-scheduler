@@ -239,6 +239,7 @@ export function effortGoals(goals: PlanGoal[], measures: GoalMeasure[]): PlanGoa
         measure_label: m.label,
         measure_effort: m.effort,
         period: m.period ?? "week",
+        measure_created_at: m.created_at,
         plan_mode: m.plan_mode,
         cadence_sessions_per_week: m.sessions_per_week,
         session_minutes: m.session_minutes,

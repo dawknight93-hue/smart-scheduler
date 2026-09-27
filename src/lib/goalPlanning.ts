@@ -53,6 +53,8 @@ export interface PlanGoal {
   measure_effort?: "focus" | "routine" | "light" | null;
   /** What `cadence_sessions_per_week` counts per (effort measures; goals are weekly). */
   period?: Period;
+  /** When the measure was added: a period it joins partway counts pro rata. */
+  measure_created_at?: string;
   /** Big life blocks this goal must avoid (see lifeBlocks.ts); empty = any. */
   blocked_blocks?: string[] | null;
   blocks_asked?: boolean;
@@ -253,7 +255,9 @@ export interface ProposedSession {
 /** How a monthly/quarterly/yearly (or daily) count turns into this week's target. */
 export interface PeriodPace {
   period: Period;
-  /** Count per period. */
+  /** The count per period you set. */
+  perPeriod: number;
+  /** What this period owes (less than perPeriod when the measure joined partway). */
   quota: number;
   /** Sessions already on the calendar in this period before this week. */
   bookedBefore: number;
@@ -279,13 +283,18 @@ export function weeklyTarget(goal: PlanGoal, week: WeekData): { target: number; 
   const mid = addDays(week.weekStart, 3);
   const [ps, pe] = periodBounds(period, mid);
   const weekEnd = week.weekEnd < pe ? week.weekEnd : pe;
-  const frac = Math.min(1, Math.max(0, (weekEnd.getTime() - ps.getTime()) / (pe.getTime() - ps.getTime())));
-  const dueByWeekEnd = Math.min(n, Math.ceil(n * frac - 1e-9));
+  // A measure added partway through a period owes only its share of that period
+  // (a monthly date night added on the 27th owes nothing until next month).
+  const created = goal.measure_created_at ? new Date(goal.measure_created_at) : null;
+  const from = created && created > ps ? created : ps;
+  const quota = from > ps ? Math.round((n * (pe.getTime() - from.getTime())) / (pe.getTime() - ps.getTime())) : n;
+  const frac = Math.min(1, Math.max(0, (weekEnd.getTime() - from.getTime()) / Math.max(1, pe.getTime() - from.getTime())));
+  const dueByWeekEnd = Math.min(quota, Math.ceil(quota * frac - 1e-9));
   const bookedBefore =
     goal.plan_mode === "count"
       ? countGoalEventsIn(goal, week, ps, week.weekStart).length
       : week.habits.filter((h) => ownsHabit(goal, h) && new Date(h.search_start) >= ps && new Date(h.search_start) < week.weekStart).length;
-  return { target: Math.max(0, dueByWeekEnd - bookedBefore), pace: { period, quota: n, bookedBefore, label: PERIOD_LABEL(period, mid) } };
+  return { target: Math.max(0, dueByWeekEnd - bookedBefore), pace: { period, perPeriod: n, quota, bookedBefore, label: PERIOD_LABEL(period, mid) } };
 }
 
 export interface GoalWeekPlan {
