@@ -411,15 +411,16 @@ function GoalCard({
           {g.measure_label && <p className="text-xs font-medium text-blue-300 mt-0.5">{g.measure_label}</p>}
           <p className="text-xs text-slate-400 mt-0.5">
             {plan.pace
-              ? `${plan.pace.quota}× ${g.weekly_target ?? "session"} a ${plan.pace.period === "day" ? "day" : plan.pace.period}`
+              ? `${plan.pace.perPeriod}× ${g.weekly_target ?? "session"} a ${plan.pace.period === "day" ? "day" : plan.pace.period}`
               : `Target: ${plan.target}× ${g.weekly_target ?? "session"}`}
             {!isCount && g.session_minutes ? ` · ${g.session_minutes} min` : ""}
             {isCount ? " · counted from your calendar" : " · scheduled by the app"}
           </p>
           {plan.pace && plan.pace.period !== "day" && (
             <p className="text-xs text-slate-300 mt-0.5">
-              {plan.pace.label}: {plan.pace.bookedBefore} of {plan.pace.quota} booked before this week ·{" "}
-              {plan.target > 0 ? `${plan.target} due this week` : "nothing more due this week"}
+              {plan.pace.quota === 0
+                ? `${plan.pace.label}: added partway through, so it starts next ${plan.pace.period}`
+                : `${plan.pace.label}: ${plan.pace.bookedBefore} of ${plan.pace.quota} booked before this week · ${plan.target > 0 ? `${plan.target} due this week` : "nothing more due this week"}`}
             </p>
           )}
           {!!g.blocked_blocks?.length && <p className="text-[11px] text-slate-500 mt-0.5">Stays out of: {g.blocked_blocks.map(blockLabel).join(", ")}</p>}

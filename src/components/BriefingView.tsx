@@ -423,7 +423,7 @@ function Daily({
                           {group.length > 1 && (
                             <div className="flex items-center gap-2 text-sm">
                               <span className="truncate text-slate-300">{g.goal.measure_label ?? g.goal.weekly_target ?? "Sessions"}</span>
-                              <span className="ml-auto tabular-nums text-slate-300">{met ? "booked" : `${g.done}/${g.target}`}</span>
+                              <span className="ml-auto tabular-nums text-slate-300">{met ? (g.pace?.quota === 0 ? "next " + g.pace.period : "booked") : `${g.done}/${g.target}`}</span>
                             </div>
                           )}
                           <div className="mt-1 h-1.5 rounded-full bg-slate-800">
@@ -451,7 +451,9 @@ function Daily({
                           )}
                           <p className="mt-1 text-xs text-slate-400">
                             {g.pace && g.pace.period !== "day"
-                              ? `${g.pace.quota} a ${g.pace.period} · ${g.pace.label}: ${g.pace.bookedBefore + g.scheduled} of ${g.pace.quota} on the calendar${g.target > 0 ? ` · ${g.target} due this week` : ""} · ${g.done} ticked done`
+                              ? g.pace.quota === 0
+                                ? `${g.pace.perPeriod} a ${g.pace.period} · added partway through ${g.pace.label}, so it starts next ${g.pace.period}`
+                                : `${g.pace.perPeriod} a ${g.pace.period} · ${g.pace.label}: ${g.pace.bookedBefore + g.scheduled} of ${g.pace.quota} on the calendar${g.target > 0 ? ` · ${g.target} due this week` : ""} · ${g.done} ticked done`
                               : `${g.done} ticked done · ${g.scheduled} on the calendar this week`}
                           </p>
                         </li>
