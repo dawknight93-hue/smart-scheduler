@@ -403,48 +403,68 @@ function Daily({
       {(b.goals.length > 0 || b.outcomes.length > 0) && (
         <Section icon={<Target className="w-4 h-4 text-blue-300" />} title="Goals this week">
           {tickError && <p className="mb-2 text-xs text-rose-300">{tickError}</p>}
-          <ul className="space-y-3">
-            {b.goals.map((g) => {
-              const c = getPillarColor(g.goal.pillar);
-              const pct = g.target ? Math.min(100, Math.round((g.done / g.target) * 100)) : 0;
+          <ul className="space-y-4">
+            {groupByGoal(b.goals).map((group) => {
+              const first = group[0];
+              const c = getPillarColor(first.goal.pillar);
               return (
-                <li key={planKey(g.goal)}>
+                <li key={first.goal.id}>
                   <div className="flex items-center gap-2 text-sm">
-                    <span className={`w-2 h-2 rounded-full ${c.dot}`} />
-                    <span className="truncate text-slate-200">
-                      {goalShortName(g.goal)}
-                      {g.goal.measure_label && <span className="text-slate-400"> · {g.goal.measure_label}</span>}
-                    </span>
-                    <span className="ml-auto tabular-nums text-slate-300">{g.done}/{g.target}</span>
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${c.dot}`} />
+                    <span className="truncate font-medium text-slate-100">{goalShortName(first.goal)}</span>
+                    {group.length === 1 && <span className="ml-auto tabular-nums text-slate-300">{first.done}/{first.target}</span>}
                   </div>
-                  <div className="mt-1 h-1.5 rounded-full bg-slate-800">
-                    <div className="h-1.5 rounded-full bg-blue-500" style={{ width: `${pct}%` }} />
-                  </div>
-                  {g.today.length > 0 && (
-                    <ul className="mt-1.5 space-y-1">
-                      {g.today.map((e) => (
-                        <li key={e.key} className="flex items-start gap-2 text-sm">
-                          <input
-                            type="checkbox"
-                            checked={e.done}
-                            onChange={(ev) => tick(planKey(g.goal), e, ev.target.checked)}
-                            className="mt-1 accent-emerald-500"
-                            aria-label={`Mark ${e.focus ?? e.title} done`}
-                          />
-                          <span className="w-12 shrink-0 tabular-nums text-slate-400">{e.start ? hhmm(e.start) : "all day"}</span>
-                          <span className="min-w-0">
-                            <span className={e.done ? "text-slate-500 line-through" : "text-slate-100"}>{e.focus ?? e.title}</span>
-                            {e.steps.length > 0 && !e.done && <span className="block text-xs text-slate-500">{e.steps.join(" · ")}</span>}
-                          </span>
+                  <ul className={`space-y-2 ${group.length > 1 ? "mt-1.5 pl-4 border-l border-slate-800 ml-[3px]" : ""}`}>
+                    {group.map((g) => {
+                      const met = !!g.pace && g.target === 0;
+                      const pct = met ? 100 : g.target ? Math.min(100, Math.round((g.done / g.target) * 100)) : 0;
+                      return (
+                        <li key={planKey(g.goal)}>
+                          {group.length > 1 && (
+                            <div className="flex items-center gap-2 text-sm">
+                              <span className="truncate text-slate-300">{g.goal.measure_label ?? g.goal.weekly_target ?? "Sessions"}</span>
+                              <span className="ml-auto tabular-nums text-slate-300">{met ? "booked" : `${g.done}/${g.target}`}</span>
+                            </div>
+                          )}
+                          <div className="mt-1 h-1.5 rounded-full bg-slate-800">
+                            <div className={`h-1.5 rounded-full ${met ? "bg-emerald-500" : "bg-blue-500"}`} style={{ width: `${pct}%` }} />
+                          </div>
+                          {g.today.length > 0 && (
+                            <ul className="mt-1.5 space-y-1">
+                              {g.today.map((e) => (
+                                <li key={e.key} className="flex items-start gap-2 text-sm">
+                                  <input
+                                    type="checkbox"
+                                    checked={e.done}
+                                    onChange={(ev) => tick(planKey(g.goal), e, ev.target.checked)}
+                                    className="mt-1 accent-emerald-500"
+                                    aria-label={`Mark ${e.focus ?? e.title} done`}
+                                  />
+                                  <span className="w-12 shrink-0 tabular-nums text-slate-400">{e.start ? hhmm(e.start) : "all day"}</span>
+                                  <span className="min-w-0">
+                                    <span className={e.done ? "text-slate-500 line-through" : "text-slate-100"}>{e.focus ?? e.title}</span>
+                                    {e.steps.length > 0 && !e.done && <span className="block text-xs text-slate-500">{e.steps.join(" · ")}</span>}
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                          <p className="mt-1 text-xs text-slate-400">
+                            {g.pace && g.pace.period !== "day"
+                              ? `${g.pace.quota} a ${g.pace.period} · ${g.pace.label}: ${g.pace.bookedBefore + g.scheduled} of ${g.pace.quota} on the calendar${g.target > 0 ? ` · ${g.target} due this week` : ""} · ${g.done} ticked done`
+                              : `${g.done} ticked done · ${g.scheduled} on the calendar this week`}
+                          </p>
                         </li>
-                      ))}
-                    </ul>
+                      );
+                    })}
+                  </ul>
+                  {(first.nextCheckpoint || first.deadlineDays !== null) && (
+                    <p className="mt-1 text-xs text-slate-500">
+                      {first.nextCheckpoint ? `Next checkpoint: ${first.nextCheckpoint.title} in ${first.nextCheckpoint.daysLeft} day${first.nextCheckpoint.daysLeft === 1 ? "" : "s"}` : ""}
+                      {first.nextCheckpoint && first.deadlineDays !== null ? " · " : ""}
+                      {first.deadlineDays !== null ? `deadline in ${first.deadlineDays} days` : ""}
+                    </p>
                   )}
-                  <p className="mt-1 text-xs text-slate-400">
-                    {g.done} ticked done · {g.scheduled} on the calendar this week
-                    {g.nextCheckpoint ? ` · next checkpoint: ${g.nextCheckpoint.title} in ${g.nextCheckpoint.daysLeft} day${g.nextCheckpoint.daysLeft === 1 ? "" : "s"}` : ""}
-                    {g.deadlineDays !== null ? ` · deadline in ${g.deadlineDays} days` : ""}
-                  </p>
                 </li>
               );
             })}
@@ -751,4 +771,18 @@ function DutyLine({ label, stats, sentence, muted }: { label: string; stats: Dut
       )}
     </div>
   );
+}
+
+/** A goal with several measures shows once, with one row per measure under it. */
+function groupByGoal<T extends { goal: { id: string } }>(rows: T[]): T[][] {
+  const out: T[][] = [];
+  const at = new Map<string, number>();
+  for (const r of rows) {
+    const i = at.get(r.goal.id);
+    if (i === undefined) {
+      at.set(r.goal.id, out.length);
+      out.push([r]);
+    } else out[i].push(r);
+  }
+  return out;
 }
