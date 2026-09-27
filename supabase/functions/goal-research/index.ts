@@ -636,7 +636,7 @@ async function handleMeasures(goalId: string, calendars: { id: string; name: str
   if (!goal) throw new Error("Goal not found.");
   const { data: existing } = await supabase
     .from("goal_measures")
-    .select("kind, label, plan_mode, sessions_per_week, session_minutes, unit")
+    .select("kind, label, plan_mode, sessions_per_week, period, session_minutes, unit")
     .eq("goal_id", goalId)
     .eq("status", "active");
 
@@ -644,19 +644,19 @@ async function handleMeasures(goalId: string, calendars: { id: string; name: str
   const system =
     "You design how progress on one personal goal is measured, for a planner app. Today is " + today + ". The user is Oshane, an airline First Officer based in MIA with a family and a military reserve career; his energy is highest in the morning, lower in the afternoon, lowest after 20:30. " +
     "Propose 2 to 4 measures that together show whether the goal is working, choosing from two kinds. " +
-    "EFFORT measures are things he does every week that are fully under his control (sessions of a habit, blocks of time for a kind of work, a short recurring check). Express time budgets as sessions: pick a session length that suits the work — 45 to 90 minutes for focused work, 10 to 20 minutes for quick recurring checks — and give hours_per_week when the natural target is a time budget (for example 4 hours a week becomes 3 sessions of 80 minutes). " +
+    "EFFORT measures are things he does on a rhythm that are fully under his control; most are weekly, but give period 'day', 'month', 'quarter' or 'year' when that's the natural rhythm (e.g. one date night a month -> period 'month', sessions_per_week 1; a yearly physical -> period 'year'), in which case sessions_per_week holds the count per that period. Examples: sessions of a habit, blocks of time for a kind of work, a short recurring check. Express time budgets as sessions: pick a session length that suits the work — 45 to 90 minutes for focused work, 10 to 20 minutes for quick recurring checks — and give hours_per_week when the natural target is a time budget (for example 4 hours a week becomes 3 sessions of 80 minutes). " +
     "Use plan_mode 'count' only when the chosen approach is an app or service that already puts each session on one of his calendars by itself (then set count_calendar_id to that calendar's id and an optional count_keyword found in those event titles); otherwise use 'schedule'. Pick context (desk, home, phone, errand, other), preferred_time (any, morning, afternoon, evening) and effort (focus = needs his sharpest hours, routine = needs attention, light = quick and easy). " +
     "OUTCOME measures are numbers he can check objectively in under a minute (a scale reading, a count of open items, a score, a balance, minutes on a timed test). Give unit, direction ('down' if lower is better, 'up' if higher is better), baseline (only if the goal text states the current value, else null), target, log_every ('weekly' for most, 'daily' or 'monthly' when that fits better) and log_weekday (0 = Sunday … 6 = Saturday) for weekly logs, and checkpoints as dated numeric targets on the way — reuse the goal's existing milestones when they contain numbers, never in the past, the last one being the goal's target on its deadline. " +
     "Only propose an outcome measure when it can be measured objectively; never invent a number he couldn't read off something. Don't repeat a measure he already has. Each measure gets a short name (1 to 3 words) and a one-sentence 'why' in plain words. " +
     "Respond with one JSON object only: {\"measures\": [{\"kind\": \"effort\"|\"outcome\", \"label\": string, \"why\": string, " +
-    "\"plan_mode\": \"schedule\"|\"count\"|null, \"sessions_per_week\": integer|null, \"session_minutes\": integer|null, \"hours_per_week\": number|null, \"context\": string|null, \"preferred_time\": string|null, \"effort\": string|null, \"count_calendar_id\": string|null, \"count_keyword\": string|null, " +
+    "\"plan_mode\": \"schedule\"|\"count\"|null, \"period\": \"day\"|\"week\"|\"month\"|\"quarter\"|\"year\"|null, \"sessions_per_week\": integer|null, \"session_minutes\": integer|null, \"hours_per_week\": number|null, \"context\": string|null, \"preferred_time\": string|null, \"effort\": string|null, \"count_calendar_id\": string|null, \"count_keyword\": string|null, " +
     "\"unit\": string|null, \"direction\": \"down\"|\"up\"|null, \"baseline\": number|null, \"target\": number|null, \"log_every\": string|null, \"log_weekday\": integer|null, \"checkpoints\": [{\"due\": \"YYYY-MM-DD\", \"target\": number}]}]}.";
   const user =
     `Pillar: ${goal.pillar}\nSpecific: ${goal.specific ?? "n/a"}\nMeasurable: ${goal.measurable ?? "n/a"}\nAchievable: ${goal.achievable ?? "n/a"}\nRelevant: ${goal.relevant ?? "n/a"}\n` +
     `Time-bound: ${goal.time_bound ?? "n/a"}\nDeadline: ${goal.deadline ? String(goal.deadline).slice(0, 10) : "not set"}\nChosen approach: ${goal.approach ?? "n/a"}\n` +
     `Committed cadence: ${goal.cadence_label ?? (goal.cadence_sessions_per_week ? goal.cadence_sessions_per_week + "x/week" : "none")}\n` +
     `Milestones: ${((goal.milestones ?? []) as Milestone[]).map((m) => `${m.due} ${m.title}${m.metric ? ` (${m.metric})` : ""}`).join("; ") || "none"}\n` +
-    `Measures he already has: ${((existing ?? []) as any[]).map((m) => `${m.kind} "${m.label}"${m.sessions_per_week ? ` ${m.sessions_per_week}/week` : ""}${m.unit ? ` in ${m.unit}` : ""}`).join("; ") || "none"}\n` +
+    `Measures he already has: ${((existing ?? []) as any[]).map((m) => `${m.kind} "${m.label}"${m.sessions_per_week ? ` ${m.sessions_per_week}/${m.period ?? "week"}` : ""}${m.unit ? ` in ${m.unit}` : ""}`).join("; ") || "none"}\n` +
     `His calendars: ${calendars.map((c) => `${c.name} (id ${c.id})`).join("; ") || "none"}`;
 
   const out = await llm(system, [{ role: "user", content: user }], { json: true, maxTokens: 3000 });
@@ -677,10 +677,12 @@ async function handleMeasures(goalId: string, calendars: { id: string; name: str
         const hours = n(m.hours_per_week);
         if (hours && hours > 0 && !sessions) sessions = Math.max(1, Math.round((hours * 60) / 75));
         if (hours && hours > 0 && sessions && !minutes) minutes = Math.round((hours * 60) / sessions / 5) * 5;
+        const period = ["day", "week", "month", "quarter", "year"].includes(m.period) ? m.period : "week";
         return {
           ...base,
           plan_mode: count ? "count" : "schedule",
-          sessions_per_week: sessions ? Math.min(14, Math.max(1, Math.round(sessions))) : null,
+          period,
+          sessions_per_week: sessions ? Math.min(period === "week" ? 14 : period === "day" ? 6 : 365, Math.max(1, Math.round(sessions))) : null,
           session_minutes: count ? null : minutes ? Math.min(240, Math.max(5, Math.round(minutes / 5) * 5)) : 30,
           hours_per_week: count ? null : hours,
           context: MEASURE_CONTEXTS.includes(m.context) ? m.context : "other",
