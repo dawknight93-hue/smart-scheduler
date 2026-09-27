@@ -1112,11 +1112,17 @@ export function CalendarView({
   }
 
   /** Same rules the drop enforces, so the preview tells the truth before release. */
-  function checkMove(item: PlacedItem, newStart: Date): { blocked?: string; overlaps: string[]; notes: string[] } {
+  function checkMove(item: PlacedItem, newStart: Date, allowUta = false): { blocked?: string; uta?: boolean; overlaps: string[]; notes: string[] } {
     const newEnd = new Date(newStart.getTime() + (item.end.getTime() - item.start.getTime()));
     if (isQuietTime(newStart, newEnd)) return { blocked: "Can't schedule between 21:00 and 09:00", overlaps: [], notes: [] };
-    if (isUtaBlocked(item.pillar, item.context) && overlapsUta(newStart, newEnd, fixedEvents)) {
-      return { blocked: `${utaBlockLabel(item.pillar, item.context)} items can't go on UTA days`, overlaps: [], notes: [] };
+    if (!allowUta && !item.utaOverride && isUtaBlocked(item.pillar, item.context) && overlapsUta(newStart, newEnd, fixedEvents)) {
+      const again = isUtaRetry(item);
+      return {
+        blocked: `${utaBlockLabel(item.pillar, item.context)} items can't go on UTA days${again ? " — drop it here to override" : ""}`,
+        uta: true,
+        overlaps: [],
+        notes: [],
+      };
     }
     if (placed.some((p) => p.kind === "Enroute" && rangesOverlap(newStart, newEnd, p.start, p.end))) {
       return { blocked: "Can't drop on an Enroute block", overlaps: [], notes: [] };
@@ -1219,7 +1225,22 @@ export function CalendarView({
     );
   }
   const [dragMessage, setDragMessage] = useState<string | null>(null);
-  const [overlapConfirm, setOverlapConfirm] = useState<{ item: PlacedItem; newStart: Date; overlapNames: string[] } | null>(null);
+  const [overlapConfirm, setOverlapConfirm] = useState<{ item: PlacedItem; newStart: Date; overlapNames: string[]; allowUta?: boolean } | null>(null);
+  // UTA rule: the first drop onto a UTA day is refused; a second try within a few
+  // minutes asks whether to override it for this one item.
+  const utaAttempt = useRef<{ key: string; at: number } | null>(null);
+  const [utaConfirm, setUtaConfirm] = useState<{ item: PlacedItem; newStart: Date } | null>(null);
+  const attemptKey = (it: PlacedItem) => `${it.recurringItemId ?? it.id}|${it.occurrenceDate ?? ""}`;
+  function isUtaRetry(it: PlacedItem) {
+    const a = utaAttempt.current;
+    return !!a && a.key === attemptKey(it) && Date.now() - a.at < 3 * 60000;
+  }
+  /** Keep a one-off habit or task where you put it on a UTA day (recurring days and events aren't re-checked). */
+  async function markUtaOk(item: PlacedItem) {
+    if (item.isRecurringOccurrence || item.isBatch) return;
+    if (item.kind === "Habit") await supabase.from("habits").update({ uta_override: true }).eq("id", item.id);
+    else if (item.kind === "Task") await supabase.from("tasks").update({ uta_override: true }).eq("id", item.id);
+  }
   // A resize that would leave a task/habit's window shorter than its duration asks first.
   const [resizeWarning, setResizeWarning] = useState<{
     item: PlacedItem;
@@ -1406,7 +1427,7 @@ export function CalendarView({
       const hint = (h: string) => setResizeState((prev) => (prev && prev.hint !== h ? { ...prev, hint: h } : prev));
       if (snapped < minEnd) return hint("15 min minimum");
       if (isQuietTime(resizeState.item.start, snapped)) return hint("can't run into 21:00–09:00");
-      if (isUtaBlocked(resizeState.item.pillar, resizeState.item.context) && overlapsUta(resizeState.item.start, snapped, fixedEvents)) return hint(`${utaBlockLabel(resizeState.item.pillar, resizeState.item.context)} items can't go on UTA days`);
+      if (!resizeState.item.utaOverride && isUtaBlocked(resizeState.item.pillar, resizeState.item.context) && overlapsUta(resizeState.item.start, snapped, fixedEvents)) return hint(`${utaBlockLabel(resizeState.item.pillar, resizeState.item.context)} items can't go on UTA days`);
       setResizeState((prev) => (prev ? { ...prev, previewEnd: snapped, hint: undefined } : null));
     };
     const onUp = async () => {
@@ -1449,11 +1470,11 @@ export function CalendarView({
   function restorerFor(item: PlacedItem): () => Promise<void> {
     if (!item.isRecurringOccurrence && item.kind === "Task") {
       const t = tasks.find((x) => x.id === item.id);
-      if (t) return async () => { await supabase.from("tasks").update({ search_start: t.search_start, deadline: t.deadline }).eq("id", t.id); };
+      if (t) return async () => { await supabase.from("tasks").update({ search_start: t.search_start, deadline: t.deadline, uta_override: t.uta_override ?? false }).eq("id", t.id); };
     }
     if (!item.isRecurringOccurrence && item.kind === "Habit") {
       const h = habits.find((x) => x.id === item.id);
-      if (h) return async () => { await supabase.from("habits").update({ search_start: h.search_start, search_end: h.search_end }).eq("id", h.id); };
+      if (h) return async () => { await supabase.from("habits").update({ search_start: h.search_start, search_end: h.search_end, uta_override: h.uta_override ?? false }).eq("id", h.id); };
     }
     // updateItemTime keeps the passed item's own length, so this restores start and end.
     return async () => { await updateItemTime(item, item.start); };
@@ -1463,22 +1484,33 @@ export function CalendarView({
     `${d.toLocaleDateString("en-US", { weekday: "short" })} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 
   /** Move an item to a new start (drag on desktop, press-and-hold on the phone). */
-  async function moveItemTo(item: PlacedItem, targetDate: Date, offerUndo = false) {
+  async function moveItemTo(item: PlacedItem, targetDate: Date, offerUndo = false, allowUta = false) {
     const newStart = snapToSlot(targetDate);
     if (newStart.getTime() === item.start.getTime()) return;
 
-    const check = checkMove(item, newStart);
+    const check = checkMove(item, newStart, allowUta);
     if (check.blocked) {
+      if (check.uta) {
+        if (isUtaRetry(item)) {
+          utaAttempt.current = null;
+          setUtaConfirm({ item, newStart });
+          return;
+        }
+        utaAttempt.current = { key: attemptKey(item), at: Date.now() };
+        showDragMessage(`${check.blocked}. Drag it onto the UTA day again if you want to override that for this one.`, 7000);
+        return;
+      }
       showDragMessage(check.blocked);
       return;
     }
     if (check.overlaps.length > 0) {
-      setOverlapConfirm({ item, newStart, overlapNames: check.overlaps });
+      setOverlapConfirm({ item, newStart, overlapNames: check.overlaps, allowUta });
       return;
     }
-    const undo = offerUndo ? restorerFor(item) : null;
+    const undo = offerUndo || allowUta ? restorerFor(item) : null;
     const saved = await updateItemTime(item, newStart);
     if (!saved) return;
+    if (allowUta) await markUtaOk(item);
     if (check.notes.length) showDragMessage(`Saved to Google Calendar. ${check.notes.join(". ")} on the next sync.`, 6000);
     else if (undo) {
       showDoneToast(`Moved ${item.name} to ${timeLabel(newStart)}`, async () => {
@@ -1495,7 +1527,7 @@ export function CalendarView({
   function checkResize(item: PlacedItem, newEnd: Date): string | undefined {
     if (newEnd.getTime() < item.start.getTime() + SLOT_MIN * 60000) return "15 min minimum";
     if (isQuietTime(item.start, newEnd)) return "Can't run into 21:00–09:00";
-    if (isUtaBlocked(item.pillar, item.context) && overlapsUta(item.start, newEnd, fixedEvents)) return `${utaBlockLabel(item.pillar, item.context)} items can't go on UTA days`;
+    if (!item.utaOverride && isUtaBlocked(item.pillar, item.context) && overlapsUta(item.start, newEnd, fixedEvents)) return `${utaBlockLabel(item.pillar, item.context)} items can't go on UTA days`;
     return undefined;
   }
 
@@ -1529,7 +1561,7 @@ export function CalendarView({
 
   async function confirmOverlapMove() {
     if (!overlapConfirm) return;
-    const { item, newStart } = overlapConfirm;
+    const { item, newStart, allowUta } = overlapConfirm;
     setOverlapConfirm(null);
 
     const durationMin = Math.round((item.end.getTime() - item.start.getTime()) / 60000);
@@ -1542,6 +1574,7 @@ export function CalendarView({
     );
 
     if (!(await updateItemTime(item, newStart))) return;
+    if (allowUta) await markUtaOk(item);
 
     for (const other of overlapping) {
       const nextSlot = findNextFreeSlot(other, newStart, Math.round((other.end.getTime() - other.start.getTime()) / 60000), placed, fixedEvents);
@@ -2471,6 +2504,42 @@ export function CalendarView({
         </div>
       )}
 
+      {utaConfirm && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm sm:p-4" onClick={() => setUtaConfirm(null)}>
+          <div
+            className="w-full sm:max-w-sm bg-slate-900 border border-slate-700 rounded-t-3xl sm:rounded-2xl p-5 pb-[calc(20px+env(safe-area-inset-bottom))] sm:pb-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 mb-3">
+              <AlertTriangle className="w-5 h-5 text-amber-400" />
+              <h3 className="text-base font-semibold">Put it on a UTA day anyway?</h3>
+            </div>
+            <p className="text-sm text-slate-300 mb-2">
+              <span className="font-medium text-white">{utaConfirm.item.name}</span> would go on{" "}
+              {utaConfirm.newStart.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })} at {formatTime(utaConfirm.newStart)}, during UTA.
+            </p>
+            <p className="text-xs text-slate-500 mb-4">
+              {utaBlockLabel(utaConfirm.item.pillar, utaConfirm.item.context)} items normally stay off UTA days. This overrides that for this one only — the scheduler will leave it there, and Undo puts it back.
+            </p>
+            <div className="flex gap-2">
+              <button onClick={() => setUtaConfirm(null)} className="flex-1 py-2.5 rounded-lg bg-slate-800 text-slate-300 text-sm font-medium hover:bg-slate-700 transition-colors">
+                Keep the rule
+              </button>
+              <button
+                onClick={() => {
+                  const c = utaConfirm;
+                  setUtaConfirm(null);
+                  void moveItemTo(c.item, c.newStart, true, true);
+                }}
+                className="flex-1 py-2.5 rounded-lg bg-amber-600 text-white text-sm font-medium hover:bg-amber-500 transition-colors"
+              >
+                Override for this one
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {overlapConfirm && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
@@ -2644,6 +2713,12 @@ function ItemDetail({
             <Clock className="w-4 h-4 text-slate-500" />
             {item.isAllDay ? "All day" : `${formatTime(item.start)} — ${formatTime(item.end)}`}
           </div>
+          {item.utaOverride && (
+            <div className="flex items-center gap-2 text-amber-300">
+              <AlertTriangle className="w-4 h-4" />
+              Allowed on a UTA day (you overrode the rule for this one)
+            </div>
+          )}
           {item.recurrenceSummary && (
             <div className="flex items-center gap-2 text-xs text-slate-500">
               <Repeat className="w-3.5 h-3.5" />
