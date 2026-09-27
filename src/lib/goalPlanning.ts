@@ -55,6 +55,8 @@ export interface PlanGoal {
   period?: Period;
   /** When the measure was added: a period it joins partway counts pro rata. */
   measure_created_at?: string;
+  /** Weekdays this effort is scheduled on (0 = Sun … 6 = Sat); empty = any. */
+  days?: number[] | null;
   /** Big life blocks this goal must avoid (see lifeBlocks.ts); empty = any. */
   blocked_blocks?: string[] | null;
   blocks_asked?: boolean;
@@ -275,18 +277,31 @@ const PERIOD_LABEL = (period: Period, d: Date) =>
  * "3 a quarter" spreads out instead of piling into week one. The period is the
  * one holding most of this week (its Thursday).
  */
-export function weeklyTarget(goal: PlanGoal, week: WeekData): { target: number; pace?: PeriodPace } {
+export function weeklyTarget(goal: PlanGoal, week: WeekData): { target: number; pace?: PeriodPace; startsNext?: boolean } {
   const n = goal.cadence_sessions_per_week ?? 0;
   const period = goal.period ?? "week";
-  if (period === "week") return { target: n };
-  if (period === "day") return { target: n * 7 };
+  if (period === "week" || period === "day") {
+    const full = period === "day" ? n * 7 : n;
+    // Added partway through the week: it owes only the days still ahead of it
+    // (its chosen weekdays, if it has them), and none at all starts next week.
+    // (Only for efforts the app schedules: counted ones arrive from their own calendar.)
+    const created = goal.measure_created_at && goal.plan_mode === "schedule" ? new Date(goal.measure_created_at) : null;
+    if (!created || created <= week.weekStart || created >= week.weekEnd) return { target: full };
+    const firstDay = new Date(created.getFullYear(), created.getMonth(), created.getDate() + 1);
+    const daysLeft: Date[] = [];
+    for (let d = new Date(firstDay); d < week.weekEnd; d = addDays(d, 1)) daysLeft.push(d);
+    const usable = goal.days?.length ? daysLeft.filter((d) => goal.days!.includes(d.getDay())) : daysLeft;
+    const allowed = goal.days?.length ? goal.days.length : 7;
+    const owed = Math.min(full, Math.round((full * usable.length) / allowed));
+    return owed > 0 ? { target: owed } : { target: 0, startsNext: true };
+  }
   const mid = addDays(week.weekStart, 3);
   const [ps, pe] = periodBounds(period, mid);
   const weekEnd = week.weekEnd < pe ? week.weekEnd : pe;
   // A measure added partway through a period owes only its share of that period
   // (a monthly date night added on the 27th owes nothing until next month).
-  const created = goal.measure_created_at ? new Date(goal.measure_created_at) : null;
-  const from = created && created > ps ? created : ps;
+  const created = goal.measure_created_at && goal.plan_mode === "schedule" ? new Date(goal.measure_created_at) : null;
+  const from = created && created > ps && created < pe ? created : ps;
   const quota = from > ps ? Math.round((n * (pe.getTime() - from.getTime())) / (pe.getTime() - ps.getTime())) : n;
   const frac = Math.min(1, Math.max(0, (weekEnd.getTime() - from.getTime()) / Math.max(1, pe.getTime() - from.getTime())));
   const dueByWeekEnd = Math.min(quota, Math.ceil(quota * frac - 1e-9));
@@ -300,6 +315,8 @@ export function weeklyTarget(goal: PlanGoal, week: WeekData): { target: number; 
 export interface GoalWeekPlan {
   goal: PlanGoal;
   target: number;
+  /** The effort was added this week with no days left for it: it starts next week. */
+  startsNext?: boolean;
   /** Set when the goal's count is per day/month/quarter/year. */
   pace?: PeriodPace;
   /** Sessions for this goal already on the calendar this week (schedule mode). */
@@ -332,12 +349,12 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), bl
 
   const plans: GoalWeekPlan[] = [];
   for (const goal of sortByPriority(goals)) {
-    const { target, pace } = weeklyTarget(goal, week);
+    const { target, pace, startsNext } = weeklyTarget(goal, week);
     const existing = week.habits.filter(
       (h) => ownsHabit(goal, h) && new Date(h.search_start) >= week.weekStart && new Date(h.search_start) < week.weekEnd
     );
     if (goal.plan_mode === "count") {
-      plans.push({ goal, target, pace, existing: [], counted: countGoalEvents(goal, week), proposed: [], unplaced: 0 });
+      plans.push({ goal, target, pace, startsNext, existing: [], counted: countGoalEvents(goal, week), proposed: [], unplaced: 0 });
       continue;
     }
     // Big life blocks this goal stays out of count as busy for it alone.
@@ -348,14 +365,16 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), bl
     const usedDays = new Set(existing.map((h) => new Date(h.search_start).getDay()));
     const proposed: ProposedSession[] = [];
     let unplaced = 0;
+    // Chosen weekdays (e.g. Tue & Thu) are the only days tried; otherwise spread across the week.
+    const allowedIdx = goal.days?.length ? [0, 1, 2, 3, 4, 5, 6].filter((i) => goal.days!.includes(addDays(week.weekStart, i).getDay())) : [0, 1, 2, 3, 4, 5, 6];
 
     for (let i = 0; i < need; i++) {
-      const firstDay = Math.floor((i * 7) / Math.max(need, 1));
+      const firstDay = Math.floor((i * allowedIdx.length) / Math.max(need, 1));
       let placed: ProposedSession | null = null;
-      for (let step = 0; step < 7 && !placed; step++) {
-        const dayIdx = (firstDay + step) % 7;
+      for (let step = 0; step < allowedIdx.length && !placed; step++) {
+        const dayIdx = allowedIdx[(firstDay + step) % allowedIdx.length];
         const day = addDays(week.weekStart, dayIdx);
-        if (need <= 7 && usedDays.has(day.getDay())) continue;
+        if (need <= allowedIdx.length && usedDays.has(day.getDay())) continue;
         const winStart = new Date(day.getFullYear(), day.getMonth(), day.getDate(), fromH, 0);
         const winEnd = new Date(day.getFullYear(), day.getMonth(), day.getDate(), toH, 0);
         const earliest = new Date(Math.max(winStart.getTime(), roundUp15(now).getTime()));
@@ -382,7 +401,7 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), bl
         unplaced++;
       }
     }
-    plans.push({ goal, target, pace, existing, counted: [], proposed, unplaced });
+    plans.push({ goal, target, pace, startsNext, existing, counted: [], proposed, unplaced });
   }
   return plans;
 }

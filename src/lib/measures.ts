@@ -45,6 +45,8 @@ export interface GoalMeasure {
   /** The count per `period` (named for when every effort was weekly). */
   sessions_per_week: number | null;
   period: Period;
+  /** Weekdays to schedule on (0 = Sun … 6 = Sat); null/empty = any day. */
+  days: number[] | null;
   session_minutes: number | null;
   hours_per_week: number | null;
   context: ContextTag | null;
@@ -90,6 +92,7 @@ function normalize(m: GoalMeasure): GoalMeasure {
     log_weekday: num(m.log_weekday),
     preferred_time: m.preferred_time ?? "any",
     period: PERIODS.includes(m.period) ? m.period : "week",
+    days: Array.isArray(m.days) && m.days.length ? [...new Set(m.days.map(Number).filter((d) => d >= 0 && d <= 6))].sort() : null,
     checkpoints: (Array.isArray(m.checkpoints) ? m.checkpoints : [])
       .map((c) => ({ due: String(c.due).slice(0, 10), target: Number(c.target) }))
       .filter((c) => /^\d{4}-\d{2}-\d{2}$/.test(c.due) && Number.isFinite(c.target))
@@ -208,6 +211,7 @@ export async function saveSuggestions(goalId: string, proposals: Partial<NewMeas
     period: p.kind === "effort" && p.period && PERIODS.includes(p.period) ? p.period : "week",
     preferred_time: p.preferred_time ?? "any",
     checkpoints: Array.isArray(p.checkpoints) ? p.checkpoints : [],
+    days: Array.isArray(p.days) && p.days.length ? p.days : null,
   }));
   const { data, error } = await supabase.from("goal_measures").insert(rows).select("*");
   if (error) throw new Error(error.message);
@@ -240,6 +244,7 @@ export function effortGoals(goals: PlanGoal[], measures: GoalMeasure[]): PlanGoa
         measure_effort: m.effort,
         period: m.period ?? "week",
         measure_created_at: m.created_at,
+        days: m.days,
         plan_mode: m.plan_mode,
         cadence_sessions_per_week: m.sessions_per_week,
         session_minutes: m.session_minutes,
@@ -270,13 +275,22 @@ export function splitHours(hours: number, sessions?: number | null): { sessions:
   return { sessions: n, minutes: Math.max(10, Math.round(total / n / 5) * 5) };
 }
 
+export const DAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+/** "Tue & Thu", "Mon, Wed & Fri" — Monday-first order. */
+export function daysText(days: number[] | null | undefined): string {
+  if (!days?.length) return "";
+  const names = [...days].sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7)).map((d) => DAY_SHORT[d]);
+  return names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} & ${names[names.length - 1]}`;
+}
+
 export function describeEffort(m: GoalMeasure, calendarName?: string): string {
   const n = m.sessions_per_week ?? 0;
   const per = PERIOD_WORD[m.period ?? "week"];
+  const on = m.days?.length ? ` · ${daysText(m.days)}` : "";
   if (m.plan_mode === "count") return `${n}× a ${per} · counted from ${calendarName ?? "a calendar"}${m.count_keyword ? ` (titles with “${m.count_keyword}”)` : ""}`;
   const mins = m.session_minutes ?? 30;
   const hours = (n * mins) / 60;
-  return `${n} × ${mins} min a ${per} (${Number.isInteger(hours) ? hours : hours.toFixed(1)} h) · scheduled by the app`;
+  return `${n} × ${mins} min a ${per} (${Number.isInteger(hours) ? hours : hours.toFixed(1)} h)${on} · scheduled by the app`;
 }
 
 export function describeOutcome(m: GoalMeasure): string {
