@@ -10,6 +10,7 @@ import { formatLocalDate } from "./recurrence";
 import {
   PLAN_GOAL_COLUMNS,
   countGoalEvents,
+  goalSessionsInWeek,
   goalShortName,
   loadWeekData,
   reviewForPlan,
@@ -26,7 +27,7 @@ import { dailyAwareness, dutySentence, dutyStats, periodMarkers, type DailyAware
 import { loadAwarenessRules } from "./awarenessRules";
 import type { LifePillar, Task, UnscheduledItem } from "./types";
 import { factCheck, type Removed } from "./factCheck";
-import { effortGoals, loadEntries, loadMeasures, outcomeFact, outcomeStatus, ownsHabit, planKey, type GoalMeasure, type OutcomeStatus } from "./measures";
+import { effortGoals, loadEntries, loadMeasures, outcomeFact, outcomeStatus, planKey, type GoalMeasure, type OutcomeStatus } from "./measures";
 
 export type BriefingKind = "daily" | "weekly" | "monthly";
 
@@ -358,8 +359,7 @@ function goalProgress(goals: PlanGoal[], week: WeekData | undefined, now: Date, 
   const placedById = new Map(r.placed.map((p) => [p.id, p]));
   const today = startOfDay(now);
   return planned.map((g) => {
-    const sessions = week.habits
-      .filter((h) => ownsHabit(g, h) && new Date(h.search_start) >= week.weekStart && new Date(h.search_start) < week.weekEnd)
+    const sessions = goalSessionsInWeek(g, week)
       .map((h) => {
         const p = placedById.get(h.id);
         return { id: h.id, start: p?.start ?? new Date(h.search_start), end: p?.end ?? new Date(h.search_end) };
@@ -625,7 +625,7 @@ async function lookBack(label: string, start: Date, end: Date, goals: PlanGoal[]
     const results = verifyWeek(plansActive, week);
     goalLines = results.map((r) => {
       const goal = plansActive.find((g) => planKey(g) === r.key)!;
-      const sessions = week.habits.filter((h) => ownsHabit(goal, h)).map((h) => ({ id: h.id, start: new Date(h.search_start), end: new Date(h.search_end) }));
+      const sessions = goalSessionsInWeek(goal, week).map((h) => ({ id: h.id, start: new Date(h.search_start), end: new Date(h.search_end) }));
       const done = goalDayEntries(goal, sessions, goal.plan_mode === "count" ? countGoalEvents(goal, week) : [], items).filter((e) => e.done).length;
       return { goal, held: r.held, done, tracked: end > TICKS_TRACKED_FROM, target: r.target, status: reviewForPlan(reviews, goal, firstMeasure(goal.id))?.status ?? null };
     });

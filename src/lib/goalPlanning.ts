@@ -119,6 +119,8 @@ export interface WeekData {
   /** Everything that occupies time this week, as fixed events (incl. recurring occurrences). */
   busy: FixedEvent[];
   habits: Habit[]; // non-recurring
+  /** Recurring habits; their occurrences this week are in `busy` as `<id>--<date>`. */
+  recurringHabits: Habit[];
   tasks: Task[]; // non-recurring
   map: MapRow[];
   fixedById: Map<string, FixedEvent>;
@@ -202,6 +204,7 @@ export async function loadWeekData(weekStart: Date): Promise<WeekData> {
     weekEnd,
     busy,
     habits: habits.filter((h) => !h.recurrence_enabled),
+    recurringHabits: habits.filter((h) => h.recurrence_enabled),
     tasks: tasks.filter((t) => !t.recurrence_enabled && !t.completed_at),
     map: (mp.data as MapRow[]) ?? [],
     fixedById: new Map(fixed.map((f) => [f.id, f])),
@@ -339,6 +342,22 @@ function asBusy(id: string, name: string, start: Date, end: Date): FixedEvent {
  * across the week (one per day where possible) inside the goal's preferred
  * time of day, and never in the past.
  */
+/**
+ * A goal's sessions this week: one-off sessions plus each occurrence of a
+ * repeating session (e.g. a weekly check-in set to repeat every Sunday).
+ */
+export function goalSessionsInWeek(goal: Pick<PlanGoal, "id" | "measure_id">, week: WeekData): (Habit & { recurring?: boolean })[] {
+  const inWeek = (d: string) => new Date(d) >= week.weekStart && new Date(d) < week.weekEnd;
+  const once = week.habits.filter((h) => ownsHabit(goal, h) && inWeek(h.search_start));
+  const repeats = (week.recurringHabits ?? []).filter((h) => ownsHabit(goal, h));
+  const occ = repeats.flatMap((h) =>
+    week.busy
+      .filter((b) => b.id.startsWith(`${h.id}--`) && inWeek(b.start_time))
+      .map((b) => ({ ...h, search_start: b.start_time, search_end: b.end_time, recurring: true }))
+  );
+  return [...once, ...occ].sort((a, b) => new Date(a.search_start).getTime() - new Date(b.search_start).getTime());
+}
+
 export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), blocks: BlockRange[] = []): GoalWeekPlan[] {
   // Everything the scheduler already places this week counts as busy.
   const base = runEngine(week.weekStart, week.busy, week.habits, week.tasks);
@@ -351,9 +370,7 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), bl
   for (const goal of sortByPriority(goals)) {
     const wt = weeklyTarget(goal, week);
     const { pace } = wt;
-    const existing = week.habits.filter(
-      (h) => ownsHabit(goal, h) && new Date(h.search_start) >= week.weekStart && new Date(h.search_start) < week.weekEnd
-    );
+    const existing = goalSessionsInWeek(goal, week);
     // Already has sessions this week (you placed them anyway): it has started, count those.
     const startsNext = wt.startsNext && existing.length === 0;
     const target = wt.startsNext && existing.length ? existing.length : wt.target;
@@ -531,10 +548,9 @@ export function verifyWeek(goals: PlanGoal[], week: WeekData, doneByGoal: Map<st
       const n = countGoalEvents(g, week).length;
       return { goalId: g.id, key, target, held: n, offCalendar: 0, done };
     }
-    const mine = week.habits.filter(
-      (h) => ownsHabit(g, h) && new Date(h.search_start) >= week.weekStart && new Date(h.search_start) < week.weekEnd
-    );
-    const held = mine.filter((h) => placedIds.has(h.id)).length;
+    const mine = goalSessionsInWeek(g, week);
+    // Repeating sessions sit on the calendar as fixed occurrences: they always hold.
+    const held = mine.filter((h) => h.recurring || placedIds.has(h.id)).length;
     return { goalId: g.id, key, target, held, offCalendar: mine.length - held, done };
   });
 }
