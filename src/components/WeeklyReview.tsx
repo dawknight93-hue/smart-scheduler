@@ -22,12 +22,14 @@ import {
   type ProposedSession,
   type VerifyResult,
   type WeekReviewRow,
+  type WeekData,
 } from "@/lib/goalPlanning";
 import { goalDayEntries, loadDailyItems, setCountedDone, setSessionDone, writeDailyPlan, type DailyItem, type DayEntry } from "@/lib/goalDaily";
 import { daysText, effortGoals, loadEntries, loadMeasures, planKey, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
 import { OutcomeTracker } from "@/components/MeasureWidgets";
 import { completeGoal } from "@/lib/goalCompletion";
 import { blockRanges, loadLifeBlocks, DEFAULT_BLOCKS } from "@/lib/lifeBlocks";
+import { ReviewWeekGrid } from "@/components/ReviewWeekGrid";
 
 // Names of the big life blocks, for "Stays out of: …" (filled on load).
 let blockNames: Record<string, string> = Object.fromEntries(DEFAULT_BLOCKS.map((b) => [b.key, b.label]));
@@ -51,6 +53,10 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
   const [rewriting, setRewriting] = useState<string | null>(null);
   const [measures, setMeasures] = useState<GoalMeasure[]>([]);
   const [entries, setEntries] = useState<MeasureEntry[]>([]);
+  // The week's calendar beside the cards (a tab on phones).
+  const [weekData, setWeekData] = useState<WeekData | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [mobileTab, setMobileTab] = useState<"review" | "calendar">("review");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -70,6 +76,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
       setGoals(all);
       const [week, ms, blocks] = await Promise.all([loadWeekData(weekStart), loadMeasures(), loadLifeBlocks()]);
       blockNames = Object.fromEntries(blocks.map((b) => [b.key, b.label]));
+      setWeekData(week);
       setMeasures(ms);
       setEntries(await loadEntries(ms.filter((m) => m.kind === "outcome" && m.status === "active").map((m) => m.id)));
       // One card per effort measure (goals without measures keep their single weekly target).
@@ -210,7 +217,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
   }
 
   return (
-    <div className="max-w-3xl mx-auto w-full p-4 md:p-6">
+    <div className="max-w-[1600px] mx-auto w-full p-4 md:p-6">
       <div className="flex items-center gap-3 mb-1">
         <ClipboardCheck className="w-5 h-5 text-blue-400" />
         <h1 className="text-xl font-semibold text-slate-100">Weekly Review</h1>
@@ -234,6 +241,20 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
 
       {error && <div className="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-300">{error}</div>}
 
+      <div className="lg:hidden mb-4 grid grid-cols-2 rounded-lg bg-slate-900 border border-slate-800 p-1 text-sm">
+        {(["review", "calendar"] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setMobileTab(t)}
+            className={`py-1.5 rounded-md font-medium ${mobileTab === t ? "bg-blue-600 text-white" : "text-slate-400"}`}
+          >
+            {t === "review" ? "Review" : "Calendar"}
+          </button>
+        ))}
+      </div>
+
+      <div className="lg:grid lg:grid-cols-[minmax(360px,500px)_minmax(0,1fr)] lg:gap-5 lg:items-start">
+      <div className={mobileTab === "calendar" ? "hidden lg:block" : ""}>
       {loading ? (
         <div className="flex items-center gap-2 text-sm text-slate-400"><Loader2 className="w-4 h-4 animate-spin" /> Preparing the week…</div>
       ) : (
@@ -273,8 +294,13 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
           )}
 
           {plans.map((plan, idx) => (
-            <GoalCard
+            <div
               key={planKey(plan.goal)}
+              id={`review-card-${planKey(plan.goal)}`}
+              onClickCapture={() => setSelectedKey(planKey(plan.goal))}
+              className={`rounded-xl transition-shadow ${selectedKey === planKey(plan.goal) ? "ring-2 ring-blue-500" : ""}`}
+            >
+            <GoalCard
               plan={plan}
               weekStart={weekStart}
               review={reviewFor(plan.goal)}
@@ -293,6 +319,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
               onRewrite={() => rewriteFocus(plan)}
               rewriting={rewriting === planKey(plan.goal)}
             />
+            </div>
           ))}
 
           {outcomeOnly.map((g) => (
@@ -352,6 +379,23 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
           )}
         </div>
       )}
+      </div>
+      <div className={`${mobileTab === "calendar" ? "block" : "hidden"} lg:block lg:sticky lg:top-4 h-[75dvh] lg:h-[calc(100dvh-2rem)]`}>
+        {weekData && !loading && (
+          <ReviewWeekGrid
+            week={weekData}
+            plans={plans}
+            removed={removed}
+            reviewedKeys={new Set(plans.filter((p) => reviewFor(p.goal)).map((p) => planKey(p.goal)))}
+            selectedKey={selectedKey}
+            onSelect={(k) => {
+              setSelectedKey(k);
+              if (k && window.matchMedia("(min-width: 1024px)").matches) document.getElementById(`review-card-${k}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+            }}
+          />
+        )}
+      </div>
+      </div>
     </div>
   );
 }
