@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AlertTriangle, CheckCircle2, Loader2, Plus, TrendingDown, TrendingUp, Trash2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, Loader2, Plus, TrendingDown, TrendingUp, Trash2 } from "lucide-react";
 import { formatLocalDate } from "@/lib/recurrence";
 import { addEntry, deleteEntry, fmt, outcomeStatus, paceLadder, withUnit, WEEKDAYS, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
 import { completeGoal } from "@/lib/goalCompletion";
@@ -40,6 +40,7 @@ export function OutcomeTracker({
   onChange,
   showHistory = false,
   deadline,
+  defaultOpen,
 }: {
   measure: GoalMeasure;
   entries: MeasureEntry[];
@@ -47,9 +48,33 @@ export function OutcomeTracker({
   showHistory?: boolean;
   /** The goal's deadline, for the week/month/quarter/year pace. */
   deadline?: string | null;
+  /** Start expanded (remembered per number after you open or close it). */
+  defaultOpen?: boolean;
 }) {
   const s = outcomeStatus(measure, entries);
   const ladder = paceLadder(measure, entries, deadline);
+  // Collapsible: the header stays as a summary; pace, logging and history open below it.
+  const openKey = `smartScheduler.outcomeOpen.${measure.id}`;
+  const [open, setOpen] = useState<boolean>(() => {
+    try {
+      const v = window.localStorage.getItem(openKey);
+      if (v === "1" || v === "0") return v === "1";
+    } catch {
+      // storage unavailable
+    }
+    return defaultOpen ?? showHistory;
+  });
+  const toggle = () =>
+    setOpen((o) => {
+      try {
+        window.localStorage.setItem(openKey, o ? "0" : "1");
+      } catch {
+        // storage unavailable
+      }
+      return !o;
+    });
+  // Things you count (check-ins, nights, items) read in whole numbers, not "0.3 a week".
+  const integral = [measure.baseline ?? 0, measure.target ?? 0, ...measure.checkpoints.map((c) => c.target)].every((v) => Number.isInteger(v));
   const [value, setValue] = useState("");
   const [date, setDate] = useState(() => formatLocalDate(new Date()));
   const [busy, setBusy] = useState(false);
@@ -96,7 +121,7 @@ export function OutcomeTracker({
 
   return (
     <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-3">
-      <div className="flex items-start gap-3">
+      <button type="button" onClick={toggle} aria-expanded={open} className="w-full flex items-start gap-3 text-left">
         <Trend className="w-4 h-4 mt-0.5 text-blue-300 shrink-0" />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-x-2">
@@ -128,7 +153,7 @@ export function OutcomeTracker({
               </span>
             </p>
           )}
-          {s.past.length > 0 && (
+          {open && s.past.length > 0 && (
             <p className="text-[11px] text-slate-500 mt-0.5">
               {s.past
                 .slice(-2)
@@ -142,14 +167,19 @@ export function OutcomeTracker({
             </p>
           )}
         </div>
-        <Sparkline m={measure} entries={mine} />
-      </div>
+        {open && <Sparkline m={measure} entries={mine} />}
+        <ChevronDown className={`w-4 h-4 mt-0.5 shrink-0 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} aria-hidden="true" />
+      </button>
+
+      {open && (
+        <>
 
       {ladder.length > 0 && (
         <div className="mt-2 grid gap-1" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(118px, 1fr))" }}>
           {ladder.map((r) => {
             const sign = (v: number) => (v > 0 ? "+" : v < 0 ? "−" : "±");
-            const amt = (v: number) => `${sign(v)}${withUnit(Math.abs(v), measure.unit)}`;
+            const amt = (v: number) => `${sign(v)}${withUnit(integral ? Math.round(Math.abs(v)) : Math.abs(v), measure.unit)}`;
+            const aim = (v: number) => withUnit(integral ? Math.round(v) : v, measure.unit);
             const ahead = r.soFar !== null && (measure.direction === "up" ? r.soFar >= r.needed : r.soFar <= r.needed);
             const per = r.level === "week" ? "week" : r.level === "month" ? "month" : r.level === "quarter" ? "quarter" : "";
             const title = r.level === "goal" ? r.label : r.level === "year" ? `By end of ${r.short}` : `Per ${per}`;
@@ -165,16 +195,23 @@ export function OutcomeTracker({
                   </>
                 ) : r.level === "year" ? (
                   <>
-                    <div className="text-xs font-semibold text-slate-100 tabular-nums truncate">{withUnit(r.targetAtEnd, measure.unit)}</div>
+                    <div className="text-xs font-semibold text-slate-100 tabular-nums truncate">{aim(r.targetAtEnd)}</div>
                     <div className={`text-[10.5px] tabular-nums truncate ${ahead ? "text-emerald-300" : "text-slate-400"}`}>
                       {r.soFar === null ? `${amt(r.needed)} this year` : `${amt(r.soFar)} of ${amt(r.needed)}`}
                     </div>
                   </>
                 ) : (
                   <>
-                    <div className="text-xs font-semibold text-slate-100 tabular-nums truncate">{r.rate !== null ? amt(r.rate) : "—"}</div>
+                    <div className="text-xs font-semibold text-slate-100 tabular-nums truncate">
+                      {r.rate === null ? "—" : integral && Math.abs(r.rate) > 0 && Math.abs(r.rate) < 0.95 ? `1 every ${Math.round(1 / Math.abs(r.rate))} ${per}s` : amt(r.rate)}
+                    </div>
                     <div className={`text-[10.5px] tabular-nums truncate ${r.soFar === null ? "text-slate-500" : ahead ? "text-emerald-300" : "text-slate-400"}`}>
-                      {r.short}: {r.soFar === null ? `aim ${withUnit(r.targetAtEnd, measure.unit)}` : `${amt(r.soFar)} so far`}
+                      {r.short}:{" "}
+                      {r.soFar === null
+                        ? integral && Math.round(r.targetAtEnd) === Math.round(r.startValue)
+                          ? "none due yet"
+                          : `aim ${aim(r.targetAtEnd)}`
+                        : `${amt(r.soFar)} so far`}
                     </div>
                   </>
                 )}
@@ -251,6 +288,8 @@ export function OutcomeTracker({
             ))}
           </ul>
         </details>
+      )}
+        </>
       )}
     </div>
   );

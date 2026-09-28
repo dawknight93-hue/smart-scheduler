@@ -339,7 +339,7 @@ export function GoalPlanPanel({ goalId }: { goalId: string }) {
             ) : (
               <div key={m.id} className="relative">
                 <OutcomeTracker measure={m} entries={entries} onChange={setEntries} showHistory deadline={goal.deadline} />
-                <div className="absolute top-2 right-2">
+                <div className="absolute top-2 right-9">
                   <MeasureActions onEdit={() => setEditing(m)} onArchive={() => setStatus(m, "archived")} small />
                 </div>
               </div>

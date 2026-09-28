@@ -479,7 +479,7 @@ function GoalCard({
               })}
             </ul>
           )}
-          {plan.startsNext && (
+          {plan.startsNext && !review && (
             <p className="text-xs text-slate-300 mt-1">
               Added this week — it starts next week
               {g.days?.length ? ` on ${daysText(g.days)}` : ""}. Nothing to schedule here; open next week's review to place its sessions.
