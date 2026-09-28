@@ -665,7 +665,15 @@ export function runEngine(
     const evStart = new Date(ev.start_time);
     const evEnd = new Date(ev.end_time);
     const weekEndDate = addDays(weekStart, 7);
-    if (evStart >= weekStart && evStart < weekEndDate) {
+    // All-day events are stored at UTC midnights, so compare calendar dates: a
+    // Monday all-day event (00:00 UTC = Sunday evening here) and one that began
+    // before this week (e.g. an OFF day running Sun–Mon) still belong to this week.
+    const utcDay = (d: Date) => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    const localDay = (d: Date) => Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+    const inWeek = ev.is_all_day
+      ? utcDay(evStart) < localDay(weekEndDate) && Math.max(utcDay(evEnd), utcDay(evStart) + 86400000) > localDay(weekStart)
+      : evStart >= weekStart && evStart < weekEndDate;
+    if (inWeek) {
       placed.push({
         id: ev.id,
         name: ev.name,
