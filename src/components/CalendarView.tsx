@@ -764,6 +764,7 @@ export function CalendarView({
     // Feature 2: Auto-detect all-day Fixed Events (24h+ duration)
     const taskById = new Map(tasks.map((t) => [t.id, t]));
     const habitById = new Map(habits.map((h) => [h.id, h]));
+    const feDone = new Set(fixedEvents.filter((e) => e.source_done).map((e) => e.id));
     const finalPlaced = [...enriched, ...enrouteItems, ...recurringItems].map((p) => {
       // Done state for anything you can complete from the calendar.
       if (p.isRecurringOccurrence && (p.recurringItemKind === "Task" || p.recurringItemKind === "Habit")) {
@@ -773,6 +774,9 @@ export function CalendarView({
         p = { ...p, completed: ids.every((id) => !!taskById.get(id)?.completed_at) };
       } else if (p.kind === "Fixed Event" && goalSessionDone.has(`src:${p.id}`)) {
         p = { ...p, completed: !!goalSessionDone.get(`src:${p.id}`)?.done };
+      } else if (p.kind === "Fixed Event" && feDone.has(p.id)) {
+        // Finished according to its own calendar (a Runna completed activity).
+        p = { ...p, completed: true };
       } else if (p.kind === "Habit" && habitById.get(p.id)?.goal_id) {
         p = { ...p, completed: !!goalSessionDone.get(p.id)?.done };
       }
@@ -787,6 +791,8 @@ export function CalendarView({
     // Runs etc. you ticked done that their calendar has since removed (Runna clears finished
     // workouts): keep them on the calendar, done, so the record doesn't vanish.
     const liveIds = new Set(fixedEvents.map((e) => e.id));
+    // Days that already have a finished-activity event (its replacement) don't need the kept copy.
+    const activityDays = new Set(fixedEvents.filter((e) => e.source_done).map((e) => new Date(e.start_time).toDateString()));
     const pillarOfGoal = new Map(countGoals.map((g) => [g.id, g.pillar]));
     const kept: PlacedItem[] = keptRows
       .filter((r) => r.source_item_id && !liveIds.has(r.source_item_id))
@@ -813,7 +819,7 @@ export function CalendarView({
           keptDailyId: r.id,
         };
       })
-      .filter((p) => p.end > displayStart && p.start < displayEnd);
+      .filter((p) => p.end > displayStart && p.start < displayEnd && (p.isAllDay || !activityDays.has(p.start.toDateString())));
     return { placed: [...finalPlaced, ...kept], unscheduled: result.unscheduled };
   }, [weekStart, viewMode, displayStart, displayEnd, fixedEvents, habits, tasks, eventMap, enrouteBlocks, occurrences, fixedEventOccurrences, habitOccurrences, goalSessionDone, keptRows, countGoals]);
 
