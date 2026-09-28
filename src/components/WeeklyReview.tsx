@@ -25,7 +25,7 @@ import {
   type WeekData,
 } from "@/lib/goalPlanning";
 import { goalDayEntries, loadDailyItems, setCountedDone, setSessionDone, writeDailyPlan, type DailyItem, type DayEntry } from "@/lib/goalDaily";
-import { daysText, effortGoals, loadEntries, loadMeasures, planKey, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
+import { DAY_SHORT, daysText, effortGoals, loadEntries, loadMeasures, planKey, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
 import { OutcomeTracker } from "@/components/MeasureWidgets";
 import { completeGoal } from "@/lib/goalCompletion";
 import { blockRanges, loadLifeBlocks, DEFAULT_BLOCKS } from "@/lib/lifeBlocks";
@@ -513,6 +513,11 @@ function GoalCard({
                   <li key={s.key} className={`flex items-center gap-2 text-sm tabular-nums ${gone ? "text-slate-600 line-through" : "text-slate-200"}`}>
                     <span className="w-28">{dayLabel(s.start)}</span>
                     <span>{hhmm(s.start)}–{hhmm(s.end)}</span>
+                    {s.movedFrom && !gone && (
+                      <span className="text-[11px] text-amber-300" title="Your chosen day had no open slot; this is the nearest open day. Move it after approving if you like.">
+                        {DAY_SHORT[s.movedFrom.getDay()]} full → nearest open day
+                      </span>
+                    )}
                     {!gone && (
                       <button onClick={() => onRemove(s)} className="ml-auto p-1 rounded text-slate-500 hover:text-rose-300 hover:bg-rose-500/10" aria-label="Remove this session">
                         <X className="w-3.5 h-3.5" />
@@ -532,7 +537,7 @@ function GoalCard({
           {plan.unplaced > 0 && !review && (
             <p className="text-xs text-amber-300 mt-1.5">
               {plan.unplaced} session{plan.unplaced > 1 ? "s" : ""} couldn't fit this week (
-              {g.days?.length ? `only ${daysText(g.days)}, ` : ""}preferred time, UTA days and higher-priority goals come first).
+              {g.days?.length ? `no open slot on ${daysText(g.days)} or any nearby day; ` : ""}preferred time, UTA days and higher-priority goals come first).
             </p>
           )}
         </div>
