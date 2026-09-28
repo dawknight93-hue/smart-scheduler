@@ -60,6 +60,8 @@ export interface Habit {
   effort_auto?: boolean;
   /** You confirmed this one may sit on a UTA day (the usual rule is skipped). */
   uta_override?: boolean;
+  /** You confirmed this one may sit in quiet hours (21:00–09:00); it stays at its pinned time. */
+  quiet_override?: boolean;
   recurrence_enabled?: boolean;
   recurrence_frequency?: "daily" | "weekly" | "monthly" | null;
   recurrence_interval?: number | null;
@@ -78,6 +80,8 @@ export interface Task {
   name: string;
   /** You confirmed this one may sit on a UTA day (the usual rule is skipped). */
   uta_override?: boolean;
+  /** You confirmed this one may sit in quiet hours; it stays at its pinned time. */
+  quiet_override?: boolean;
   tier: number;
   duration_min: number;
   search_start: string;
@@ -174,6 +178,8 @@ export interface PlacedItem {
   recurrenceSummary?: string;
   /** Allowed on UTA days because you overrode the rule for it. */
   utaOverride?: boolean;
+  /** Allowed in quiet hours because you overrode the rule for it. */
+  quietOverride?: boolean;
 }
 
 /** Why the engine couldn't place an item in the week being scheduled. */

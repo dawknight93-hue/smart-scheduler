@@ -383,6 +383,7 @@ interface BatchedTask {
   effort: Effort;
   effortAuto: boolean;
   utaOk?: boolean;
+  quietOk?: boolean;
 }
 
 function taskEffort(t: Task): { effort: Effort; auto: boolean } {
@@ -391,9 +392,10 @@ function taskEffort(t: Task): { effort: Effort; auto: boolean } {
 }
 
 function batchShortTasks(taskList: Task[]): BatchedTask[] {
-  const short = taskList.filter((t) => t.duration_min <= SHORT_TASK_MAX);
+  // A task you pinned into quiet hours stays on its own (never batched).
+  const short = taskList.filter((t) => t.duration_min <= SHORT_TASK_MAX && !t.quiet_override);
   const normal: BatchedTask[] = taskList
-    .filter((t) => t.duration_min > SHORT_TASK_MAX)
+    .filter((t) => t.duration_min > SHORT_TASK_MAX || t.quiet_override)
     .map((t) => ({
       name: t.name,
       tier: t.tier,
@@ -408,6 +410,7 @@ function batchShortTasks(taskList: Task[]): BatchedTask[] {
       effort: taskEffort(t).effort,
       effortAuto: taskEffort(t).auto,
       utaOk: !!t.uta_override,
+      quietOk: !!t.quiet_override,
     }));
 
   const byContext = new Map<ContextTag, Task[]>();
@@ -471,6 +474,8 @@ interface Placeable {
   effortAuto: boolean;
   /** You overrode the UTA rule for this one. */
   utaOk?: boolean;
+  /** You pinned this one into quiet hours: it stays exactly where you put it. */
+  quietOk?: boolean;
 }
 
 export function runEngine(
@@ -525,6 +530,7 @@ export function runEngine(
       kind: "Habit",
       isBatch: false,
       utaOk: !!h.uta_override,
+      quietOk: !!h.quiet_override,
       effort: h.effort ?? guessEffort({ name: h.name, context: h.context, durationMin: h.duration_min, pillar: h.pillar }).effort,
       effortAuto: !h.effort || h.effort_auto !== false,
     });
@@ -551,6 +557,7 @@ export function runEngine(
       effort: b.effort,
       effortAuto: b.effortAuto,
       utaOk: b.utaOk,
+      quietOk: b.quietOk,
     });
   }
 
@@ -562,6 +569,33 @@ export function runEngine(
   const plan = buildPlanContext(fixedEvents);
 
   for (const p of placeables) {
+    if (p.quietOk) {
+      // Pinned outside scheduling hours by you: keep it exactly at its start.
+      if (p.searchStart >= addDays(weekStart, 7) || p.searchStart < weekStart) continue;
+      const end = addMinutes(p.searchStart, p.durationMin);
+      for (const sl of allSlots) if (sl >= p.searchStart && sl < end) busy.add(slotKey(sl));
+      placedContexts.push({ start: p.searchStart, end, context: p.context });
+      placed.push({
+        id: p.id,
+        name: p.name,
+        kind: p.kind,
+        tier: p.tier,
+        context: p.context,
+        pillar: p.pillar,
+        start: p.searchStart,
+        end,
+        room: p.room,
+        isBatch: p.isBatch,
+        memberNames: p.memberNames,
+        memberIds: p.memberIds,
+        effort: p.effort,
+        effortAuto: p.effortAuto,
+        placementReason: "Pinned here by you (quiet-hours override)",
+        quietOverride: true,
+        ...(p.utaOk ? { utaOverride: true } : {}),
+      });
+      continue;
+    }
     const isHomeOnly = isUtaBlocked(p.pillar, p.context) && !p.utaOk;
     const needsHome = p.pillar === "family" || AWAY_BLOCKED_CONTEXTS.includes(p.context);
     const effectiveBusy =
