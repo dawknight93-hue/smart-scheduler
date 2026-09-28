@@ -143,7 +143,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
     return m;
   }, [plans]);
   const ownerOf = useCallback(
-    (it: PlacedItem) => ownerMap.get(it.recurringItemId ?? it.id.split("--")[0]) ?? ownerMap.get(it.id),
+    (it: PlacedItem) => ownerMap.get(it.recurringItemId ?? it.id.replace(/^kept-/, "").split("--")[0]) ?? ownerMap.get(it.id),
     [ownerMap]
   );
   const proposals = useMemo<EmbedProposal[]>(

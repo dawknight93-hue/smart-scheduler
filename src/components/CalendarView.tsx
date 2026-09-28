@@ -369,6 +369,8 @@ export function CalendarView({
   const [habitOccurrences, setHabitOccurrences] = useState<HabitOccurrence[]>([]);
   // 🎯 goal sessions ticked done (goal_daily_items), by habit id
   const [goalSessionDone, setGoalSessionDone] = useState<Map<string, { id: string; done: boolean }>>(new Map());
+  // Counted events ticked done (e.g. runs); shown even after their own calendar drops them.
+  const [keptRows, setKeptRows] = useState<{ id: string; goal_id: string; source_item_id: string | null; day: string; start_at: string | null; minutes: number | null; focus: string }[]>([]);
   // Goals that count events from one of your calendars (e.g. runs from Runna): those events can be ticked done here.
   const [countGoals, setCountGoals] = useState<PlanGoal[]>([]);
   useEffect(() => {
@@ -472,7 +474,7 @@ export function CalendarView({
       supabase.from("task_occurrences").select("*").gte("occurrence_date", formatLocalDate(rangeStart)).lte("occurrence_date", formatLocalDate(addDays(rangeEnd, -1))),
       supabase.from("fixed_event_occurrences").select("*").gte("occurrence_date", formatLocalDate(rangeStart)).lte("occurrence_date", formatLocalDate(addDays(rangeEnd, -1))),
       supabase.from("habit_occurrences").select("*").gte("occurrence_date", formatLocalDate(rangeStart)).lte("occurrence_date", formatLocalDate(addDays(rangeEnd, -1))),
-      supabase.from("goal_daily_items").select("id, habit_id, source_item_id, day, done").or("habit_id.not.is.null,source_item_id.not.is.null").gte("day", formatLocalDate(addDays(rangeStart, -7))).lt("day", formatLocalDate(addDays(rangeEnd, 7))),
+      supabase.from("goal_daily_items").select("id, goal_id, habit_id, source_item_id, day, start_at, minutes, focus, done").or("habit_id.not.is.null,source_item_id.not.is.null").gte("day", formatLocalDate(addDays(rangeStart, -7))).lt("day", formatLocalDate(addDays(rangeEnd, 7))),
     ]);
 
     const feById = new Map<string, FixedEvent>();
@@ -501,7 +503,9 @@ export function CalendarView({
     // Keys: a one-off 🎯 session's habit id, "<habit id>|<day>" for a repeating one,
     // and "src:<event id>" for an event a goal counts (e.g. a Runna run).
     const gdMap = new Map<string, { id: string; done: boolean }>();
-    for (const r of (gdRes.data as { id: string; habit_id: string | null; source_item_id: string | null; day: string; done: boolean }[]) ?? []) {
+    const gdRows = (gdRes.data as { id: string; goal_id: string; habit_id: string | null; source_item_id: string | null; day: string; start_at: string | null; minutes: number | null; focus: string; done: boolean }[]) ?? [];
+    setKeptRows(gdRows.filter((r) => r.source_item_id && r.done));
+    for (const r of gdRows) {
       const v = { id: r.id, done: r.done };
       if (r.habit_id) {
         gdMap.set(r.habit_id, v);
@@ -780,8 +784,38 @@ export function CalendarView({
       }
       return p;
     });
-    return { placed: finalPlaced, unscheduled: result.unscheduled };
-  }, [weekStart, viewMode, displayStart, displayEnd, fixedEvents, habits, tasks, eventMap, enrouteBlocks, occurrences, fixedEventOccurrences, habitOccurrences, goalSessionDone]);
+    // Runs etc. you ticked done that their calendar has since removed (Runna clears finished
+    // workouts): keep them on the calendar, done, so the record doesn't vanish.
+    const liveIds = new Set(fixedEvents.map((e) => e.id));
+    const pillarOfGoal = new Map(countGoals.map((g) => [g.id, g.pillar]));
+    const kept: PlacedItem[] = keptRows
+      .filter((r) => r.source_item_id && !liveIds.has(r.source_item_id))
+      .map((r) => {
+        const [y, mo, d] = r.day.split("-").map(Number);
+        const allDay = !r.start_at;
+        const start = allDay ? new Date(Date.UTC(y, mo - 1, d)) : new Date(r.start_at!);
+        const end = allDay ? new Date(Date.UTC(y, mo - 1, d + 1)) : new Date(start.getTime() + (r.minutes ?? 30) * 60000);
+        return {
+          id: `kept-${r.source_item_id}`,
+          name: r.focus,
+          kind: "Fixed Event" as ItemKind,
+          tier: 0,
+          context: "other" as ContextTag,
+          start,
+          end,
+          pillar: pillarOfGoal.get(r.goal_id) ?? null,
+          room: 0,
+          isBatch: false,
+          isAllDay: allDay,
+          blocksSchedule: false,
+          completed: true,
+          readOnly: true,
+          keptDailyId: r.id,
+        };
+      })
+      .filter((p) => p.end > displayStart && p.start < displayEnd);
+    return { placed: [...finalPlaced, ...kept], unscheduled: result.unscheduled };
+  }, [weekStart, viewMode, displayStart, displayEnd, fixedEvents, habits, tasks, eventMap, enrouteBlocks, occurrences, fixedEventOccurrences, habitOccurrences, goalSessionDone, keptRows, countGoals]);
 
   // Weekly Review: add its proposed sessions and mark what belongs to the selected card.
   const embedProposals = embed?.proposals;
@@ -1087,7 +1121,7 @@ export function CalendarView({
   function canComplete(item: PlacedItem): boolean {
     if (item.isRecurringOccurrence) return item.recurringItemKind === "Task" || item.recurringItemKind === "Habit";
     if (item.kind === "Task") return true;
-    if (countGoalFor(item)) return true;
+    if (item.keptDailyId || countGoalFor(item)) return true;
     return item.kind === "Habit" && !!habits.find((h) => h.id === item.id)?.goal_id;
   }
 
@@ -1132,12 +1166,15 @@ export function CalendarView({
             });
         if (gErr) throw new Error(gErr.message);
       }
+    } else if (item.keptDailyId) {
+      const { error } = await supabase.from("goal_daily_items").update({ done, done_at: done ? now : null }).eq("id", item.keptDailyId);
+      if (error) throw new Error(error.message);
     } else if (item.kind === "Fixed Event") {
       const goal = countGoalFor(item);
       if (!goal) return;
       // All-day events are stored at UTC midnight: use that calendar day.
       const start = item.isAllDay ? new Date(item.start.getUTCFullYear(), item.start.getUTCMonth(), item.start.getUTCDate()) : item.start;
-      await setCountedDone(goal, { id: item.id, name: item.name, start, allDay: !!item.isAllDay }, getWeekStart(start), done);
+      await setCountedDone(goal, { id: item.id, name: item.name, start, allDay: !!item.isAllDay }, getWeekStart(start), done, item.isAllDay ? undefined : Math.round((item.end.getTime() - item.start.getTime()) / 60000));
     } else if (item.kind === "Task") {
       const ids = item.isBatch && item.memberIds?.length ? item.memberIds : [item.id];
       const before = tasks.filter((t) => ids.includes(t.id));
@@ -2817,6 +2854,7 @@ function googleEventUrl(eventId: string, calendarId: string): string | undefined
 }
 
 function describeItemSource(item: PlacedItem, connections: CalendarConnection[], googleConnected: boolean): ItemSource {
+  if (item.keptDailyId) return { title: "Kept record", detail: "Ticked done here; no longer on its Google calendar", fromGoogle: false };
   // Pulled from Google: the event map records which calendar it came from.
   if (item.googleEventId && item.googleCalendarId && item.googleCalendarRole !== "schedule_target") {
     const conn = connections.find((c) => c.calendar_id === item.googleCalendarId && c.role !== "schedule_target")
@@ -3045,7 +3083,12 @@ function ItemDetail({
           </div>
           <div className="mt-0.5 pl-6 text-xs text-slate-400">{source.detail}</div>
         </div>
-        {item.readOnly ? (
+        {item.keptDailyId ? (
+          <div className="mt-4 flex items-start gap-2 rounded-lg bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200/90">
+            <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <span>Done — kept as a record. Its own calendar (e.g. Runna) removed it after you finished it, so it can't be moved or edited; it still counts toward your goal. Undoing the tick removes it.</span>
+          </div>
+        ) : item.readOnly ? (
           <div className="mt-4 flex items-start gap-2 rounded-lg bg-slate-800/70 px-3 py-2 text-xs text-slate-400">
             <Lock className="w-3.5 h-3.5 mt-0.5 shrink-0" />
             <span>Locked. You can only view this calendar in Google, so it can't be moved, edited or deleted here either. You can still set its pillar.</span>
