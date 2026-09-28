@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, DollarSign, Heart, Info, Loader2, Plane, Plus, RotateCcw, Trash2, X } from "lucide-react";
 import { previewTemplate, type AwarenessRule, type NoteTone } from "@/lib/awareness";
 import { deleteRule, loadAwarenessRules, resetRules, saveRule, type NewRule } from "@/lib/awarenessRules";
+import { supabase } from "@/lib/supabase";
 
 const TONES: { id: NoteTone; label: string; icon: React.ReactNode }[] = [
   { id: "duty", label: "Duty", icon: <Plane className="w-3.5 h-3.5" /> },
@@ -17,13 +18,15 @@ const ROLE_HELP: Record<string, string> = {
 };
 
 function blankRule(position: number, seed?: { title: string; source?: string }): NewRule {
-  const words = (seed?.title ?? "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 2).slice(0, 2).join(" ");
+  // Start from the event's own title, so the new rule matches the event it came from
+  // (joining picked words could make a phrase the title doesn't contain).
+  const words = (seed?.title ?? "").replace(/^[\s,;:.-]+/, "").replace(/\s+/g, " ").trim().toLowerCase();
   return {
     position,
     enabled: true,
     label: seed?.title ? seed.title.replace(/^[\s,]+/, "").slice(0, 40) : "New rule",
     match: words,
-    source: null,
+    source: seed?.source ?? null,
     tone: "info",
     role: null,
     note: "{title}{when}.",
@@ -49,6 +52,15 @@ export function AwarenessRulesEditor({ onClose, draft }: { onClose: (changed: bo
   const [error, setError] = useState<string | null>(null);
   const [changed, setChanged] = useState(false);
   const [confirm, setConfirm] = useState<string | null>(null);
+  // Names of the Google calendars you've connected: "Only from calendar" picks from these.
+  const [calendars, setCalendars] = useState<string[]>([]);
+  useEffect(() => {
+    void supabase
+      .from("calendar_connections")
+      .select("name")
+      .order("name")
+      .then(({ data }) => setCalendars([...new Set(((data as { name: string | null }[]) ?? []).map((c) => c.name?.trim() ?? "").filter(Boolean))]));
+  }, []);
 
   useEffect(() => {
     void loadAwarenessRules(true).then((r) => {
@@ -181,13 +193,13 @@ export function AwarenessRulesEditor({ onClose, draft }: { onClose: (changed: bo
                     On
                   </label>
                 </div>
-                {open === r.id && edit && <RuleForm rule={edit} set={set} onSave={save} saving={saving} onDelete={() => remove(r.id)} confirmDelete={confirm === r.id} />}
+                {open === r.id && edit && <RuleForm rule={edit} set={set} onSave={save} saving={saving} onDelete={() => remove(r.id)} confirmDelete={confirm === r.id} calendars={calendars} />}
               </li>
             ))}
             {open === "new" && edit && (
               <li className="rounded-xl border border-blue-500/40 bg-slate-900/60">
                 <div className="px-3 pt-2 text-sm font-medium text-slate-100">New rule</div>
-                <RuleForm rule={edit} set={set} onSave={save} saving={saving} />
+                <RuleForm rule={edit} set={set} onSave={save} saving={saving} calendars={calendars} />
               </li>
             )}
           </ul>
@@ -219,6 +231,7 @@ function RuleForm({
   saving,
   onDelete,
   confirmDelete,
+  calendars,
 }: {
   rule: NewRule & { id?: string };
   set: <K extends keyof NewRule>(k: K, v: NewRule[K]) => void;
@@ -226,6 +239,7 @@ function RuleForm({
   saving: boolean;
   onDelete?: () => void;
   confirmDelete?: boolean;
+  calendars: string[];
 }) {
   const field = "w-full rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-blue-500 focus:outline-none";
   const label = "mb-1 block text-[11px] font-medium uppercase tracking-wide text-slate-500";
@@ -246,7 +260,28 @@ function RuleForm({
         </div>
         <div>
           <span className={label}>Only from calendar (optional)</span>
-          <input className={field} value={rule.source ?? ""} placeholder="e.g. jatara" onChange={(e) => set("source", e.target.value.trim() || null)} />
+          {(() => {
+            // Older rules saved part of a name (e.g. "jatara"): show the connected calendar it matches.
+            const src = rule.source ?? "";
+            const exact = calendars.find((c) => c === src);
+            const partial = !exact && src ? calendars.find((c) => c.toLowerCase().includes(src.toLowerCase())) : undefined;
+            const value = exact ?? partial ?? src;
+            const missing = !!src && !exact && !partial;
+            return (
+              <>
+                <select className={field} value={value} onChange={(e) => set("source", e.target.value || null)}>
+                  <option value="">Any calendar</option>
+                  {calendars.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                  {missing && <option value={src}>{src} (not connected)</option>}
+                </select>
+                {missing && <p className="mt-1 text-[11px] text-amber-300/90">No connected calendar is called that any more — pick one above.</p>}
+              </>
+            );
+          })()}
         </div>
         <div>
           <span className={label}>Category</span>
