@@ -255,6 +255,8 @@ export interface ProposedSession {
   goalId: string;
   start: Date;
   end: Date;
+  /** Set when the chosen weekday had no room and this is the nearest open day instead. */
+  movedFrom?: Date;
 }
 
 /** How a monthly/quarterly/yearly (or daily) count turns into this week's target. */
@@ -386,20 +388,15 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), bl
     const usedDays = new Set(existing.map((h) => new Date(h.search_start).getDay()));
     const proposed: ProposedSession[] = [];
     let unplaced = 0;
-    // Chosen weekdays (e.g. Tue & Thu) are the only days tried; otherwise spread across the week.
+    // Chosen weekdays (e.g. Tue & Thu) come first; otherwise spread across the week.
     const allowedIdx = goal.days?.length ? [0, 1, 2, 3, 4, 5, 6].filter((i) => goal.days!.includes(addDays(week.weekStart, i).getDay())) : [0, 1, 2, 3, 4, 5, 6];
 
-    for (let i = 0; i < need; i++) {
-      const firstDay = Math.floor((i * allowedIdx.length) / Math.max(need, 1));
-      let placed: ProposedSession | null = null;
-      for (let step = 0; step < allowedIdx.length && !placed; step++) {
-        const dayIdx = allowedIdx[(firstDay + step) % allowedIdx.length];
+    const tryDay = (dayIdx: number, i: number): ProposedSession | null => {
         const day = addDays(week.weekStart, dayIdx);
-        if (need <= allowedIdx.length && usedDays.has(day.getDay())) continue;
         const winStart = new Date(day.getFullYear(), day.getMonth(), day.getDate(), fromH, 0);
         const winEnd = new Date(day.getFullYear(), day.getMonth(), day.getDate(), toH, 0);
         const earliest = new Date(Math.max(winStart.getTime(), roundUp15(now).getTime()));
-        if (winEnd.getTime() - earliest.getTime() < minutes * 60000) continue;
+        if (winEnd.getTime() - earliest.getTime() < minutes * 60000) return null;
         const candidate: Habit = {
           id: `proposal-${planKey(goal)}-${i}`,
           name: goal.weekly_target ?? "Session",
@@ -412,7 +409,35 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), bl
         };
         const r = runEngine(week.weekStart, avoid.length ? [...busy, ...avoid] : busy, [candidate], []);
         const p = r.placed.find((x) => x.id === candidate.id);
-        if (p) placed = { key: candidate.id, goalId: goal.id, start: p.start, end: p.end };
+        return p ? { key: candidate.id, goalId: goal.id, start: p.start, end: p.end } : null;
+    };
+
+    for (let i = 0; i < need; i++) {
+      const firstDay = Math.floor((i * allowedIdx.length) / Math.max(need, 1));
+      let placed: ProposedSession | null = null;
+      if (goal.days?.length) {
+        // Chosen weekdays: this session belongs on its own day. If that day has
+        // no room (UTA, a trip, a full day), use the nearest open day instead —
+        // earlier first — and say so on the card; you can move it after approving.
+        const want = allowedIdx[firstDay % allowedIdx.length];
+        if (!usedDays.has(addDays(week.weekStart, want).getDay())) placed = tryDay(want, i);
+        if (!placed) {
+          const order = [1, 2, 3, 4, 5, 6].flatMap((d) => [want - d, want + d]).filter((x) => x >= 0 && x < 7);
+          for (const dayIdx of order) {
+            if (usedDays.has(addDays(week.weekStart, dayIdx).getDay())) continue;
+            const p = tryDay(dayIdx, i);
+            if (p) {
+              placed = { ...p, movedFrom: addDays(week.weekStart, want) };
+              break;
+            }
+          }
+        }
+      } else {
+        for (let step = 0; step < allowedIdx.length && !placed; step++) {
+          const dayIdx = allowedIdx[(firstDay + step) % allowedIdx.length];
+          if (need <= allowedIdx.length && usedDays.has(addDays(week.weekStart, dayIdx).getDay())) continue;
+          placed = tryDay(dayIdx, i);
+        }
       }
       if (placed) {
         proposed.push(placed);
