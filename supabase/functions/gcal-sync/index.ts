@@ -129,6 +129,7 @@ interface PlacedItemForPush {
 interface GoogleEvent {
   id: string;
   summary?: string;
+  description?: string;
   status?: string;
   start?: { dateTime?: string; date?: string };
   end?: { dateTime?: string; date?: string };
@@ -597,6 +598,8 @@ async function pullEvents(
       }
 
       if (evStart < weekStartDt || evStart >= weekEndDt) continue;
+      // A finished workout: Runna's completed-activity events carry a "📊 Summary" (and an activity link).
+      const sourceDone = /📊\s*Summary/.test(ev.description ?? "") || /runna\.com\/[^\s]*activities\?activityId=/.test(ev.description ?? "");
 
       const { data: existing } = await supabase
         .from("gcal_event_map")
@@ -617,6 +620,7 @@ async function pullEvents(
             blocks_schedule: conn.role !== "display_only",
             is_all_day: isAllDay,
             google_can_edit: googleCanEdit(accessRole, ev),
+            source_done: sourceDone,
           })
           .eq("id", existing.item_id);
 
@@ -643,6 +647,7 @@ async function pullEvents(
               is_all_day: isAllDay,
               pillar: guessedPillar,
               google_can_edit: googleCanEdit(accessRole, ev),
+              source_done: sourceDone,
             })
           .select("id")
           .maybeSingle();
