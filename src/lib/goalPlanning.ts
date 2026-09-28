@@ -257,6 +257,9 @@ export interface ProposedSession {
   end: Date;
   /** Set when the chosen weekday had no room and this is the nearest open day instead. */
   movedFrom?: Date;
+  /** You moved it onto a UTA day / into quiet hours in the review and overrode the rule. */
+  utaOverride?: boolean;
+  quietOverride?: boolean;
 }
 
 /** How a monthly/quarterly/yearly (or daily) count turns into this week's target. */
@@ -485,6 +488,8 @@ export async function approveGoalWeek(plan: GoalWeekPlan, sessions: ProposedSess
       pillar: g.pillar,
       goal_id: g.id,
       measure_id: g.measure_id ?? null,
+      uta_override: !!s.utaOverride,
+      quiet_override: !!s.quietOverride,
       ...(g.measure_effort ? { effort: g.measure_effort, effort_auto: false } : {}),
     }));
     const { data, error } = await supabase.from("habits").insert(rows).select("id, search_start, search_end");

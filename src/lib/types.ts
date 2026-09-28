@@ -180,6 +180,12 @@ export interface PlacedItem {
   utaOverride?: boolean;
   /** Allowed in quiet hours because you overrode the rule for it. */
   quietOverride?: boolean;
+  /** Weekly Review preview: a proposed goal session, not saved yet. */
+  isProposal?: boolean;
+  /** Weekly Review preview: the review card this item belongs to. */
+  ownerKey?: string;
+  /** Weekly Review preview: extra classes (proposal outline, highlight, dimming). */
+  decorClass?: string;
 }
 
 /** Why the engine couldn't place an item in the week being scheduled. */
