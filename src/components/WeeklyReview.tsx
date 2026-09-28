@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, Loader2, X, Flag, Hourglass, RefreshCw } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { addDays, getWeekStart } from "@/lib/schedulingEngine";
@@ -15,6 +15,7 @@ import {
   planWeek,
   recordReview,
   reviewForPlan,
+  sessionName,
   setMilestoneDone,
   verifyWeek,
   type GoalWeekPlan,
@@ -22,14 +23,14 @@ import {
   type ProposedSession,
   type VerifyResult,
   type WeekReviewRow,
-  type WeekData,
 } from "@/lib/goalPlanning";
 import { goalDayEntries, loadDailyItems, setCountedDone, setSessionDone, writeDailyPlan, type DailyItem, type DayEntry } from "@/lib/goalDaily";
 import { DAY_SHORT, daysText, effortGoals, loadEntries, loadMeasures, planKey, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
 import { OutcomeTracker } from "@/components/MeasureWidgets";
 import { completeGoal } from "@/lib/goalCompletion";
 import { blockRanges, loadLifeBlocks, DEFAULT_BLOCKS } from "@/lib/lifeBlocks";
-import { ReviewWeekGrid } from "@/components/ReviewWeekGrid";
+import { CalendarView, type Allow, type CalendarEmbed, type EmbedProposal } from "@/components/CalendarView";
+import type { PlacedItem } from "@/lib/types";
 
 // Names of the big life blocks, for "Stays out of: …" (filled on load).
 let blockNames: Record<string, string> = Object.fromEntries(DEFAULT_BLOCKS.map((b) => [b.key, b.label]));
@@ -54,12 +55,20 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
   const [measures, setMeasures] = useState<GoalMeasure[]>([]);
   const [entries, setEntries] = useState<MeasureEntry[]>([]);
   // The week's calendar beside the cards (a tab on phones).
-  const [weekData, setWeekData] = useState<WeekData | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [mobileTab, setMobileTab] = useState<"review" | "calendar">("review");
+  // Proposed sessions you dragged or resized in the calendar (saved when you approve).
+  const [calToken, setCalToken] = useState(0);
+  const [moved, setMoved] = useState<Record<string, { start: Date; end: Date; allow: Allow }>>({});
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  useEffect(() => {
+    setMoved({});
+    setRemoved(new Set());
+    setSelectedKey(null);
+  }, [weekStart]);
+
+  const load = useCallback(async (opts: { quiet?: boolean } = {}) => {
+    if (!opts.quiet) setLoading(true);
     setError(null);
     setVerify(null);
     try {
@@ -76,14 +85,12 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
       setGoals(all);
       const [week, ms, blocks] = await Promise.all([loadWeekData(weekStart), loadMeasures(), loadLifeBlocks()]);
       blockNames = Object.fromEntries(blocks.map((b) => [b.key, b.label]));
-      setWeekData(week);
       setMeasures(ms);
       setEntries(await loadEntries(ms.filter((m) => m.kind === "outcome" && m.status === "active").map((m) => m.id)));
       // One card per effort measure (goals without measures keep their single weekly target).
       setPlans(planWeek(effortGoals(all, ms), week, new Date(), blockRanges(blocks, week.busy, week.weekStart, week.weekEnd)));
       setReviews(await loadReviews(weekStart));
       setItems(await loadDailyItems(weekStart, addDays(weekStart, 7)));
-      setRemoved(new Set());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't load the review");
     } finally {
@@ -109,6 +116,72 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
   const outcomesFor = (goalId: string) => measures.filter((m) => m.goal_id === goalId && m.kind === "outcome" && m.status === "active");
   // Goals measured only by numbers you log (no weekly effort to plan).
   const outcomeOnly = goals.filter((g) => g.status === "active" && outcomesFor(g.id).length > 0 && !plans.some((p) => p.goal.id === g.id));
+  // Plans as shown: proposals sit wherever you moved them in the calendar.
+  const viewPlans = useMemo(
+    () =>
+      plans.map((p) =>
+        p.proposed.some((s) => moved[s.key])
+          ? {
+              ...p,
+              proposed: p.proposed.map((s) => {
+                const m = moved[s.key];
+                return m ? { ...s, start: m.start, end: m.end, movedFrom: undefined, utaOverride: !!m.allow.uta, quietOverride: !!m.allow.quiet } : s;
+              }),
+            }
+          : p
+      ),
+    [plans, moved]
+  );
+  // The review card each saved calendar item belongs to (🎯 sessions, counted events).
+  const ownerMap = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const p of plans) {
+      for (const h of p.existing) m.set(h.id, planKey(p.goal));
+      for (const c of p.counted) m.set(c.id, planKey(p.goal));
+    }
+    return m;
+  }, [plans]);
+  const ownerOf = useCallback(
+    (it: PlacedItem) => ownerMap.get(it.recurringItemId ?? it.id.split("--")[0]) ?? ownerMap.get(it.id),
+    [ownerMap]
+  );
+  const proposals = useMemo<EmbedProposal[]>(
+    () =>
+      viewPlans.flatMap((p) =>
+        p.startsNext || reviewForPlan(reviews, p.goal, measures.find((m) => m.goal_id === p.goal.id && m.kind === "effort" && m.status === "active")?.id)
+          ? []
+          : p.proposed
+              .filter((s) => !removed.has(s.key))
+              .map((s) => ({
+                key: s.key,
+                name: sessionName(p.goal),
+                start: s.start,
+                end: s.end,
+                pillar: p.goal.pillar,
+                context: p.goal.session_context ?? "other",
+                owner: planKey(p.goal),
+                utaOverride: s.utaOverride,
+                quietOverride: s.quietOverride,
+              }))
+      ),
+    [viewPlans, reviews, measures, removed]
+  );
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  const embed: CalendarEmbed = {
+    proposals,
+    ownerOf,
+    selectedKey,
+    onSelectOwner: (k) => {
+      setSelectedKey(k);
+      if (k && window.matchMedia("(min-width: 1024px)").matches) document.getElementById(`review-card-${k}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    },
+    onMoveProposal: (key, start, end, allow) => setMoved((m) => ({ ...m, [key]: { start, end, allow } })),
+    onRemoveProposal: (key) => setRemoved((r) => new Set(r).add(key)),
+    onDataChanged: () => void loadRef.current({ quiet: true }),
+    reloadToken: calToken,
+  };
+
   const weekEnd = addDays(weekStart, 6);
   const isThisWeek = getWeekStart(now).getTime() === weekStart.getTime();
 
@@ -118,7 +191,10 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
     try {
       const sessions = plan.proposed.filter((s) => !removed.has(s.key));
       await approveGoalWeek(plan, sessions, weekStart);
-      if (sessions.length) scheduleAutoPush();
+      if (sessions.length) {
+        scheduleAutoPush();
+        setCalToken((t) => t + 1);
+      }
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save");
@@ -293,7 +369,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
             <p className="text-sm text-slate-400">No active goals with a plan yet.</p>
           )}
 
-          {plans.map((plan, idx) => (
+          {viewPlans.map((plan, idx) => (
             <div
               key={planKey(plan.goal)}
               id={`review-card-${planKey(plan.goal)}`}
@@ -304,7 +380,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
               plan={plan}
               weekStart={weekStart}
               review={reviewFor(plan.goal)}
-              firstOfGoal={plans.findIndex((p) => p.goal.id === plan.goal.id) === idx}
+              firstOfGoal={viewPlans.findIndex((p) => p.goal.id === plan.goal.id) === idx}
               outcomes={outcomesFor(plan.goal.id)}
               entries2={entries}
               onEntries={setEntries}
@@ -380,20 +456,10 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
         </div>
       )}
       </div>
-      <div className={`${mobileTab === "calendar" ? "block" : "hidden"} lg:block lg:sticky lg:top-4 h-[75dvh] lg:h-[calc(100dvh-2rem)]`}>
-        {weekData && !loading && (
-          <ReviewWeekGrid
-            week={weekData}
-            plans={plans}
-            removed={removed}
-            reviewedKeys={new Set(plans.filter((p) => reviewFor(p.goal)).map((p) => planKey(p.goal)))}
-            selectedKey={selectedKey}
-            onSelect={(k) => {
-              setSelectedKey(k);
-              if (k && window.matchMedia("(min-width: 1024px)").matches) document.getElementById(`review-card-${k}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
-            }}
-          />
-        )}
+      <div
+        className={`${mobileTab === "calendar" ? "flex" : "hidden"} lg:flex flex-col overflow-hidden rounded-xl border border-slate-700 bg-slate-950 lg:sticky lg:top-4 h-[78dvh] lg:h-[calc(100dvh-2rem)]`}
+      >
+        <CalendarView weekStart={weekStart} setWeekStart={(d) => setWeekStart(getWeekStart(d))} embed={embed} />
       </div>
       </div>
     </div>

@@ -89,7 +89,7 @@ function cardClasses(p: PlacedItem) {
   const enroute = p.kind === "Enroute";
   if (enroute) return { box: "border border-dashed border-slate-600 bg-slate-800/60 text-slate-300", sub: "text-slate-400" };
   return {
-    box: `${c.bg} ${c.text} ${muted ? "opacity-60" : ""} ${p.completed ? "opacity-50" : ""}`,
+    box: `${c.bg} ${c.text} ${muted ? "opacity-60" : ""} ${p.completed ? "opacity-50" : ""} ${p.decorClass ?? ""}`,
     sub: "opacity-85",
   };
 }
@@ -532,7 +532,7 @@ function AllDayChip({ p, onSelect, small }: { p: PlacedItem; onSelect: (p: Place
   return (
     <button
       onClick={() => onSelect(p)}
-      className={`w-full text-left truncate ${small ? "rounded-[5px] px-1.5 py-0.5 text-[11px]" : "rounded-lg px-3 py-1.5 text-[13.5px]"} font-semibold ${c.bg} ${c.text} ${p.blocksSchedule === false ? "opacity-70" : ""}`}
+      className={`w-full text-left truncate ${small ? "rounded-[5px] px-1.5 py-0.5 text-[11px]" : "rounded-lg px-3 py-1.5 text-[13.5px]"} font-semibold ${c.bg} ${c.text} ${p.blocksSchedule === false ? "opacity-70" : ""} ${p.decorClass ?? ""}`}
     >
       {p.name}
     </button>

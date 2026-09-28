@@ -94,8 +94,40 @@ function snapToSlot(d: Date): Date {
 }
 
 /** The scheduling rules you can override for one item by dragging there a second time. */
-type OverrideRule = "uta" | "quiet";
-type Allow = Partial<Record<OverrideRule, boolean>>;
+export type OverrideRule = "uta" | "quiet";
+export type Allow = Partial<Record<OverrideRule, boolean>>;
+
+/** A proposed goal session shown (and movable) in the Weekly Review's calendar. */
+export interface EmbedProposal {
+  key: string;
+  name: string;
+  start: Date;
+  end: Date;
+  pillar: LifePillar | null;
+  context: ContextTag;
+  owner: string;
+  utaOverride?: boolean;
+  quietOverride?: boolean;
+}
+
+/**
+ * The calendar embedded beside the Weekly Review cards: the full calendar, plus
+ * the review's proposed sessions (moved in the review, saved when approved) and
+ * highlighting of whichever card is selected.
+ */
+export interface CalendarEmbed {
+  proposals: EmbedProposal[];
+  onMoveProposal: (key: string, start: Date, end: Date, allow: Allow) => void;
+  onRemoveProposal: (key: string) => void;
+  /** The review card a saved item belongs to, if any. */
+  ownerOf: (item: PlacedItem) => string | undefined;
+  selectedKey: string | null;
+  onSelectOwner: (key: string | null) => void;
+  /** Something on the calendar was saved: the review re-plans against it. */
+  onDataChanged: () => void;
+  /** Bumped by the review after it saves (e.g. approving sessions): reload the calendar. */
+  reloadToken?: number;
+}
 
 function isQuietTime(start: Date, end: Date): boolean {
   for (let h = start.getHours(); h < end.getHours() || (h === end.getHours() && end.getMinutes() > 0); h = (h + 1) % 24) {
@@ -306,11 +338,20 @@ export function CalendarView({
   weekStart,
   setWeekStart,
   onOpenBriefing,
+  embed,
 }: {
   weekStart: Date;
   setWeekStart: (d: Date) => void;
   onOpenBriefing?: () => void;
+  embed?: CalendarEmbed;
 }) {
+  const embedRef = useRef(embed);
+  embedRef.current = embed;
+  const loadedOnce = useRef(false);
+  const colMin = embed ? "min-w-[88px]" : "min-w-[140px]";
+  // Embedded: a week with no "now" line opens at 06:00 instead of midnight.
+  const embedScrollRef = useRef<HTMLDivElement>(null);
+  const embedScrolledWeek = useRef<number | null>(null);
   const { layout, isOverridden, toggle: toggleViewMode } = useCalendarViewMode();
   // Phone layout: Schedule / Day / 3 Day / Week / Month (see MobileCalendar).
   const [mobileView, setMobileView] = useState<MobileView>(loadMobileView);
@@ -450,6 +491,9 @@ export function CalendarView({
       new Map(((gdRes.data as { id: string; habit_id: string; done: boolean }[]) ?? []).map((r) => [r.habit_id, { id: r.id, done: r.done }]))
     );
     setLoading(false);
+    // Embedded in the Weekly Review: let it re-plan after anything is saved here.
+    if (loadedOnce.current) embedRef.current?.onDataChanged();
+    loadedOnce.current = true;
 
     return { fixedEvents: fe, habits: ha, tasks: ta, eventMap: em, enrouteBlocks: eb };
   }
@@ -458,6 +502,11 @@ export function CalendarView({
     loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [weekStart, viewMode]);
+  const reloadToken = embed?.reloadToken ?? 0;
+  useEffect(() => {
+    if (reloadToken) void loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadToken]);
 
   // Sync with Google whenever the app is opened or brought back to the
   // foreground, so what's on screen (and in Google Calendar) is current.
@@ -494,7 +543,7 @@ export function CalendarView({
     })();
   }, []);
 
-  const { placed, unscheduled } = useMemo(() => {
+  const { placed: basePlaced, unscheduled } = useMemo(() => {
     const recurringTasks = tasks.filter((t) => t.recurrence_enabled);
     const nonRecurringTasks = tasks.filter((t) => !t.recurrence_enabled);
     const rangeStart = displayStart;
@@ -712,6 +761,46 @@ export function CalendarView({
     return { placed: finalPlaced, unscheduled: result.unscheduled };
   }, [weekStart, viewMode, displayStart, displayEnd, fixedEvents, habits, tasks, eventMap, enrouteBlocks, occurrences, fixedEventOccurrences, habitOccurrences, goalSessionDone]);
 
+  // Weekly Review: add its proposed sessions and mark what belongs to the selected card.
+  const embedProposals = embed?.proposals;
+  const embedSelected = embed?.selectedKey ?? null;
+  const embedOwnerOf = embed?.ownerOf;
+  const placed = useMemo(() => {
+    if (!embedProposals || !embedOwnerOf) return basePlaced;
+    const proposals: PlacedItem[] = embedProposals.map((pr) => ({
+      id: pr.key,
+      name: pr.name,
+      kind: "Habit" as ItemKind,
+      tier: 1,
+      context: pr.context,
+      start: pr.start,
+      end: pr.end,
+      pillar: pr.pillar,
+      room: 0,
+      isBatch: false,
+      isAllDay: false,
+      isProposal: true,
+      ownerKey: pr.owner,
+      utaOverride: pr.utaOverride,
+      quietOverride: pr.quietOverride,
+    }));
+    return [...basePlaced, ...proposals].map((p) => {
+      const owner = p.ownerKey ?? embedOwnerOf(p);
+      const lit = !!embedSelected && owner === embedSelected;
+      const dim = !!embedSelected && !lit;
+      if (!owner && !dim) return p;
+      const decorClass = [p.isProposal ? "outline-dashed outline-2 -outline-offset-2 outline-white/70" : "", lit ? "ring-2 ring-white z-10" : "", dim ? "opacity-30" : ""].join(" ");
+      return { ...p, ownerKey: owner, decorClass };
+    });
+  }, [basePlaced, embedProposals, embedSelected, embedOwnerOf]);
+
+  /** Open an item; in the Weekly Review this also highlights its card (a proposal only highlights). */
+  function selectItem(item: PlacedItem) {
+    if (embed && item.ownerKey) embed.onSelectOwner(item.ownerKey);
+    if (item.isProposal) return;
+    setSelectedItem(item);
+  }
+
   const itemsByDay = useMemo(() => {
     const map: Record<number, PlacedItem[]> = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
     for (const p of placed) {
@@ -817,6 +906,10 @@ export function CalendarView({
 
   /** The hover trash: events pulled from Google open their details first, where deleting asks twice. */
   function quickDelete(item: PlacedItem) {
+    if (item.isProposal) {
+      embed?.onRemoveProposal(item.id);
+      return;
+    }
     if (item.googleEventId && item.googleCalendarRole !== "schedule_target") setSelectedItem(item);
     else void deleteItem(item);
   }
@@ -1057,10 +1150,24 @@ export function CalendarView({
   }, []);
   // Bring the now line into view once when the calendar first shows today.
   const scrolledToNow = useRef(false);
+  const isEmbedded = !!embed;
+  useEffect(() => {
+    if (!isEmbedded || loading) return;
+    const sc = embedScrollRef.current;
+    if (!sc || embedScrolledWeek.current === weekStart.getTime()) return;
+    embedScrolledWeek.current = weekStart.getTime();
+    const today = new Date();
+    if (today < weekStart || today >= addDays(weekStart, 7)) requestAnimationFrame(() => (sc.scrollTop = 6 * 64));
+  }, [isEmbedded, loading, weekStart]);
   const nowLineRef = (el: HTMLDivElement | null) => {
     if (!el || scrolledToNow.current || el.offsetParent === null) return;
     scrolledToNow.current = true;
-    requestAnimationFrame(() => el.scrollIntoView({ block: "center" }));
+    requestAnimationFrame(() => {
+      // Embedded (Weekly Review): scroll only the calendar, never the page.
+      const sc = embedRef.current ? (el.closest(".cal-scroll") as HTMLElement | null) : null;
+      if (sc) sc.scrollTop += el.getBoundingClientRect().top - sc.getBoundingClientRect().top - sc.clientHeight / 2;
+      else el.scrollIntoView({ block: "center" });
+    });
   };
   // Where the dragged item would land if released now: which column (day index,
   // or -1 for the single-day view) and the snapped start time.
@@ -1441,6 +1548,11 @@ export function CalendarView({
     const onUp = async () => {
       const rs = resizeState;
       if (rs && rs.previewEnd.getTime() !== rs.originalEnd.getTime()) {
+        if (rs.item.isProposal) {
+          moveProposal(rs.item, rs.item.start, rs.previewEnd);
+          setResizeState(null);
+          return;
+        }
         const short = resizeShortfall(rs.item, rs.previewEnd);
         if (short) {
           setResizeWarning({ item: rs.item, newEnd: rs.previewEnd, ...short });
@@ -1516,6 +1628,10 @@ export function CalendarView({
       setOverlapConfirm({ item, newStart, overlapNames: check.overlaps, allow });
       return;
     }
+    if (item.isProposal && embed) {
+      moveProposal(item, newStart, new Date(newStart.getTime() + (item.end.getTime() - item.start.getTime())), allow);
+      return;
+    }
     const overriding = !!(allow.uta || allow.quiet);
     const undo = offerUndo || overriding ? restorerFor(item) : null;
     const saved = await updateItemTime(item, newStart);
@@ -1533,6 +1649,16 @@ export function CalendarView({
     scheduleAutoPush();
   }
 
+  /** Proposals live in the review until approved: move them there, with Undo. */
+  function moveProposal(item: PlacedItem, start: Date, end: Date, allow: Allow = {}) {
+    if (!embed) return;
+    const keep: Allow = { uta: allow.uta || item.utaOverride, quiet: allow.quiet || item.quietOverride };
+    embed.onMoveProposal(item.id, start, end, keep);
+    showDoneToast(`Proposed ${item.name} moved to ${timeLabel(start)} (saved when you approve)`, async () => {
+      embed.onMoveProposal(item.id, item.start, item.end, { uta: item.utaOverride, quiet: item.quietOverride });
+    });
+  }
+
   /** Why a new end time isn't allowed (same rules as the desktop resize), or undefined. */
   function checkResize(item: PlacedItem, newEnd: Date): string | undefined {
     if (newEnd.getTime() < item.start.getTime() + SLOT_MIN * 60000) return "15 min minimum";
@@ -1547,6 +1673,10 @@ export function CalendarView({
     const problem = checkResize(item, newEnd);
     if (problem) {
       showDragMessage(problem);
+      return;
+    }
+    if (item.isProposal) {
+      moveProposal(item, item.start, newEnd);
       return;
     }
     const short = resizeShortfall(item, newEnd);
@@ -1573,6 +1703,11 @@ export function CalendarView({
     if (!overlapConfirm) return;
     const { item, newStart, allow } = overlapConfirm;
     setOverlapConfirm(null);
+    if (item.isProposal) {
+      // A proposal just sits where you put it; nothing else gets pushed.
+      moveProposal(item, newStart, new Date(newStart.getTime() + (item.end.getTime() - item.start.getTime())), allow ?? {});
+      return;
+    }
 
     const durationMin = Math.round((item.end.getTime() - item.start.getTime()) / 60000);
     const overlapping = placed.filter((p) =>
@@ -1700,7 +1835,7 @@ export function CalendarView({
             now={now}
             notScheduledCount={notScheduled.length}
             renderTray={() => renderTray(false)}
-            onSelect={setSelectedItem}
+            onSelect={selectItem}
             onAddAt={(d) => {
               setAddPrefillDate(d);
               setShowAdd(true);
@@ -1728,9 +1863,9 @@ export function CalendarView({
       <>
       {/* Header */}
       <header className="shrink-0 border-b border-slate-800 bg-slate-900/80 backdrop-blur-sm z-30">
-        <div className="px-4 sm:px-6 py-3 flex items-center gap-3">
+        <div className={embed ? "px-3 py-2 flex items-center gap-2" : "px-4 sm:px-6 py-3 flex items-center gap-3"}>
           {/* Logo + title */}
-          <div className="flex items-center gap-2.5 shrink-0">
+          <div className={embed ? "hidden" : "flex items-center gap-2.5 shrink-0"}>
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-emerald-500 flex items-center justify-center">
               <CalendarDays className="w-4 h-4 text-white" />
             </div>
@@ -1847,6 +1982,7 @@ export function CalendarView({
                 </button>
                 <button
                   onClick={() => setViewMode("month")}
+                  hidden={!!embed}
                   className={`px-2.5 py-1.5 text-xs font-medium transition-colors ${
                     viewMode === "month" ? "bg-blue-600 text-white" : "text-slate-400 hover:text-slate-200"
                   }`}
@@ -1900,6 +2036,7 @@ export function CalendarView({
             {/* Force desktop/mobile layout switcher (always visible, overrides auto-detection) */}
             <button
               onClick={toggleViewMode}
+              hidden={!!embed}
               className={`relative p-2.5 rounded-full text-white transition-colors shadow-md ${
                 isOverridden ? "bg-blue-600 hover:bg-blue-500" : "bg-slate-700 hover:bg-slate-600"
               }`}
@@ -1995,7 +2132,7 @@ export function CalendarView({
       </header>
 
       {/* Calendar — the only part that scrolls; everything above it stays put */}
-      <div className="flex-1 min-h-0 overflow-auto">
+      <div ref={embed ? embedScrollRef : undefined} className="cal-scroll flex-1 min-h-0 overflow-auto">
         {loading ? (
           <div className="flex items-center justify-center h-96 text-slate-500">
             <div className="animate-pulse">Loading schedule…</div>
@@ -2012,7 +2149,7 @@ export function CalendarView({
                   setWeekStart(getWeekStart(date));
                   setMobileDayIndex((date.getDay() + 6) % 7);
                 }}
-                onPickItem={setSelectedItem}
+                onPickItem={selectItem}
               />
             ) : (
               <>
@@ -2028,7 +2165,7 @@ export function CalendarView({
                 return (
                   <div
                     key={day}
-                    className="flex-1 min-w-[140px] px-3 py-2.5 border-r border-slate-800 last:border-r-0"
+                    className={`flex-1 ${colMin} px-3 py-2.5 border-r border-slate-800 last:border-r-0`}
                   >
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-medium text-slate-400 uppercase tracking-wide">
@@ -2060,7 +2197,7 @@ export function CalendarView({
                   {DAYS.map((_, dayIdx) => (
                     <div
                       key={dayIdx}
-                      className="flex-1 min-w-[140px] border-r border-slate-800 last:border-r-0"
+                      className={`flex-1 ${colMin} border-r border-slate-800 last:border-r-0`}
                     />
                   ))}
                 </div>
@@ -2072,7 +2209,7 @@ export function CalendarView({
                   return (
                     <div
                       key={`${item.id}-${idx}`}
-                      className={`absolute rounded ${colors.bg} px-1.5 py-0.5 text-left overflow-hidden cursor-pointer group hover:z-10 hover:brightness-110 transition-all shadow-sm`}
+                      className={`absolute rounded ${colors.bg} px-1.5 py-0.5 text-left overflow-hidden cursor-pointer group hover:z-10 hover:brightness-110 transition-all shadow-sm ${item.decorClass ?? ""}`}
                       style={{
                         left: `calc(${leftPct}% + 2px)`,
                         width: `calc(${widthPct}% - 4px)`,
@@ -2081,7 +2218,7 @@ export function CalendarView({
                       }}
                     >
                       <button
-                        onClick={() => setSelectedItem(item)}
+                        onClick={() => selectItem(item)}
                         className="w-full h-full text-left flex items-center gap-1"
                       >
                         <span className={`w-1.5 h-1.5 rounded-full ${colors.dot} shrink-0`} />
@@ -2123,7 +2260,7 @@ export function CalendarView({
               {DAYS.map((_, dayIdx) => (
                 <div
                   key={dayIdx}
-                  className="flex-1 min-w-[140px] border-r border-slate-800 last:border-r-0 relative"
+                  className={`flex-1 ${colMin} border-r border-slate-800 last:border-r-0 relative`}
                   {...columnDragHandlers(dayIdx, addDays(weekStart, dayIdx))}
                 >
                   {/* Hour rows */}
@@ -2168,11 +2305,11 @@ export function CalendarView({
                         draggable={!isEnroute && !item.readOnly}
                         onDragStart={(e) => { if (!isEnroute && !item.readOnly) beginDrag(e, item); }}
                         onDragEnd={endDrag}
-                        className={`absolute rounded-md ${colors.soft} ${colors.border} border-l-2 px-2 py-1 text-left overflow-hidden group ${isEnroute ? "border-dashed" : "hover:z-10 hover:scale-[1.02] transition-transform cursor-pointer"} ${isDisplayOnly ? "opacity-60 border-dashed" : ""} ${dragItem && dragItem.id === item.id && dragItem.start.getTime() === item.start.getTime() ? "opacity-40" : ""}`}
+                        className={`absolute rounded-md ${colors.soft} ${colors.border} border-l-2 px-2 py-1 text-left overflow-hidden group ${isEnroute ? "border-dashed" : "hover:z-10 hover:scale-[1.02] transition-transform cursor-pointer"} ${isDisplayOnly ? "opacity-60 border-dashed" : ""} ${dragItem && dragItem.id === item.id && dragItem.start.getTime() === item.start.getTime() ? "opacity-40" : ""} ${item.decorClass ?? ""}`}
                         style={{ top: `${topOffset}px`, height: `${height}px`, ...layoutStyle(layoutByDay[dayIdx][idx]) }}
                       >
                         <button
-                          onClick={isEnroute ? undefined : () => setSelectedItem(item)}
+                          onClick={isEnroute ? undefined : () => selectItem(item)}
                           className={isEnroute ? "w-full text-left cursor-default" : "w-full text-left"}
                         >
                           <div className="flex items-center gap-1">
@@ -2188,6 +2325,7 @@ export function CalendarView({
                             {item.readOnly && <Lock className="w-2.5 h-2.5 text-slate-500 shrink-0" aria-label="Locked" />}
                           </div>
                           <div className="text-[10px] text-slate-400 mt-0.5 truncate">
+                            {item.isProposal ? "Proposed · " : ""}
                             {formatTimeRange(item.start, effectiveEnd)}
                           </div>
                           {item.isBatch && (
@@ -2243,7 +2381,7 @@ export function CalendarView({
                     return (
                       <button
                         key={`${item.id}-${idx}`}
-                        onClick={() => setSelectedItem(item)}
+                        onClick={() => selectItem(item)}
                         className={`w-full flex items-center gap-1.5 rounded px-2 py-1 text-left ${colors.bg}`}
                       >
                         <span className={`w-1.5 h-1.5 rounded-full ${colors.dot} shrink-0`} />
@@ -2302,11 +2440,11 @@ export function CalendarView({
                       draggable={!item.readOnly}
                       onDragStart={(e) => { if (!item.readOnly) beginDrag(e, item); }}
                       onDragEnd={endDrag}
-                      className={`absolute rounded-md ${colors.soft} ${colors.border} border-l-2 overflow-hidden ${isDisplayOnly ? "opacity-60 border-dashed" : ""} ${dragItem && dragItem.id === item.id && dragItem.start.getTime() === item.start.getTime() ? "opacity-40" : ""}`}
+                      className={`absolute rounded-md ${colors.soft} ${colors.border} border-l-2 overflow-hidden ${isDisplayOnly ? "opacity-60 border-dashed" : ""} ${dragItem && dragItem.id === item.id && dragItem.start.getTime() === item.start.getTime() ? "opacity-40" : ""} ${item.decorClass ?? ""}`}
                       style={{ top: `${topOffset}px`, height: `${height}px`, ...layoutStyle(layoutByDay[mobileDayIndex]?.[idx]) }}
                     >
                       <button
-                        onClick={() => setSelectedItem(item)}
+                        onClick={() => selectItem(item)}
                         className="w-full h-full text-left px-2 py-1"
                       >
                         <div className="flex items-center gap-1">
