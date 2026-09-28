@@ -271,7 +271,30 @@ export interface PeriodPace {
   quota: number;
   /** Sessions already on the calendar in this period before this week. */
   bookedBefore: number;
+  /** Sessions already booked later in this period (after this week). */
+  bookedLater: number;
+  /** The least this week needs to stay on pace (all that's left, in the period's last week). */
+  required: number;
+  /** Weeks of the period left, counting this one. */
+  weeksLeft: number;
   label: string; // "October", "Q4 2026", "2026"
+}
+
+/** Where a monthly/quarterly/yearly count stands, given what's on the calendar this week. */
+export function paceStatus(pace: PeriodPace, thisWeek: number): "booked" | "open" | "late" {
+  if (pace.bookedBefore + pace.bookedLater + thisWeek >= pace.quota) return "booked";
+  return thisWeek < pace.required ? "late" : "open";
+}
+
+/** "October: 0 of 1 booked · open — 5 weeks left to book it" and the like. */
+export function paceNote(pace: PeriodPace, thisWeek: number): string {
+  if (pace.quota === 0) return `${pace.label}: added partway through, so it starts next ${pace.period}`;
+  const booked = pace.bookedBefore + pace.bookedLater + thisWeek;
+  const head = `${pace.label}: ${booked} of ${pace.quota} booked`;
+  const st = paceStatus(pace, thisWeek);
+  if (st === "booked") return `${head} · all booked`;
+  if (st === "late") return `${head} · ${pace.required - thisWeek} due this week`;
+  return `${head} · open — ${pace.weeksLeft} week${pace.weeksLeft === 1 ? "" : "s"} left to book it`;
 }
 
 const PERIOD_LABEL = (period: Period, d: Date) =>
@@ -313,11 +336,23 @@ export function weeklyTarget(goal: PlanGoal, week: WeekData): { target: number; 
   const quota = from > ps ? Math.round((n * (pe.getTime() - from.getTime())) / (pe.getTime() - ps.getTime())) : n;
   const frac = Math.min(1, Math.max(0, (weekEnd.getTime() - from.getTime()) / Math.max(1, pe.getTime() - from.getTime())));
   const dueByWeekEnd = Math.min(quota, Math.ceil(quota * frac - 1e-9));
-  const bookedBefore =
+  const bookedIn = (from: Date, to: Date) =>
     goal.plan_mode === "count"
-      ? countGoalEventsIn(goal, week, ps, week.weekStart).length
-      : week.habits.filter((h) => ownsHabit(goal, h) && new Date(h.search_start) >= ps && new Date(h.search_start) < week.weekStart).length;
-  return { target: Math.max(0, dueByWeekEnd - bookedBefore), pace: { period, perPeriod: n, quota, bookedBefore, label: PERIOD_LABEL(period, mid) } };
+      ? countGoalEventsIn(goal, week, from, to).length
+      : week.habits.filter((h) => ownsHabit(goal, h) && new Date(h.search_start) >= from && new Date(h.search_start) < to).length;
+  const bookedBefore = bookedIn(ps, week.weekStart);
+  // Already booked later this period (e.g. a date night approved for the 17th) counts too.
+  const bookedLater = pe > week.weekEnd ? bookedIn(week.weekEnd, pe) : 0;
+  const remaining = Math.max(0, quota - bookedBefore - bookedLater);
+  // Behind pace only once a whole share of the period has gone by without it
+  // (a monthly one only in the month's last week), not the moment the period starts.
+  const behindBy = Math.floor(quota * frac + 1e-9);
+  const required = Math.min(remaining, Math.max(0, Math.min(dueByWeekEnd, behindBy) - bookedBefore - bookedLater));
+  const weeksLeft = Math.max(1, Math.ceil((pe.getTime() - week.weekStart.getTime()) / (7 * 86400000)));
+  // Until the period's count is booked, every week offers a slot for it (you can
+  // skip it and it's offered again next week); the pace only decides when it's late.
+  const target = remaining > 0 ? Math.max(1, required) : 0;
+  return { target, pace: { period, perPeriod: n, quota, bookedBefore, bookedLater, required, weeksLeft, label: PERIOD_LABEL(period, mid) } };
 }
 
 export interface GoalWeekPlan {
@@ -499,7 +534,9 @@ export async function approveGoalWeek(plan: GoalWeekPlan, sessions: ProposedSess
     }
   }
   const scheduled = g.plan_mode === "count" ? plan.counted.length : plan.existing.length + sessions.length;
-  await recordReview(g.id, weekStart, plan.target, scheduled, scheduled >= plan.target ? "approved" : "short", undefined, g.measure_id ?? "");
+  // A monthly/quarterly count is short only if this week falls behind its pace.
+  const owed = plan.pace ? plan.pace.required : plan.target;
+  await recordReview(g.id, weekStart, owed, scheduled, scheduled >= owed ? "approved" : "short", undefined, g.measure_id ?? "");
 
   if (g.plan_mode !== "count") {
     try {
@@ -560,28 +597,32 @@ export interface VerifyResult {
   goalId: string;
   /** planKey of the planning view (measure id, or goal id). */
   key: string;
+  /** What this week owes (for a monthly/quarterly count: only what its pace requires). */
   target: number;
   held: number;
   offCalendar: number;
   /** Sessions ticked done so far (Daily level). */
   done: number;
+  pace?: PeriodPace;
 }
 
 export function verifyWeek(goals: PlanGoal[], week: WeekData, doneByGoal: Map<string, number> = new Map()): VerifyResult[] {
   const r = runEngine(week.weekStart, week.busy, week.habits, week.tasks);
   const placedIds = new Set(r.placed.map((p) => p.id));
   return sortByPriority(goals).map((g) => {
-    const { target } = weeklyTarget(g, week);
+    const wt = weeklyTarget(g, week);
+    const pace = wt.pace;
+    const target = pace ? pace.required : wt.target;
     const key = planKey(g);
     const done = doneByGoal.get(key) ?? 0;
     if (g.plan_mode === "count") {
       const n = countGoalEvents(g, week).length;
-      return { goalId: g.id, key, target, held: n, offCalendar: 0, done };
+      return { goalId: g.id, key, target, held: n, offCalendar: 0, done, pace };
     }
     const mine = goalSessionsInWeek(g, week);
     // Repeating sessions sit on the calendar as fixed occurrences: they always hold.
     const held = mine.filter((h) => h.recurring || placedIds.has(h.id)).length;
-    return { goalId: g.id, key, target, held, offCalendar: mine.length - held, done };
+    return { goalId: g.id, key, target, held, offCalendar: mine.length - held, done, pace };
   });
 }
 
