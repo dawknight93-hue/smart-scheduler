@@ -599,6 +599,7 @@ async function pullEvents(
 
       if (evStart < weekStartDt || evStart >= weekEndDt) continue;
       // A finished workout: Runna's completed-activity events carry a "📊 Summary" (and an activity link).
+      // Only this flag is kept from the description; the text itself isn't stored.
       const sourceDone = /📊\s*Summary/.test(ev.description ?? "") || /runna\.com\/[^\s]*activities\?activityId=/.test(ev.description ?? "");
 
       const { data: existing } = await supabase
