@@ -74,7 +74,7 @@ export function ReviewWeekGrid({
         end: p.end,
         pillar: p.pillar,
         proposed: false,
-        owner: ownerOf.get(p.id),
+        owner: ownerOf.get(p.id.split("--")[0]),
         muted: p.kind === "Fixed Event" && p.blocksSchedule === false,
       };
       if (fe?.is_all_day || long) {
