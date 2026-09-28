@@ -124,6 +124,20 @@ export interface WeekData {
   tasks: Task[]; // non-recurring
   map: MapRow[];
   fixedById: Map<string, FixedEvent>;
+  /**
+   * Counted events you ticked done whose calendar later dropped them (Runna removes
+   * a workout from its calendar once you've done it): they still count.
+   */
+  keptDone?: KeptDone[];
+}
+
+export interface KeptDone {
+  goal_id: string;
+  source_item_id: string;
+  day: string;
+  start_at: string | null;
+  minutes: number | null;
+  focus: string;
 }
 
 function occurrenceEvents<T extends { id: string; name: string; pillar?: LifePillar | null; blocks_schedule?: boolean }>(
@@ -153,7 +167,7 @@ function occurrenceEvents<T extends { id: string; name: string; pillar?: LifePil
 
 export async function loadWeekData(weekStart: Date): Promise<WeekData> {
   const weekEnd = addDays(weekStart, 7);
-  const [fe, hb, tk, mp, feo, ho, to, eb] = await Promise.all([
+  const [fe, hb, tk, mp, feo, ho, to, eb, kd] = await Promise.all([
     supabase.from("fixed_events").select("*").lt("start_time", weekEnd.toISOString()).gte("end_time", addDays(weekStart, -60).toISOString()),
     supabase.from("habits").select("*"),
     supabase.from("tasks").select("*"),
@@ -162,6 +176,13 @@ export async function loadWeekData(weekStart: Date): Promise<WeekData> {
     supabase.from("habit_occurrences").select("*"),
     supabase.from("task_occurrences").select("*"),
     supabase.from("enroute_blocks").select("id, name, start_time, end_time").lt("start_time", weekEnd.toISOString()).gt("end_time", weekStart.toISOString()),
+    supabase
+      .from("goal_daily_items")
+      .select("goal_id, source_item_id, day, start_at, minutes, focus")
+      .not("source_item_id", "is", null)
+      .eq("done", true)
+      .gte("day", formatLocalDate(addDays(weekStart, -60)))
+      .lt("day", formatLocalDate(weekEnd)),
   ]);
   for (const r of [fe, hb, tk, mp, feo, ho, to, eb]) if (r.error) throw new Error(r.error.message);
 
@@ -208,6 +229,7 @@ export async function loadWeekData(weekStart: Date): Promise<WeekData> {
     tasks: tasks.filter((t) => !t.recurrence_enabled && !t.completed_at),
     map: (mp.data as MapRow[]) ?? [],
     fixedById: new Map(fixed.map((f) => [f.id, f])),
+    keptDone: kd.error ? [] : ((kd.data as KeptDone[]) ?? []),
   };
 }
 
@@ -243,6 +265,15 @@ export function countGoalEventsIn(goal: PlanGoal, week: WeekData, from: Date, to
     if (kw && !name.toLowerCase().includes(kw)) continue;
     seen.add(m.item_id);
     out.push({ id: m.item_id, name, start, allDay });
+  }
+  // Ticked done, then dropped by its calendar (Runna clears finished workouts): keep counting it.
+  for (const k of week.keptDone ?? []) {
+    if (k.goal_id !== goal.id || seen.has(k.source_item_id) || week.fixedById.has(k.source_item_id)) continue;
+    const [y, mo, d] = k.day.split("-").map(Number);
+    const start = k.start_at ? new Date(k.start_at) : new Date(y, mo - 1, d);
+    if (start < from || start >= to) continue;
+    seen.add(k.source_item_id);
+    out.push({ id: k.source_item_id, name: k.focus, start, allDay: !k.start_at });
   }
   return out.sort((a, b) => a.start.getTime() - b.start.getTime());
 }

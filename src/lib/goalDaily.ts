@@ -121,7 +121,7 @@ export async function setSessionDone(goal: PlanGoal, entry: { item: DailyItem | 
 }
 
 /** Ticks a counted session (e.g. a Runna workout) done or not done. */
-export async function setCountedDone(goal: PlanGoal, ev: CountedEvent, weekStart: Date, done: boolean): Promise<DailyItem> {
+export async function setCountedDone(goal: PlanGoal, ev: CountedEvent, weekStart: Date, done: boolean, minutes?: number): Promise<DailyItem> {
   const { data, error } = await supabase
     .from("goal_daily_items")
     .upsert(
@@ -132,6 +132,7 @@ export async function setCountedDone(goal: PlanGoal, ev: CountedEvent, weekStart
         source_item_id: ev.id,
         start_at: ev.allDay ? null : ev.start.toISOString(),
         focus: ev.name,
+        ...(minutes ? { minutes } : {}),
         done,
         done_at: done ? new Date().toISOString() : null,
       },

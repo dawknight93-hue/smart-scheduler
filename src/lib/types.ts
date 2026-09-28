@@ -186,6 +186,8 @@ export interface PlacedItem {
   ownerKey?: string;
   /** Weekly Review preview: extra classes (proposal outline, highlight, dimming). */
   decorClass?: string;
+  /** A counted event you ticked done that its own calendar has since removed (kept here as a record). */
+  keptDailyId?: string;
 }
 
 /** Why the engine couldn't place an item in the week being scheduled. */
