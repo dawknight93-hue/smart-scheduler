@@ -27,6 +27,8 @@ export interface FixedEvent {
   engine_only?: boolean;
   source_calendar_id?: string;
   is_all_day?: boolean;
+  /** Its source calendar marks it finished (e.g. a Runna completed activity). */
+  source_done?: boolean;
   pillar?: LifePillar | null;
   recurrence_enabled?: boolean;
   recurrence_frequency?: "daily" | "weekly" | "monthly" | null;

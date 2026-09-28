@@ -179,7 +179,7 @@ export function goalDayEntries(
   if (goal.plan_mode === "count") {
     return counted.map((c) => {
       const it = mine.find((i) => i.source_item_id === c.id) ?? null;
-      return { key: `c-${c.id}`, goalId: goal.id, habitId: null, day: midnight(c.start), start: c.allDay ? null : c.start, minutes: null, title: c.name, focus: null, steps: [], done: !!it?.done, item: it, counted: c };
+      return { key: `c-${c.id}`, goalId: goal.id, habitId: null, day: midnight(c.start), start: c.allDay ? null : c.start, minutes: null, title: c.name, focus: null, steps: [], done: it ? it.done : !!c.sourceDone, item: it, counted: c };
     });
   }
   return sessions

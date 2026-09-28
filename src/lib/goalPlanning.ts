@@ -241,6 +241,8 @@ export interface CountedEvent {
   name: string;
   start: Date;
   allDay: boolean;
+  /** Finished according to its own calendar (a Runna completed activity): counts as ticked. */
+  sourceDone?: boolean;
 }
 
 export function countGoalEvents(goal: PlanGoal, week: WeekData): CountedEvent[] {
@@ -264,14 +266,17 @@ export function countGoalEventsIn(goal: PlanGoal, week: WeekData, from: Date, to
     const name = fe?.name ?? m.item_name;
     if (kw && !name.toLowerCase().includes(kw)) continue;
     seen.add(m.item_id);
-    out.push({ id: m.item_id, name, start, allDay });
+    out.push({ id: m.item_id, name, start, allDay, sourceDone: !!fe?.source_done });
   }
-  // Ticked done, then dropped by its calendar (Runna clears finished workouts): keep counting it.
+  // Ticked done, then dropped by its calendar (Runna swaps a finished workout for a
+  // completed-activity event): keep counting it, unless that activity has arrived for the day.
+  const activityDays = new Set(out.filter((c) => c.sourceDone).map((c) => c.start.toDateString()));
   for (const k of week.keptDone ?? []) {
     if (k.goal_id !== goal.id || seen.has(k.source_item_id) || week.fixedById.has(k.source_item_id)) continue;
     const [y, mo, d] = k.day.split("-").map(Number);
     const start = k.start_at ? new Date(k.start_at) : new Date(y, mo - 1, d);
     if (start < from || start >= to) continue;
+    if (activityDays.has(start.toDateString())) continue;
     seen.add(k.source_item_id);
     out.push({ id: k.source_item_id, name: k.focus, start, allDay: !k.start_at });
   }
