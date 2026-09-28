@@ -14,6 +14,8 @@ import {
   milestonesDueSoon,
   planWeek,
   recordReview,
+  paceNote,
+  paceStatus,
   reviewForPlan,
   sessionName,
   setMilestoneDone,
@@ -23,6 +25,7 @@ import {
   type ProposedSession,
   type VerifyResult,
   type WeekReviewRow,
+  type WeekData,
 } from "@/lib/goalPlanning";
 import { goalDayEntries, loadDailyItems, setCountedDone, setSessionDone, writeDailyPlan, type DailyItem, type DayEntry } from "@/lib/goalDaily";
 import { DAY_SHORT, daysText, effortGoals, loadEntries, loadMeasures, planKey, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
@@ -48,8 +51,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
   const [loading, setLoading] = useState(true);
   const [busyGoal, setBusyGoal] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [verify, setVerify] = useState<VerifyResult[] | null>(null);
-  const [verifying, setVerifying] = useState(false);
+  const [weekData, setWeekData] = useState<WeekData | null>(null);
   const [items, setItems] = useState<DailyItem[]>([]);
   const [rewriting, setRewriting] = useState<string | null>(null);
   const [measures, setMeasures] = useState<GoalMeasure[]>([]);
@@ -70,7 +72,6 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
   const load = useCallback(async (opts: { quiet?: boolean } = {}) => {
     if (!opts.quiet) setLoading(true);
     setError(null);
-    setVerify(null);
     try {
       const { data, error: gErr } = await supabase.from("goals").select(PLAN_GOAL_COLUMNS);
       if (gErr) throw new Error(gErr.message);
@@ -85,6 +86,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
       setGoals(all);
       const [week, ms, blocks] = await Promise.all([loadWeekData(weekStart), loadMeasures(), loadLifeBlocks()]);
       blockNames = Object.fromEntries(blocks.map((b) => [b.key, b.label]));
+      setWeekData(week);
       setMeasures(ms);
       setEntries(await loadEntries(ms.filter((m) => m.kind === "outcome" && m.status === "active").map((m) => m.id)));
       // One card per effort measure (goals without measures keep their single weekly target).
@@ -112,7 +114,6 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
   const needsPlan = goals.filter((g) => g.status === "active" && (g.cadence_sessions_per_week ?? 0) > 0 && !g.plan_mode);
   const firstMeasure = (goalId: string) => measures.find((m) => m.goal_id === goalId && m.kind === "effort" && m.status === "active")?.id;
   const reviewFor = (g: PlanGoal) => reviewForPlan(reviews, g, firstMeasure(g.id));
-  const allReviewed = plans.length > 0 && plans.every((p) => p.startsNext || reviewFor(p.goal));
   const outcomesFor = (goalId: string) => measures.filter((m) => m.goal_id === goalId && m.kind === "outcome" && m.status === "active");
   // Goals measured only by numbers you log (no weekly effort to plan).
   const outcomeOnly = goals.filter((g) => g.status === "active" && outcomesFor(g.id).length > 0 && !plans.some((p) => p.goal.id === g.id));
@@ -182,6 +183,18 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
     reloadToken: calToken,
   };
 
+  // Running tally for the week, fed by the calendar: what's on it and what's ticked done.
+  const tally = useMemo(() => {
+    if (!weekData || !plans.length) return null;
+    const entriesBy = new Map(plans.map((p) => [planKey(p.goal), goalDayEntries(p.goal, sessionsOf(p), p.counted, items)]));
+    const doneBy = new Map([...entriesBy].map(([k, es]) => [k, es.filter((e) => e.done).length]));
+    const t = new Date();
+    return verifyWeek(plans.map((p) => p.goal), weekData, doneBy).map((v) => ({
+      ...v,
+      missed: (entriesBy.get(v.key) ?? []).filter((e) => !e.done && (e.start ? new Date(e.start.getTime() + (e.minutes ?? 30) * 60000) : addDays(e.day, 1)) < t).length,
+    }));
+  }, [weekData, plans, items]);
+
   const weekEnd = addDays(weekStart, 6);
   const isThisWeek = getWeekStart(now).getTime() === weekStart.getTime();
 
@@ -213,24 +226,6 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
       setError(e instanceof Error ? e.message : "Couldn't save");
     } finally {
       setBusyGoal(null);
-    }
-  }
-
-  async function runVerify() {
-    setVerifying(true);
-    try {
-      const [week, fresh] = await Promise.all([loadWeekData(weekStart), loadDailyItems(weekStart, addDays(weekStart, 7))]);
-      setItems(fresh);
-      const doneByGoal = new Map<string, number>();
-      for (const p of plans) {
-        const n = goalDayEntries(p.goal, sessionsOf(p), p.counted, fresh).filter((e) => e.done).length;
-        doneByGoal.set(planKey(p.goal), n);
-      }
-      setVerify(verifyWeek(plans.map((p) => p.goal), week, doneByGoal));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't check the week");
-    } finally {
-      setVerifying(false);
     }
   }
 
@@ -335,6 +330,8 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
         <div className="flex items-center gap-2 text-sm text-slate-400"><Loader2 className="w-4 h-4 animate-spin" /> Preparing the week…</div>
       ) : (
         <div className="space-y-4">
+          {tally && <WeekTally rows={tally} plans={plans} isThisWeek={isThisWeek} />}
+
           {missed.map((g) => (
             <div key={g.id} className="rounded-xl border border-rose-500/30 bg-rose-500/5 p-4">
               <div className="flex items-center gap-2 mb-1 text-rose-300 text-sm font-semibold"><Flag className="w-4 h-4" /> Deadline passed</div>
@@ -416,43 +413,6 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
             </div>
           ))}
 
-          {plans.length > 0 && (
-            <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-slate-100">Check the week</p>
-                  <p className="text-xs text-slate-400">Re-runs the scheduler to confirm every goal's sessions actually held.</p>
-                </div>
-                <button
-                  onClick={runVerify}
-                  disabled={verifying || !allReviewed}
-                  title={allReviewed ? undefined : "Review every goal first"}
-                  className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-500 disabled:opacity-40"
-                >
-                  {verifying ? "Checking…" : "Check"}
-                </button>
-              </div>
-              {verify && (
-                <ul className="mt-3 space-y-1.5">
-                  {verify.map((v) => {
-                    const g = plans.find((p) => planKey(p.goal) === v.key)?.goal;
-                    const ok = v.held >= v.target;
-                    return (
-                      <li key={v.key} className="flex items-center gap-2 text-sm">
-                        {ok ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <AlertTriangle className="w-4 h-4 text-amber-400" />}
-                        <span className="text-slate-200 truncate">{g ? (g.measure_label ? `${g.measure_label} — ${goalShortName(g)}` : goalShortName(g)) : v.goalId}</span>
-                        <span className="ml-auto tabular-nums text-slate-400">
-                          {v.held}/{v.target}
-                          <span className={v.done >= v.target ? "text-emerald-300" : ""}> · {v.done} done</span>
-                          {v.offCalendar > 0 && <span className="text-amber-300"> · {v.offCalendar} bumped to the tray</span>}
-                        </span>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </div>
-          )}
         </div>
       )}
       </div>
@@ -539,9 +499,8 @@ function GoalCard({
           </p>
           {plan.pace && plan.pace.period !== "day" && (
             <p className="text-xs text-slate-300 mt-0.5">
-              {plan.pace.quota === 0
-                ? `${plan.pace.label}: added partway through, so it starts next ${plan.pace.period}`
-                : `${plan.pace.label}: ${plan.pace.bookedBefore} of ${plan.pace.quota} booked before this week · ${plan.target > 0 ? `${plan.target} due this week` : "nothing more due this week"}`}
+              {paceNote(plan.pace, have)}
+              {paceStatus(plan.pace, have) === "open" && plan.proposed.length > 0 && !review && " · take this week's slot or skip, and it's offered again next week"}
             </p>
           )}
           {!!g.blocked_blocks?.length && <p className="text-[11px] text-slate-500 mt-0.5">Stays out of: {g.blocked_blocks.map(blockLabel).join(", ")}</p>}
@@ -674,8 +633,8 @@ function GoalCard({
           </button>
         </div>
       )}
-      {!review && !plan.startsNext && afterApproval < plan.target && (
-        <p className="mt-1.5 text-[11px] text-slate-500">Approving now records this week as short ({afterApproval}/{plan.target}).</p>
+      {!review && !plan.startsNext && afterApproval < (plan.pace ? plan.pace.required : plan.target) && (
+        <p className="mt-1.5 text-[11px] text-slate-500">Approving now records this week as short ({afterApproval}/{plan.pace ? plan.pace.required : plan.target}).</p>
       )}
     </div>
   );
@@ -713,5 +672,76 @@ function DayList({ entries, onDone }: { entries: DayEntry[]; onDone: (e: DayEntr
         );
       })}
     </ul>
+  );
+}
+
+type TallyRow = VerifyResult & { missed: number };
+
+/** "This week so far": a live tally per goal, fed by the calendar as sessions are ticked off. */
+function WeekTally({ rows, plans, isThisWeek }: { rows: TallyRow[]; plans: GoalWeekPlan[]; isThisWeek: boolean }) {
+  const doneAll = rows.reduce((a, r) => a + Math.min(r.done, Math.max(r.target, r.held)), 0);
+  const dueAll = rows.reduce((a, r) => a + Math.max(r.target, r.held), 0);
+  return (
+    <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-4">
+      <div className="flex items-baseline justify-between gap-3">
+        <p className="text-sm font-semibold text-slate-100">{isThisWeek ? "This week so far" : "The week's tally"}</p>
+        <p className="text-xs tabular-nums text-slate-400">
+          <span className="text-slate-100 font-semibold">{doneAll}</span> of {dueAll} done
+        </p>
+      </div>
+      <p className="text-[11px] text-slate-500 mb-2">Updates as you tick sessions off here or in the calendar.</p>
+      <ul className="space-y-2.5">
+        {rows.map((r) => {
+          const plan = plans.find((p) => planKey(p.goal) === r.key);
+          const g = plan?.goal;
+          const name = g ? g.measure_label ?? g.weekly_target ?? goalShortName(g) : r.goalId;
+          const st = r.pace ? paceStatus(r.pace, r.held) : null;
+          // Monthly/quarterly counts still open with nothing booked this week aren't behind.
+          const open = st === "open" && r.held === 0;
+          const bookedElsewhere = st === "booked" && r.held === 0;
+          const goalFor = Math.max(r.target, r.held);
+          const complete = goalFor > 0 && r.done >= goalFor;
+          const short = !open && !bookedElsewhere && (st === "late" || (!r.pace && r.held < r.target) || r.offCalendar > 0);
+          const pct = goalFor ? Math.min(100, Math.round((r.done / goalFor) * 100)) : 0;
+          return (
+            <li key={r.key}>
+              <div className="flex items-center gap-2 text-sm">
+                {complete || bookedElsewhere ? (
+                  <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+                ) : short ? (
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+                ) : (
+                  <span className={`w-3 h-3 mx-0.5 shrink-0 rounded-full border-2 ${open ? "border-slate-500 border-dashed" : "border-blue-400"}`} />
+                )}
+                <span className="min-w-0 flex-1 truncate text-slate-200" title={g ? goalShortName(g) : undefined}>
+                  {name}
+                </span>
+                <span className="shrink-0 tabular-nums text-xs text-slate-300">
+                  {open || bookedElsewhere ? (
+                    <span className="text-slate-400">{open ? "open" : "booked"}</span>
+                  ) : (
+                    <>
+                      <span className={complete ? "text-emerald-300 font-semibold" : "font-semibold"}>{r.done}</span>/{goalFor} done
+                    </>
+                  )}
+                </span>
+              </div>
+              {!open && !bookedElsewhere && goalFor > 0 && (
+                <div className="ml-6 mt-1 h-1 rounded-full bg-slate-800 overflow-hidden">
+                  <div className={`h-full rounded-full ${complete ? "bg-emerald-500" : "bg-blue-500"}`} style={{ width: `${pct}%` }} />
+                </div>
+              )}
+              <p className="ml-6 mt-0.5 text-[11px] text-slate-500">
+                {r.pace
+                  ? paceNote(r.pace, r.held)
+                  : `${r.held} of ${r.target} on the calendar`}
+                {r.missed > 0 && <span className="text-amber-300/90"> · {r.missed} past, not ticked</span>}
+                {r.offCalendar > 0 && <span className="text-amber-300"> · {r.offCalendar} bumped to the tray</span>}
+              </p>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }

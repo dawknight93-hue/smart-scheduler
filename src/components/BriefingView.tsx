@@ -8,7 +8,7 @@ import { OutcomeTracker } from "@/components/MeasureWidgets";
 import { fmt, outcomeStatus, planKey } from "@/lib/measures";
 import { addMemory, loadMemory } from "@/lib/briefingMemory";
 import { getPillarColor } from "@/lib/types";
-import { goalShortName } from "@/lib/goalPlanning";
+import { goalShortName, paceNote } from "@/lib/goalPlanning";
 import { getWeekStart } from "@/lib/schedulingEngine";
 import { setCountedDone, setSessionDone, type DayEntry } from "@/lib/goalDaily";
 import {
@@ -455,7 +455,7 @@ function Daily({
                               : g.pace && g.pace.period !== "day"
                               ? g.pace.quota === 0
                                 ? `${g.pace.perPeriod} a ${g.pace.period} · added partway through ${g.pace.label}, so it starts next ${g.pace.period}`
-                                : `${g.pace.perPeriod} a ${g.pace.period} · ${g.pace.label}: ${g.pace.bookedBefore + g.scheduled} of ${g.pace.quota} on the calendar${g.target > 0 ? ` · ${g.target} due this week` : ""} · ${g.done} ticked done`
+                                : `${g.pace.perPeriod} a ${g.pace.period} · ${paceNote(g.pace, g.scheduled)} · ${g.done} ticked done`
                               : `${g.done} ticked done · ${g.scheduled} on the calendar this week`}
                           </p>
                         </li>

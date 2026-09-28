@@ -57,6 +57,9 @@ import { AddItemModal, type EditTarget } from "@/components/AddItemModal";
 import { CalendarConnectionsPanel } from "@/components/CalendarConnectionsPanel";
 import { getSyncStatus, pullFromGoogle, mirrorToGoogle, deleteFromGoogle, scheduleAutoPush, updateGoogleSourceEvent } from "@/lib/gcalSync";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, formatRecurrenceSummary } from "@/lib/recurrence";
+import { PLAN_GOAL_COLUMNS, type PlanGoal } from "@/lib/goalPlanning";
+import { effortGoals, loadMeasures } from "@/lib/measures";
+import { setCountedDone } from "@/lib/goalDaily";
 import { mirrorCalendarNames, defaultMirrorWindowStart, MIRROR_WEEKS } from "@/lib/googleMirror";
 import { layoutColumns, type ItemLayout } from "@/lib/calendarLayout";
 import { EFFORTS, EFFORT_LABELS, type Effort } from "@/lib/effort";
@@ -366,6 +369,14 @@ export function CalendarView({
   const [habitOccurrences, setHabitOccurrences] = useState<HabitOccurrence[]>([]);
   // 🎯 goal sessions ticked done (goal_daily_items), by habit id
   const [goalSessionDone, setGoalSessionDone] = useState<Map<string, { id: string; done: boolean }>>(new Map());
+  // Goals that count events from one of your calendars (e.g. runs from Runna): those events can be ticked done here.
+  const [countGoals, setCountGoals] = useState<PlanGoal[]>([]);
+  useEffect(() => {
+    void (async () => {
+      const [{ data }, ms] = await Promise.all([supabase.from("goals").select(PLAN_GOAL_COLUMNS).eq("status", "active"), loadMeasures().catch(() => [])]);
+      setCountGoals(effortGoals((data as PlanGoal[]) ?? [], ms).filter((g) => g.plan_mode === "count" && !!g.count_calendar_id));
+    })();
+  }, []);
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
   // True when the edit modal was opened from the "not on your calendar" panel, which also offers Delete.
   const [editFromUnscheduled, setEditFromUnscheduled] = useState(false);
@@ -461,7 +472,7 @@ export function CalendarView({
       supabase.from("task_occurrences").select("*").gte("occurrence_date", formatLocalDate(rangeStart)).lte("occurrence_date", formatLocalDate(addDays(rangeEnd, -1))),
       supabase.from("fixed_event_occurrences").select("*").gte("occurrence_date", formatLocalDate(rangeStart)).lte("occurrence_date", formatLocalDate(addDays(rangeEnd, -1))),
       supabase.from("habit_occurrences").select("*").gte("occurrence_date", formatLocalDate(rangeStart)).lte("occurrence_date", formatLocalDate(addDays(rangeEnd, -1))),
-      supabase.from("goal_daily_items").select("id, habit_id, done").not("habit_id", "is", null).gte("day", formatLocalDate(addDays(rangeStart, -7))).lt("day", formatLocalDate(addDays(rangeEnd, 7))),
+      supabase.from("goal_daily_items").select("id, habit_id, source_item_id, day, done").or("habit_id.not.is.null,source_item_id.not.is.null").gte("day", formatLocalDate(addDays(rangeStart, -7))).lt("day", formatLocalDate(addDays(rangeEnd, 7))),
     ]);
 
     const feById = new Map<string, FixedEvent>();
@@ -487,9 +498,18 @@ export function CalendarView({
     setOccurrences(oc);
     setFixedEventOccurrences(feo);
     setHabitOccurrences(ho);
-    setGoalSessionDone(
-      new Map(((gdRes.data as { id: string; habit_id: string; done: boolean }[]) ?? []).map((r) => [r.habit_id, { id: r.id, done: r.done }]))
-    );
+    // Keys: a one-off 🎯 session's habit id, "<habit id>|<day>" for a repeating one,
+    // and "src:<event id>" for an event a goal counts (e.g. a Runna run).
+    const gdMap = new Map<string, { id: string; done: boolean }>();
+    for (const r of (gdRes.data as { id: string; habit_id: string | null; source_item_id: string | null; day: string; done: boolean }[]) ?? []) {
+      const v = { id: r.id, done: r.done };
+      if (r.habit_id) {
+        gdMap.set(r.habit_id, v);
+        gdMap.set(`${r.habit_id}|${r.day}`, v);
+      }
+      if (r.source_item_id) gdMap.set(`src:${r.source_item_id}`, v);
+    }
+    setGoalSessionDone(gdMap);
     setLoading(false);
     // Embedded in the Weekly Review: let it re-plan after anything is saved here.
     if (loadedOnce.current) embedRef.current?.onDataChanged();
@@ -747,6 +767,8 @@ export function CalendarView({
       } else if (p.kind === "Task") {
         const ids = p.isBatch && p.memberIds?.length ? p.memberIds : [p.id];
         p = { ...p, completed: ids.every((id) => !!taskById.get(id)?.completed_at) };
+      } else if (p.kind === "Fixed Event" && goalSessionDone.has(`src:${p.id}`)) {
+        p = { ...p, completed: !!goalSessionDone.get(`src:${p.id}`)?.done };
       } else if (p.kind === "Habit" && habitById.get(p.id)?.goal_id) {
         p = { ...p, completed: !!goalSessionDone.get(p.id)?.done };
       }
@@ -1054,10 +1076,18 @@ export function CalendarView({
     loadData();
   }
 
+  /** The goal that counts this calendar event (same calendar, and its title word if it has one). */
+  function countGoalFor(item: PlacedItem): PlanGoal | undefined {
+    if (item.kind !== "Fixed Event" || item.isRecurringOccurrence || !item.googleCalendarId) return undefined;
+    const name = item.name.toLowerCase();
+    return countGoals.find((g) => g.count_calendar_id === item.googleCalendarId && (!g.count_keyword?.trim() || name.includes(g.count_keyword.trim().toLowerCase())));
+  }
+
   /** Whether an item can be marked complete from the calendar. */
   function canComplete(item: PlacedItem): boolean {
     if (item.isRecurringOccurrence) return item.recurringItemKind === "Task" || item.recurringItemKind === "Habit";
     if (item.kind === "Task") return true;
+    if (countGoalFor(item)) return true;
     return item.kind === "Habit" && !!habits.find((h) => h.id === item.id)?.goal_id;
   }
 
@@ -1082,6 +1112,32 @@ export function CalendarView({
         ? await supabase.from(table).update(patch).eq("id", existing.id)
         : await supabase.from(table).insert({ [idCol]: item.recurringItemId, occurrence_date: item.occurrenceDate, ...patch });
       if (error) throw new Error(error.message);
+      // A repeating 🎯 session: tick its day in the goal's tally too.
+      const goalId = !isTask ? habits.find((h) => h.id === item.recurringItemId)?.goal_id : null;
+      if (goalId) {
+        const day = formatLocalDate(item.start);
+        const gd = goalSessionDone.get(`${item.recurringItemId}|${day}`);
+        const gpatch = { done, done_at: done ? now : null };
+        const { error: gErr } = gd
+          ? await supabase.from("goal_daily_items").update(gpatch).eq("id", gd.id)
+          : await supabase.from("goal_daily_items").insert({
+              goal_id: goalId,
+              week_start: formatLocalDate(getWeekStart(item.start)),
+              day,
+              habit_id: item.recurringItemId,
+              start_at: item.start.toISOString(),
+              minutes: Math.round((item.end.getTime() - item.start.getTime()) / 60000),
+              focus: item.name.replace(/^🎯\s*/, ""),
+              ...gpatch,
+            });
+        if (gErr) throw new Error(gErr.message);
+      }
+    } else if (item.kind === "Fixed Event") {
+      const goal = countGoalFor(item);
+      if (!goal) return;
+      // All-day events are stored at UTC midnight: use that calendar day.
+      const start = item.isAllDay ? new Date(item.start.getUTCFullYear(), item.start.getUTCMonth(), item.start.getUTCDate()) : item.start;
+      await setCountedDone(goal, { id: item.id, name: item.name, start, allDay: !!item.isAllDay }, getWeekStart(start), done);
     } else if (item.kind === "Task") {
       const ids = item.isBatch && item.memberIds?.length ? item.memberIds : [item.id];
       const before = tasks.filter((t) => ids.includes(t.id));
