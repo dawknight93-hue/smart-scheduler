@@ -443,7 +443,16 @@ function GoalCard({
   const kept = plan.proposed.filter((s) => !removed.has(s.key));
   const have = isCount ? plan.counted.length : plan.existing.length;
   const afterApproval = isCount ? have : have + kept.length;
-  const due = milestonesDueSoon(g, weekStart);
+  // Ticked checkpoints stay in view (struck through, with Undo) instead of vanishing.
+  const [ticked, setTicked] = useState<string[]>([]);
+  const [showDone, setShowDone] = useState(false);
+  const soon = new Set(milestonesDueSoon(g, weekStart).map((m) => m.id));
+  const due = (g.milestones ?? []).filter((m) => soon.has(m.id) || (m.done && ticked.includes(m.id))).sort((a, b) => a.due.localeCompare(b.due));
+  const doneEarlier = (g.milestones ?? []).filter((m) => m.done && !ticked.includes(m.id)).sort((a, b) => a.due.localeCompare(b.due));
+  const tick = (id: string, done: boolean) => {
+    if (done) setTicked((t) => [...t, id]);
+    onMilestone(id, done);
+  };
 
   return (
     <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-4">
@@ -552,16 +561,40 @@ function GoalCard({
         </div>
       )}
 
-      {firstOfGoal && due.length > 0 && (
+      {firstOfGoal && (due.length > 0 || doneEarlier.length > 0) && (
         <div className="mt-3 border-t border-slate-800 pt-2">
-          <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Checkpoints coming up</p>
+          {due.length > 0 && <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Checkpoints coming up</p>}
           {due.map((m) => (
-            <label key={m.id} className="flex items-center gap-2 text-xs text-slate-300 py-0.5">
-              <input type="checkbox" checked={m.done} onChange={(e) => onMilestone(m.id, e.target.checked)} className="accent-blue-600" />
-              <span className="tabular-nums text-slate-500 w-20">{m.due.slice(5)}</span>
-              <span>{m.title}</span>
-            </label>
+            <div key={m.id} className="flex items-center gap-2 text-xs text-slate-300 py-0.5">
+              <label className="flex flex-1 min-w-0 items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={m.done} onChange={(e) => tick(m.id, e.target.checked)} className="accent-blue-600" />
+                <span className="tabular-nums text-slate-500 w-20 shrink-0">{m.due.slice(5)}</span>
+                <span className={m.done ? "text-slate-500 line-through" : ""}>{m.title}</span>
+              </label>
+              {m.done && (
+                <button onClick={() => tick(m.id, false)} className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-blue-300 hover:bg-blue-500/10">
+                  Undo
+                </button>
+              )}
+            </div>
           ))}
+          {doneEarlier.length > 0 && (
+            <div className="mt-1">
+              <button onClick={() => setShowDone((v) => !v)} className="text-[11px] text-slate-500 hover:text-slate-300">
+                {showDone ? "Hide" : "Show"} done checkpoints ({doneEarlier.length})
+              </button>
+              {showDone &&
+                doneEarlier.map((m) => (
+                  <div key={m.id} className="flex items-center gap-2 text-xs py-0.5">
+                    <span className="tabular-nums text-slate-600 w-20 pl-6 shrink-0">{m.due.slice(5)}</span>
+                    <span className="flex-1 min-w-0 text-slate-500 line-through">{m.title}</span>
+                    <button onClick={() => tick(m.id, false)} className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-blue-300 hover:bg-blue-500/10">
+                      Not done
+                    </button>
+                  </div>
+                ))}
+            </div>
+          )}
         </div>
       )}
 

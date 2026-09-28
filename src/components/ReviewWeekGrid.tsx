@@ -58,9 +58,13 @@ export function ReviewWeekGrid({
 
   const { allDay, timed } = useMemo(() => {
     const r = runEngine(week.weekStart, week.busy, week.habits, week.tasks);
-    // Which card owns each session already on the calendar (🎯 goal sessions).
+    // Which card owns each item already on the calendar: 🎯 goal sessions, and
+    // events a count-mode goal counts from its calendar (e.g. Runna runs).
     const ownerOf = new Map<string, string>();
-    for (const p of plans) for (const h of p.existing) ownerOf.set(h.id, planKey(p.goal));
+    for (const p of plans) {
+      for (const h of p.existing) ownerOf.set(h.id, planKey(p.goal));
+      for (const c of p.counted) ownerOf.set(c.id, planKey(p.goal));
+    }
     const allDay: Block[] = [];
     const timed: Block[] = [];
     for (const p of r.placed) {
@@ -147,10 +151,20 @@ export function ReviewWeekGrid({
             <div key={i} className="flex-1 min-w-0 px-0.5 flex flex-col gap-0.5 border-l border-slate-800">
               {c.allDay.map((b) => {
                 const k = getPillarColor(b.pillar);
+                const lit = !!selectedKey && b.owner === selectedKey;
+                const dim = !!selectedKey && !lit;
                 return (
-                  <span key={b.key} className={`block truncate rounded px-1 text-[10px] font-semibold leading-4 ${k.bg} ${k.text} ${b.muted ? "opacity-60" : ""}`} title={b.name}>
+                  <button
+                    type="button"
+                    key={b.key}
+                    onClick={() => b.owner && onSelect(b.owner === selectedKey ? null : b.owner)}
+                    className={`block w-full truncate rounded px-1 text-left text-[10px] font-semibold leading-4 ${k.bg} ${k.text} ${b.muted ? "opacity-60" : ""} ${dim ? "opacity-30" : ""} ${
+                      lit ? "ring-2 ring-white" : ""
+                    } ${b.owner ? "cursor-pointer" : "cursor-default"}`}
+                    title={b.name}
+                  >
                     {b.name}
-                  </span>
+                  </button>
                 );
               })}
             </div>
