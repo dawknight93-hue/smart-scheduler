@@ -497,6 +497,11 @@ function GoalCard({
             {!isCount && g.session_minutes ? ` · ${g.session_minutes} min` : ""}
             {isCount ? " · counted from your calendar" : " · scheduled by the app"}
           </p>
+          {!!plan.banked && (
+            <p className="text-xs text-sky-300 mt-0.5">
+              {plan.banked} banked from last week's extra session{plan.banked === 1 ? "" : "s"} — {plan.target} needed this week instead of {plan.target + plan.banked}.
+            </p>
+          )}
           {plan.pace && plan.pace.period !== "day" && (
             <p className="text-xs text-slate-300 mt-0.5">
               {paceNote(plan.pace, have)}
@@ -734,7 +739,7 @@ function WeekTally({ rows, plans, isThisWeek }: { rows: TallyRow[]; plans: GoalW
               <p className="ml-6 mt-0.5 text-[11px] text-slate-500">
                 {r.pace
                   ? paceNote(r.pace, r.held)
-                  : `${r.held} of ${r.target} on the calendar`}
+                  : `${r.held} of ${r.target} on the calendar${plan?.banked ? ` · ${plan.banked} banked from last week` : ""}`}
                 {r.missed > 0 && <span className="text-amber-300/90"> · {r.missed} past, not ticked</span>}
                 {r.offCalendar > 0 && <span className="text-amber-300"> · {r.offCalendar} bumped to the tray</span>}
               </p>

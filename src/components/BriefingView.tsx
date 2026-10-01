@@ -621,7 +621,7 @@ function Period({ b, onOpenReview }: { b: PeriodBriefing; onOpenReview: () => vo
                     {st.change !== null && o.measure.baseline !== null ? ` (${st.change >= 0 ? "+" : ""}${fmt(Math.round(st.change * 10) / 10)} since start)` : ""}
                   </span>
                   {st.next && st.onTrack !== null && (
-                    <span className={`w-24 text-right text-xs ${st.onTrack ? "text-emerald-300" : "text-amber-300"}`}>{st.onTrack ? "on track" : "behind"}</span>
+                    <span className={`w-24 text-right text-xs ${st.onTrack ? "text-emerald-300" : st.close ? "text-amber-300" : "text-rose-300"}`}>{st.onTrack ? "on track" : st.close ? "close" : "behind"}</span>
                   )}
                 </li>
               );

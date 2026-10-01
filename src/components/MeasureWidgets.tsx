@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { AlertTriangle, CheckCircle2, ChevronDown, Loader2, Plus, TrendingDown, TrendingUp, Trash2 } from "lucide-react";
 import { formatLocalDate } from "@/lib/recurrence";
-import { addEntry, deleteEntry, fmt, outcomeStatus, paceLadder, withUnit, WEEKDAYS, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
+import { addEntry, checkpointWord, deleteEntry, fmt, outcomeStatus, paceLadder, withUnit, WEEKDAYS, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
 import { completeGoal } from "@/lib/goalCompletion";
 
 const shortDate = (s: string) => {
@@ -145,20 +145,40 @@ export function OutcomeTracker({
           </div>
           {s.next && (
             <p className="text-xs mt-0.5 flex items-center gap-1">
-              {s.onTrack === null ? null : s.onTrack ? <CheckCircle2 className="w-3 h-3 text-emerald-400" /> : <AlertTriangle className="w-3 h-3 text-amber-400" />}
-              <span className={s.onTrack === null ? "text-slate-400" : s.onTrack ? "text-emerald-300" : "text-amber-300"}>
+              {s.onTrack === null ? null : s.onTrack ? (
+                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+              ) : (
+                <AlertTriangle className={`w-3 h-3 ${s.close ? "text-amber-400" : "text-rose-400"}`} />
+              )}
+              <span className={s.onTrack === null ? "text-slate-400" : s.onTrack ? "text-emerald-300" : s.close ? "text-amber-300" : "text-rose-300"}>
                 Next checkpoint {cmp} {fmt(s.next.target)}
                 {unit} by {shortDate(s.next.due)} ({s.daysToNext} day{s.daysToNext === 1 ? "" : "s"})
-                {s.onTrack === null ? "" : s.onTrack ? " — on track" : ` — behind${s.expected !== null ? ` (aim for ${fmt(Math.round(s.expected * 10) / 10)}${unit} about now)` : ""}`}
+                {s.onTrack === null
+                  ? ""
+                  : s.onTrack
+                    ? " — on track"
+                    : ` — ${s.close ? "close" : "behind"}${s.expected !== null ? ` (aim for ${fmt(Math.round(s.expected * 10) / 10)}${unit} about now)` : ""}`}
               </span>
+            </p>
+          )}
+          {s.replanned.length > 0 && (
+            <p className="text-[11px] text-sky-300/90 mt-0.5" title="After a missed checkpoint, the later ones are re-spread from the number you actually logged; the final target doesn't move.">
+              Re-planned from your actual number: {s.replanned.map((r) => `${shortDate(r.due)} ${cmp} ${fmt(r.now)}${unit} (was ${fmt(r.was)})`).join(" · ")}
             </p>
           )}
           {open && s.past.length > 0 && (
             <p className="text-[11px] text-slate-500 mt-0.5">
-              {s.past
-                .slice(-2)
-                .map((c) => `${shortDate(c.due)} ${cmp} ${fmt(c.target)}${unit}: ${c.met === null ? "not logged" : c.met ? "met" : "missed"}`)
-                .join(" · ")}
+              {s.past.slice(-2).map((c, i) => (
+                <span key={c.due}>
+                  {i > 0 && " · "}
+                  {shortDate(c.due)} {cmp} {fmt(c.target)}
+                  {unit}:{" "}
+                  <span className={c.met === null ? "" : c.met ? "text-emerald-300" : c.close ? "text-amber-300" : "text-rose-300"}>
+                    {checkpointWord(c)}
+                    {c.value !== null && !c.met ? ` (${fmt(c.value)}${unit})` : ""}
+                  </span>
+                </span>
+              ))}
             </p>
           )}
           {s.due && (

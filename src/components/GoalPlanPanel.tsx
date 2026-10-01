@@ -87,6 +87,8 @@ function blankMeasure(goalId: string, kind: "effort" | "outcome", position: numb
     log_every: kind === "outcome" ? "weekly" : null,
     log_weekday: kind === "outcome" ? 0 : null,
     checkpoints: [],
+    tolerance: null,
+    bankable: false,
   };
 }
 
@@ -572,6 +574,17 @@ function MeasureEditor({
               </label>
             </div>
           )}
+          {(d.period ?? "week") === "week" && (
+            <label className="flex items-start gap-2 rounded-lg border border-slate-800 bg-slate-900/60 px-2.5 py-2 text-xs text-slate-300">
+              <input type="checkbox" className="mt-0.5 accent-blue-500" checked={!!d.bankable} onChange={(e) => set({ bankable: e.target.checked })} />
+              <span>
+                Bank extra sessions
+                <span className="block text-[11px] text-slate-500">
+                  Sessions beyond last week's target count toward this week, up to one week's worth (e.g. an extra check-in before a UTA week). Leave off for training that has to be spread out, like runs.
+                </span>
+              </span>
+            </label>
+          )}
         </>
       ) : (
         <>
@@ -617,7 +630,22 @@ function MeasureEditor({
             )}
           </div>
           <div>
-            <div className="text-xs text-slate-400 mb-1">Checkpoints</div>
+            <div className="flex items-baseline justify-between gap-2 mb-1">
+              <span className="text-xs text-slate-400">Checkpoints</span>
+              <label className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                Close enough within ±
+                <input
+                  type="number"
+                  step="any"
+                  min={0}
+                  className={`${field} w-20 py-1`}
+                  placeholder="0"
+                  value={d.tolerance ?? ""}
+                  onChange={(e) => set({ tolerance: numOrNull(e.target.value) })}
+                />
+                <span>{d.unit ?? ""}</span>
+              </label>
+            </div>
             <div className="space-y-1.5">
               {cps.map((c, i) => (
                 <div key={i} className="flex items-center gap-2">
@@ -633,6 +661,9 @@ function MeasureEditor({
               <button onClick={() => set({ checkpoints: [...cps, { due: "", target: d.target ?? 0 }] })} className="text-xs text-blue-400 hover:underline">
                 + Add checkpoint
               </button>
+              <p className="text-[11px] text-slate-500">
+                Missed by no more than the close band reads "close", not "missed". After a missed checkpoint, the later ones are re-spread from your actual number; the target and its date stay put.
+              </p>
             </div>
           </div>
         </>
