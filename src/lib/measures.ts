@@ -62,6 +62,10 @@ export interface GoalMeasure {
   log_every: LogEvery | null;
   log_weekday: number | null;
   checkpoints: Checkpoint[];
+  /** Outcome: a checkpoint missed by no more than this reads "close" (e.g. 1 lb). */
+  tolerance: number | null;
+  /** Weekly effort: sessions beyond last week's target (up to a week's worth) count toward this week. */
+  bankable: boolean;
   created_at: string;
 }
 
@@ -89,6 +93,8 @@ function normalize(m: GoalMeasure): GoalMeasure {
     hours_per_week: num(m.hours_per_week),
     baseline: num(m.baseline),
     target: num(m.target),
+    tolerance: num(m.tolerance),
+    bankable: !!m.bankable,
     log_weekday: num(m.log_weekday),
     preferred_time: m.preferred_time ?? "any",
     period: PERIODS.includes(m.period) ? m.period : "week",
@@ -212,6 +218,8 @@ export async function saveSuggestions(goalId: string, proposals: Partial<NewMeas
     preferred_time: p.preferred_time ?? "any",
     checkpoints: Array.isArray(p.checkpoints) ? p.checkpoints : [],
     days: Array.isArray(p.days) && p.days.length ? p.days : null,
+    tolerance: p.tolerance ?? null,
+    bankable: !!p.bankable,
   }));
   const { data, error } = await supabase.from("goal_measures").insert(rows).select("*");
   if (error) throw new Error(error.message);
@@ -245,6 +253,7 @@ export function effortGoals(goals: PlanGoal[], measures: GoalMeasure[]): PlanGoa
         period: m.period ?? "week",
         measure_created_at: m.created_at,
         days: m.days,
+        bankable: m.bankable,
         plan_mode: m.plan_mode,
         cadence_sessions_per_week: m.sessions_per_week,
         session_minutes: m.session_minutes,
@@ -316,6 +325,46 @@ export interface CheckpointResult extends Checkpoint {
   /** Value logged on or before the due date (latest one). */
   value: number | null;
   met: boolean | null; // null = nothing logged by then
+  /** Missed, but by no more than the measure's close band. */
+  close: boolean;
+}
+
+/** A checkpoint as it stands now: re-spread after an earlier one was missed. */
+export interface PlannedCheckpoint extends Checkpoint {
+  /** What you originally set. */
+  original: number;
+}
+
+/**
+ * The checkpoints as they stand. When one passes missed (or only close), the
+ * later ones are re-spread from where you actually were, in the same shape as
+ * before, so the gap is shared across the time left instead of landing on the
+ * next checkpoint. The final target never moves. Beating one changes nothing.
+ */
+export function planCheckpoints(m: GoalMeasure, entries: MeasureEntry[], todayStr: string): { checkpoints: PlannedCheckpoint[]; past: CheckpointResult[]; anchor: { due: string; value: number } | null } {
+  const cps: PlannedCheckpoint[] = m.checkpoints.map((c) => ({ ...c, original: c.target }));
+  const final = m.target ?? cps[cps.length - 1]?.target ?? null;
+  const tol = m.tolerance && m.tolerance > 0 ? m.tolerance : 0;
+  const past: CheckpointResult[] = [];
+  let anchor: { due: string; value: number } | null = null;
+  for (let i = 0; i < cps.length; i++) {
+    const c = cps[i];
+    if (c.due >= todayStr) break;
+    const v = [...entries].reverse().find((e) => e.logged_on <= c.due) ?? null;
+    const met = v ? better(m, v.value, c.target) : null;
+    const close = met === false && tol > 0 && Math.abs(v!.value - c.target) <= tol + 1e-9;
+    past.push({ due: c.due, target: c.target, value: v?.value ?? null, met, close });
+    if (v && met === false && final !== null) {
+      const t0 = c.target;
+      const a = v.value;
+      for (let j = i + 1; j < cps.length; j++) {
+        const f = final !== t0 ? (cps[j].target - t0) / (final - t0) : 1;
+        cps[j] = { ...cps[j], target: Math.round((a + f * (final - a)) * 10) / 10 };
+      }
+      anchor = { due: c.due, value: a };
+    }
+  }
+  return { checkpoints: cps, past, anchor };
 }
 
 export interface OutcomeStatus {
@@ -327,6 +376,10 @@ export interface OutcomeStatus {
   /** Where you'd be today on a straight line to the next checkpoint. */
   expected: number | null;
   onTrack: boolean | null;
+  /** Behind, but within the close band of where you should be. */
+  close: boolean;
+  /** Later checkpoints re-spread after a missed one: { due, was, now }. */
+  replanned: { due: string; was: number; now: number }[];
   /** Share of the way from baseline to target (0–1+). */
   progress: number | null;
   past: CheckpointResult[];
@@ -354,14 +407,16 @@ export function outcomeStatus(m: GoalMeasure, allEntries: MeasureEntry[], now = 
   const latest = entries[entries.length - 1] ?? null;
   const start = m.baseline ?? entries[0]?.value ?? null;
   const change = latest && start !== null ? latest.value - start : null;
-  const cps = m.checkpoints;
+  const plan = planCheckpoints(m, entries, todayStr);
+  const cps = plan.checkpoints;
   const next = cps.find((c) => c.due >= todayStr) ?? null;
   const prev = [...cps].reverse().find((c) => c.due < todayStr) ?? null;
 
   let expected: number | null = null;
   if (next) {
     const fromDate = prev ? parseDay(prev.due) : parseDay((entries[0]?.logged_on ?? m.created_at).slice(0, 10));
-    const fromVal = prev ? prev.target : start;
+    // After a missed checkpoint the line starts from where you actually were.
+    const fromVal = prev ? (plan.anchor && plan.anchor.due === prev.due ? plan.anchor.value : prev.target) : start;
     if (fromVal !== null) {
       const span = parseDay(next.due).getTime() - fromDate.getTime();
       const t = span > 0 ? Math.min(1, Math.max(0, (today.getTime() - fromDate.getTime()) / span)) : 1;
@@ -369,14 +424,12 @@ export function outcomeStatus(m: GoalMeasure, allEntries: MeasureEntry[], now = 
     }
   }
   const onTrack = latest && next ? better(m, latest.value, next.target) || (expected !== null && better(m, latest.value, expected)) : null;
+  const tol = m.tolerance && m.tolerance > 0 ? m.tolerance : 0;
+  const close = onTrack === false && expected !== null && tol > 0 && Math.abs(latest!.value - expected) <= tol + 1e-9;
+  const replanned = cps.filter((c) => c.due >= todayStr && c.target !== c.original).map((c) => ({ due: c.due, was: c.original, now: c.target }));
   const progress = latest && start !== null && m.target !== null && m.target !== start ? (latest.value - start) / (m.target - start) : null;
 
-  const past: CheckpointResult[] = cps
-    .filter((c) => c.due < todayStr)
-    .map((c) => {
-      const v = [...entries].reverse().find((e) => e.logged_on <= c.due) ?? null;
-      return { ...c, value: v?.value ?? null, met: v ? better(m, v.value, c.target) : null };
-    });
+  const past = plan.past;
 
   const ps = m.log_every ? periodStart(m, today) : null;
   const due = !!ps && !entries.some((e) => e.logged_on >= ps);
@@ -387,6 +440,8 @@ export function outcomeStatus(m: GoalMeasure, allEntries: MeasureEntry[], now = 
     daysToNext: next ? Math.round((parseDay(next.due).getTime() - today.getTime()) / DAY) : null,
     expected,
     onTrack,
+    close,
+    replanned,
     progress,
     past,
     due,
@@ -394,6 +449,8 @@ export function outcomeStatus(m: GoalMeasure, allEntries: MeasureEntry[], now = 
     entries,
   };
 }
+
+export const checkpointWord = (c: CheckpointResult) => (c.met === null ? "not logged" : c.met ? "met" : c.close ? "close" : "missed");
 
 /** One line for the Briefing facts and the Review ("Weight: 207.4 lb on Sep 27 …"). */
 export function outcomeFact(m: GoalMeasure, s: OutcomeStatus, day: (iso: string) => string = (x) => x): string {
@@ -404,9 +461,10 @@ export function outcomeFact(m: GoalMeasure, s: OutcomeStatus, day: (iso: string)
   }
   const parts = [`${m.label}: latest logged ${fmt(s.latest.value)}${unit} on ${day(s.latest.logged_on)}`];
   if (s.change !== null && m.baseline !== null) parts.push(`${s.change >= 0 ? "+" : ""}${fmt(Math.round(s.change * 10) / 10)}${unit} since the ${fmt(m.baseline)}${unit} baseline`);
-  if (s.next) parts.push(`next checkpoint ${cmp} ${fmt(s.next.target)}${unit} by ${day(s.next.due)} (${s.daysToNext} days): ${s.onTrack ? "on track" : "behind"}`);
+  if (s.next) parts.push(`next checkpoint ${cmp} ${fmt(s.next.target)}${unit} by ${day(s.next.due)} (${s.daysToNext} days): ${s.onTrack ? "on track" : s.close ? "close" : "behind"}`);
   const lastPast = s.past[s.past.length - 1];
-  if (lastPast) parts.push(`checkpoint ${cmp} ${fmt(lastPast.target)}${unit} on ${day(lastPast.due)} was ${lastPast.met === null ? "not logged" : lastPast.met ? "met" : "missed"}`);
+  if (lastPast) parts.push(`checkpoint ${cmp} ${fmt(lastPast.target)}${unit} on ${day(lastPast.due)} was ${checkpointWord(lastPast)}`);
+  if (s.replanned.length) parts.push(`later checkpoints re-planned from the actual number (${s.replanned.map((r) => `${day(r.due)} now ${cmp} ${fmt(r.now)}${unit}, was ${fmt(r.was)}${unit}`).join("; ")})`);
   if (s.due) parts.push(`an entry is due (since ${day(s.dueSince!)})`);
   return parts.join("; ");
 }
@@ -485,11 +543,14 @@ export function paceLadder(m: GoalMeasure, allEntries: MeasureEntry[], deadline:
       : null;
   if (!endDate || endDate <= today) return [];
 
-  // The line to follow: start → checkpoints → target on the deadline.
-  const pts: { t: number; v: number }[] = [{ t: startDate.getTime(), v: startValue }];
-  for (const c of m.checkpoints) {
+  // The line to follow: start → checkpoints → target on the deadline. After a
+  // missed checkpoint it restarts from the number you actually logged there.
+  const plan = planCheckpoints(m, entries, formatLocalDate(today));
+  const lineStart = plan.anchor ? { t: parseDay(plan.anchor.due).getTime(), v: plan.anchor.value } : { t: startDate.getTime(), v: startValue };
+  const pts: { t: number; v: number }[] = [lineStart];
+  for (const c of plan.checkpoints) {
     const t = parseDay(c.due).getTime();
-    if (t > startDate.getTime() && t < endDate.getTime()) pts.push({ t, v: c.target });
+    if (t > lineStart.t && t < endDate.getTime()) pts.push({ t, v: c.target });
   }
   pts.push({ t: endDate.getTime(), v: m.target });
   const at = (d: Date) => {

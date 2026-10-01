@@ -57,6 +57,8 @@ export interface PlanGoal {
   measure_created_at?: string;
   /** Weekdays this effort is scheduled on (0 = Sun … 6 = Sat); empty = any. */
   days?: number[] | null;
+  /** Weekly effort: extra sessions last week count toward this one (up to a week's worth). */
+  bankable?: boolean;
   /** Big life blocks this goal must avoid (see lifeBlocks.ts); empty = any. */
   blocked_blocks?: string[] | null;
   blocks_asked?: boolean;
@@ -344,7 +346,14 @@ const PERIOD_LABEL = (period: Period, d: Date) =>
  * "3 a quarter" spreads out instead of piling into week one. The period is the
  * one holding most of this week (its Thursday).
  */
-export function weeklyTarget(goal: PlanGoal, week: WeekData): { target: number; pace?: PeriodPace; startsNext?: boolean } {
+/** Sessions this effort had in the week before this one (on the calendar, or counted). */
+function sessionsInWeekBefore(goal: PlanGoal, week: WeekData): number {
+  const from = addDays(week.weekStart, -7);
+  if (goal.plan_mode === "count") return countGoalEventsIn(goal, week, from, week.weekStart).length;
+  return week.habits.filter((h) => ownsHabit(goal, h) && new Date(h.search_start) >= from && new Date(h.search_start) < week.weekStart).length;
+}
+
+export function weeklyTarget(goal: PlanGoal, week: WeekData): { target: number; pace?: PeriodPace; startsNext?: boolean; banked?: number } {
   const n = goal.cadence_sessions_per_week ?? 0;
   const period = goal.period ?? "week";
   if (period === "week" || period === "day") {
@@ -353,7 +362,15 @@ export function weeklyTarget(goal: PlanGoal, week: WeekData): { target: number; 
     // (its chosen weekdays, if it has them), and none at all starts next week.
     // (Only for efforts the app schedules: counted ones arrive from their own calendar.)
     const created = goal.measure_created_at && goal.plan_mode === "schedule" ? new Date(goal.measure_created_at) : null;
-    if (!created || created <= week.weekStart || created >= week.weekEnd) return { target: full };
+    if (!created || created <= week.weekStart || created >= week.weekEnd) {
+      // Banking (if you switched it on): sessions beyond last week's target, up to one
+      // week's worth, count toward this week.
+      if (goal.bankable && period === "week" && full > 0) {
+        const banked = Math.min(full, Math.max(0, sessionsInWeekBefore(goal, week) - full));
+        if (banked > 0) return { target: Math.max(0, full - banked), banked };
+      }
+      return { target: full };
+    }
     const firstDay = new Date(created.getFullYear(), created.getMonth(), created.getDate() + 1);
     const daysLeft: Date[] = [];
     for (let d = new Date(firstDay); d < week.weekEnd; d = addDays(d, 1)) daysLeft.push(d);
@@ -398,6 +415,8 @@ export interface GoalWeekPlan {
   startsNext?: boolean;
   /** Set when the goal's count is per day/month/quarter/year. */
   pace?: PeriodPace;
+  /** Extra sessions from last week counted toward this one (banking). */
+  banked?: number;
   /** Sessions for this goal already on the calendar this week (schedule mode). */
   existing: Habit[];
   /** Events counted from the source calendar (count mode). */
@@ -445,13 +464,13 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), bl
   const plans: GoalWeekPlan[] = [];
   for (const goal of sortByPriority(goals)) {
     const wt = weeklyTarget(goal, week);
-    const { pace } = wt;
+    const { pace, banked } = wt;
     const existing = goalSessionsInWeek(goal, week);
     // Already has sessions this week (you placed them anyway): it has started, count those.
     const startsNext = wt.startsNext && existing.length === 0;
     const target = wt.startsNext && existing.length ? existing.length : wt.target;
     if (goal.plan_mode === "count") {
-      plans.push({ goal, target, pace, startsNext, existing: [], counted: countGoalEvents(goal, week), proposed: [], unplaced: 0 });
+      plans.push({ goal, target, pace, banked, startsNext, existing: [], counted: countGoalEvents(goal, week), proposed: [], unplaced: 0 });
       continue;
     }
     // Big life blocks this goal stays out of count as busy for it alone.
@@ -521,7 +540,7 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), bl
         unplaced++;
       }
     }
-    plans.push({ goal, target, pace, startsNext, existing, counted: [], proposed, unplaced });
+    plans.push({ goal, target, pace, banked, startsNext, existing, counted: [], proposed, unplaced });
   }
   return plans;
 }
