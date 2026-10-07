@@ -66,6 +66,8 @@ export interface GoalMeasure {
   tolerance: number | null;
   /** Weekly effort: sessions beyond last week's target (up to a week's worth) count toward this week. */
   bankable: boolean;
+  /** Outcome: its value is the number of ticked sessions of this effort (no manual logging). */
+  counts_measure_id: string | null;
   created_at: string;
 }
 
@@ -95,6 +97,7 @@ function normalize(m: GoalMeasure): GoalMeasure {
     target: num(m.target),
     tolerance: num(m.tolerance),
     bankable: !!m.bankable,
+    counts_measure_id: m.counts_measure_id ?? null,
     log_weekday: num(m.log_weekday),
     preferred_time: m.preferred_time ?? "any",
     period: PERIODS.includes(m.period) ? m.period : "week",
@@ -115,16 +118,149 @@ export async function loadMeasures(goalIds?: string[]): Promise<GoalMeasure[]> {
   const { data, error } = await q;
   // Table not there yet: behave as if no goal has measures (legacy weekly target still works).
   if (error) return [];
-  return ((data as GoalMeasure[]) ?? []).map(normalize);
+  const ms = ((data as GoalMeasure[]) ?? []).map(normalize);
+  return applyMeasureDefaults(ms);
+}
+
+// ---------------------------------------------------------------------------
+// Rules every goal gets (old ones and new ones), applied whenever measures load,
+// so a fix made for one goal reaches every goal of the same kind.
+
+const STOP = new Set(["weekly", "monthly", "daily", "quarterly", "yearly", "session", "completed", "complete", "tally", "count", "total", "number", "of", "the", "a", "per", "done"]);
+/** "Check-ins Completed" → ["checkin"]; "Monthly Date Night" → ["date", "night"]. */
+export function labelWords(s: string): string[] {
+  return s
+    .toLowerCase()
+    .replace(/-/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => (w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w))
+    .filter((w) => !STOP.has(w));
+}
+
+/**
+ * A counting number ("Check-ins Completed", "Date Nights Tally": higher is better,
+ * starting from 0) whose name matches exactly one effort on the same goal counts
+ * that effort's ticked sessions instead of being logged by hand.
+ */
+export function countLinkFor(m: GoalMeasure, all: GoalMeasure[]): string | null {
+  if (m.kind !== "outcome" || m.direction !== "up" || (m.baseline ?? 0) !== 0) return null;
+  const mine = new Set([...labelWords(m.label), ...labelWords(m.unit ?? "")]);
+  const hits = all.filter((e) => {
+    if (e.goal_id !== m.goal_id || e.kind !== "effort" || e.status === "archived") return false;
+    const w = labelWords(e.label);
+    return w.length > 0 && w.every((x) => mine.has(x));
+  });
+  return hits.length === 1 ? hits[0].id : null;
+}
+
+/**
+ * Default close band for a logged number nobody set one for: 5% of the distance
+ * from start to target (whole units for whole-number measures). 210 → 190 lb gets
+ * ±1 lb; a 0 → 13 count gets ±1; a counted (auto) number gets none.
+ */
+export function defaultTolerance(m: GoalMeasure): number | null {
+  if (m.kind !== "outcome" || m.baseline === null || m.target === null) return null;
+  if (m.counts_measure_id) return 0;
+  const span = Math.abs(m.target - m.baseline);
+  const integral = [m.baseline, m.target, ...m.checkpoints.map((c) => c.target)].every((v) => Number.isInteger(v));
+  const raw = span * 0.05;
+  return integral ? Math.max(0, Math.round(raw)) : Math.round(raw * 10) / 10;
+}
+
+function applyMeasureDefaults(ms: GoalMeasure[]): GoalMeasure[] {
+  const patches: { id: string; patch: Partial<GoalMeasure> }[] = [];
+  const out = ms.map((m) => {
+    if (m.kind !== "outcome") return m;
+    const patch: Partial<GoalMeasure> = {};
+    if (!m.counts_measure_id) {
+      const link = countLinkFor(m, ms);
+      if (link) patch.counts_measure_id = link;
+    }
+    const next = { ...m, ...patch };
+    if (next.tolerance === null) {
+      const t = defaultTolerance(next);
+      if (t !== null) patch.tolerance = t;
+    }
+    if (!Object.keys(patch).length) return m;
+    patches.push({ id: m.id, patch });
+    return { ...m, ...patch };
+  });
+  for (const p of patches) void supabase.from("goal_measures").update(p.patch).eq("id", p.id);
+  return out;
 }
 
 export async function loadEntries(measureIds: string[], since?: string): Promise<MeasureEntry[]> {
   if (!measureIds.length) return [];
   let q = supabase.from("measure_entries").select("*").in("measure_id", measureIds).order("logged_on").order("created_at");
   if (since) q = q.gte("logged_on", since);
-  const { data, error } = await q;
-  if (error) return [];
-  return ((data as MeasureEntry[]) ?? []).map((e) => ({ ...e, value: Number(e.value) }));
+  const [{ data, error }, counted] = await Promise.all([q, countedEntries(measureIds).catch(() => ({ ids: new Set<string>(), entries: [] as MeasureEntry[] }))]);
+  const logged = error ? [] : ((data as MeasureEntry[]) ?? []).map((e) => ({ ...e, value: Number(e.value) }));
+  // A counted number's value comes only from ticks (anything typed in by hand before is ignored).
+  const all = [...logged.filter((e) => !counted.ids.has(e.measure_id)), ...counted.entries];
+  return since ? all.filter((e) => e.logged_on >= since) : all;
+}
+
+/**
+ * Entries for numbers that count an effort's ticks: one per ticked session, the
+ * running total on that day (e.g. Oct 4 → 1, Oct 11 → 2).
+ */
+async function countedEntries(measureIds: string[]): Promise<{ ids: Set<string>; entries: MeasureEntry[] }> {
+  const { data } = await supabase.from("goal_measures").select("id, goal_id, baseline, counts_measure_id").in("id", measureIds).not("counts_measure_id", "is", null);
+  const links = (data as { id: string; goal_id: string; baseline: number | null; counts_measure_id: string }[]) ?? [];
+  if (!links.length) return { ids: new Set(), entries: [] };
+  const effortIds = [...new Set(links.map((l) => l.counts_measure_id))];
+  const [hb, ef, gd] = await Promise.all([
+    supabase.from("habits").select("id, measure_id").in("measure_id", effortIds),
+    supabase.from("goal_measures").select("id, plan_mode, count_calendar_id, count_keyword").in("id", effortIds),
+    supabase.from("goal_daily_items").select("id, goal_id, day, habit_id, source_item_id, done_at").in("goal_id", [...new Set(links.map((l) => l.goal_id))]).eq("done", true).order("day"),
+  ]);
+  const habitEffort = new Map(((hb.data as { id: string; measure_id: string }[]) ?? []).map((h) => [h.id, h.measure_id]));
+  const efforts = (ef.data as { id: string; plan_mode: string | null; count_calendar_id: string | null; count_keyword: string | null }[]) ?? [];
+  const countMode = new Set(efforts.filter((e) => e.plan_mode === "count").map((e) => e.id));
+  type Item = { id: string; goal_id: string; day: string; habit_id: string | null; source_item_id: string | null; done_at: string | null };
+  const items = (gd.data as Item[]) ?? [];
+  // Counted efforts (e.g. runs from Runna): an event its calendar marks finished counts as ticked too.
+  const finished = new Map<string, Item[]>();
+  for (const e of efforts.filter((x) => x.plan_mode === "count" && x.count_calendar_id)) {
+    const { data: mp } = await supabase.from("gcal_event_map").select("item_id").eq("calendar_id", e.count_calendar_id!);
+    const ids = ((mp as { item_id: string | null }[]) ?? []).map((r) => r.item_id).filter((x): x is string => !!x);
+    if (!ids.length) continue;
+    const { data: fe } = await supabase.from("fixed_events").select("id, name, start_time").in("id", ids).eq("source_done", true);
+    const kw = e.count_keyword?.trim().toLowerCase();
+    const goalId = links.find((l) => l.counts_measure_id === e.id)!.goal_id;
+    finished.set(
+      e.id,
+      ((fe as { id: string; name: string; start_time: string }[]) ?? [])
+        .filter((f) => !kw || f.name.toLowerCase().includes(kw))
+        .map((f) => {
+          const d = new Date(f.start_time);
+          const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+          return { id: `src-${f.id}`, goal_id: goalId, day, habit_id: null, source_item_id: f.id, done_at: f.start_time };
+        })
+    );
+  }
+  const unticked = new Set<string>();
+  if (finished.size) {
+    const { data: off } = await supabase.from("goal_daily_items").select("source_item_id").in("goal_id", [...new Set(links.map((l) => l.goal_id))]).eq("done", false).not("source_item_id", "is", null);
+    for (const r of (off as { source_item_id: string }[]) ?? []) unticked.add(r.source_item_id);
+  }
+  const entries: MeasureEntry[] = [];
+  for (const l of links) {
+    const ticked = items.filter(
+      (i) => i.goal_id === l.goal_id && ((i.habit_id && habitEffort.get(i.habit_id) === l.counts_measure_id) || (!i.habit_id && i.source_item_id && countMode.has(l.counts_measure_id)))
+    );
+    const seen = new Set(ticked.map((i) => i.source_item_id).filter(Boolean));
+    const auto = (finished.get(l.counts_measure_id) ?? []).filter((f) => !seen.has(f.source_item_id) && !unticked.has(f.source_item_id!));
+    const mine = [...ticked, ...auto].sort((a, b) => a.day.localeCompare(b.day));
+    let n = Number(l.baseline ?? 0);
+    for (const i of mine) {
+      n += 1;
+      entries.push({ id: `auto-${i.id}`, measure_id: l.id, goal_id: l.goal_id, value: n, logged_on: i.day, note: "counted from a ticked session", created_at: i.done_at ?? i.day });
+    }
+  }
+  return { ids: new Set(links.map((l) => l.id)), entries };
 }
 
 function measureRow(m: Partial<NewMeasure>) {
@@ -220,6 +356,7 @@ export async function saveSuggestions(goalId: string, proposals: Partial<NewMeas
     days: Array.isArray(p.days) && p.days.length ? p.days : null,
     tolerance: p.tolerance ?? null,
     bankable: !!p.bankable,
+    counts_measure_id: p.counts_measure_id ?? null,
   }));
   const { data, error } = await supabase.from("goal_measures").insert(rows).select("*");
   if (error) throw new Error(error.message);
@@ -432,7 +569,8 @@ export function outcomeStatus(m: GoalMeasure, allEntries: MeasureEntry[], now = 
   const past = plan.past;
 
   const ps = m.log_every ? periodStart(m, today) : null;
-  const due = !!ps && !entries.some((e) => e.logged_on >= ps);
+  // A counted number fills itself in from ticks: nothing to log.
+  const due = !m.counts_measure_id && !!ps && !entries.some((e) => e.logged_on >= ps);
   return {
     latest,
     change,
