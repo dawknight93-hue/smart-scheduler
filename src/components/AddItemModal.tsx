@@ -14,7 +14,6 @@ type MonthlyMode = "day_of_month" | "weekday_of_month";
 type EndMode = "never" | "on_date" | "after_count";
 
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const WEEKDAY_SHORT = ["S", "M", "T", "W", "T", "F", "S"];
 
 function toDateInput(d: Date): string {
   const off = d.getTimezoneOffset();
@@ -826,10 +825,12 @@ function RecurrenceSection({
 
           {freq === "weekly" && (
             <div className="flex gap-1.5">
-              {WEEKDAY_LABELS.map((_, idx) => (
+              {/* Monday first, like the app's weeks, with two-letter names so Saturday and Sunday can't be mixed up. */}
+              {[1, 2, 3, 4, 5, 6, 0].map((idx) => (
                 <button
                   key={idx}
                   type="button"
+                  title={WEEKDAY_LABELS[idx]}
                   onClick={() => {
                     if (weekdays.includes(idx)) {
                       onWeekdays(weekdays.filter((d) => d !== idx));
@@ -841,10 +842,15 @@ function RecurrenceSection({
                     weekdays.includes(idx) ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-500 hover:text-slate-300"
                   }`}
                 >
-                  {WEEKDAY_SHORT[idx]}
+                  {WEEKDAY_LABELS[idx].slice(0, 2)}
                 </button>
               ))}
             </div>
+          )}
+          {freq === "weekly" && weekdays.length > 0 && (
+            <p className="text-[11px] text-slate-400">
+              Repeats on {[...weekdays].sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7)).map((d) => WEEKDAY_LABELS[d]).join(", ")}
+            </p>
           )}
 
           {freq === "monthly" && (
