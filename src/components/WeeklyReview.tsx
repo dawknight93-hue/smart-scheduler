@@ -295,7 +295,8 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
       if (!next) continue;
       setGoals((gs) => gs.map((x) => (x.id === g.id ? { ...x, milestones: next } : x)));
       setPlans((ps) => ps.map((p) => (p.goal.id === g.id ? { ...p, goal: { ...p.goal, milestones: next } } : p)));
-      void supabase.from("goals").update({ milestones: next }).eq("id", g.id);
+      // (A Supabase query only runs once it is awaited or then-ed.)
+      void supabase.from("goals").update({ milestones: next }).eq("id", g.id).then(() => undefined);
     }
   }, [goals, measures, entries]);
 
