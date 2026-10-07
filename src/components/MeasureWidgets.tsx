@@ -157,7 +157,11 @@ export function OutcomeTracker({
                   ? ""
                   : s.onTrack
                     ? " — on track"
-                    : ` — ${s.close ? "close" : "behind"}${s.expected !== null ? ` (aim for ${fmt(Math.round(s.expected * 10) / 10)}${unit} about now)` : ""}`}
+                    : ` — ${s.close ? "close" : "behind"}${
+                        s.expected !== null && s.latest
+                          ? `: a steady path there puts you at ${fmt(Math.round(s.expected * 10) / 10)}${unit} today; you're at ${fmt(s.latest.value)}${unit}`
+                          : ""
+                      }`}
               </span>
             </p>
           )}

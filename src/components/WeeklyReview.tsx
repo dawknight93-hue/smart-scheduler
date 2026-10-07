@@ -28,7 +28,7 @@ import {
   type WeekData,
 } from "@/lib/goalPlanning";
 import { goalDayEntries, loadDailyItems, setCountedDone, setSessionDone, writeDailyPlan, type DailyItem, type DayEntry } from "@/lib/goalDaily";
-import { DAY_SHORT, daysText, effortGoals, loadEntries, loadMeasures, planKey, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
+import { DAY_SHORT, daysText, effortGoals, fmt, loadEntries, loadMeasures, measuredCheckpoint, outcomeStatus, planKey, resolveMilestones, type GoalMeasure, type MeasureEntry } from "@/lib/measures";
 import { OutcomeTracker } from "@/components/MeasureWidgets";
 import { completeGoal } from "@/lib/goalCompletion";
 import { blockRanges, loadLifeBlocks, DEFAULT_BLOCKS } from "@/lib/lifeBlocks";
@@ -281,6 +281,20 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
     }
   }
 
+  // Checkpoints that track a logged number close themselves once their date passes.
+  useEffect(() => {
+    for (const g of goals) {
+      if (g.status !== "active" || !(g.milestones ?? []).length) continue;
+      const outs = measures.filter((m) => m.goal_id === g.id && m.kind === "outcome" && m.status === "active");
+      if (!outs.length) continue;
+      const next = resolveMilestones(g.milestones ?? [], outs, entries);
+      if (!next) continue;
+      setGoals((gs) => gs.map((x) => (x.id === g.id ? { ...x, milestones: next } : x)));
+      setPlans((ps) => ps.map((p) => (p.goal.id === g.id ? { ...p, goal: { ...p.goal, milestones: next } } : p)));
+      void supabase.from("goals").update({ milestones: next }).eq("id", g.id);
+    }
+  }, [goals, measures, entries]);
+
   async function toggleMilestone(goal: PlanGoal, id: string, done: boolean) {
     const next = await setMilestoneDone(goal, id, done);
     setGoals((gs) => gs.map((g) => (g.id === goal.id ? { ...g, milestones: next } : g)));
@@ -473,8 +487,38 @@ function GoalCard({
   const [ticked, setTicked] = useState<string[]>([]);
   const [showDone, setShowDone] = useState(false);
   const soon = new Set(milestonesDueSoon(g, weekStart).map((m) => m.id));
-  const due = (g.milestones ?? []).filter((m) => soon.has(m.id) || (m.done && ticked.includes(m.id))).sort((a, b) => a.due.localeCompare(b.due));
-  const doneEarlier = (g.milestones ?? []).filter((m) => m.done && !ticked.includes(m.id)).sort((a, b) => a.due.localeCompare(b.due));
+  const todayStr = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  })();
+  const all = (g.milestones ?? []).slice().sort((a, b) => a.due.localeCompare(b.due));
+  // Coming up: not done, date not passed (plus ones you just ticked, with Undo).
+  const due = all.filter((m) => (soon.has(m.id) && !m.done && m.due >= todayStr) || (m.done && ticked.includes(m.id)));
+  // Date passed and nothing closed it (no number logged, or not tied to a number): tick it yourself.
+  const pastOpen = all.filter((m) => !m.done && m.due < todayStr);
+  // Closed in the last two weeks (on their own or by you) stay in view; older ones fold away.
+  const recentCut = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 14);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  })();
+  const closedRecent = all.filter((m) => m.done && !ticked.includes(m.id) && m.due < todayStr && m.due >= recentCut);
+  const doneEarlier = all.filter((m) => m.done && !ticked.includes(m.id) && !closedRecent.includes(m));
+  const unit = (o: GoalMeasure) => (o.unit ? ` ${o.unit}` : "");
+  /** "re-planned: ≤ 200.8 lb" for a coming checkpoint whose number was re-spread after a miss. */
+  const replanNote = (due: string) => {
+    const o = measuredCheckpoint(outcomes, due);
+    if (!o) return null;
+    const r = outcomeStatus(o, entries2).replanned.find((x) => x.due === due);
+    return r ? `now ${o.direction === "up" ? "≥" : "≤"} ${fmt(r.now)}${unit(o)} after the missed checkpoint` : null;
+  };
+  const resultChip = (m: { result?: "met" | "close" | "missed" | null; value?: number | null; due: string }) => {
+    if (!m.result) return <span className="text-slate-500">done</span>;
+    const o = measuredCheckpoint(outcomes, m.due);
+    const v = m.value !== null && m.value !== undefined && o ? ` (${fmt(m.value)}${unit(o)})` : "";
+    const cls = m.result === "met" ? "text-emerald-300" : m.result === "close" ? "text-amber-300" : "text-rose-300";
+    return <span className={cls}>{m.result}{v}</span>;
+  };
   const tick = (id: string, done: boolean) => {
     if (done) setTicked((t) => [...t, id]);
     onMilestone(id, done);
@@ -591,15 +635,52 @@ function GoalCard({
         </div>
       )}
 
-      {firstOfGoal && (due.length > 0 || doneEarlier.length > 0) && (
+      {firstOfGoal && (due.length > 0 || doneEarlier.length > 0 || pastOpen.length > 0 || closedRecent.length > 0) && (
         <div className="mt-3 border-t border-slate-800 pt-2">
+          {closedRecent.length > 0 && (
+            <div className="mb-1.5">
+              <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Recent checkpoints</p>
+              {closedRecent.map((m) => (
+                <div key={m.id} className="flex items-center gap-2 text-xs py-0.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-slate-500" />
+                  <span className="tabular-nums text-slate-500 w-[4.25rem] shrink-0">{m.due.slice(5)}</span>
+                  <span className="flex-1 min-w-0 text-slate-400">{m.title}</span>
+                  <span className="shrink-0 text-[11px]">{resultChip(m)}</span>
+                  {!m.result && (
+                    <button onClick={() => tick(m.id, false)} className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-blue-300 hover:bg-blue-500/10">
+                      Not done
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {pastOpen.length > 0 && (
+            <div className="mb-1.5">
+              <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Past — tick if done</p>
+              {pastOpen.map((m) => {
+                const o = measuredCheckpoint(outcomes, m.due);
+                return (
+                  <label key={m.id} className="flex items-center gap-2 text-xs text-slate-300 py-0.5 cursor-pointer">
+                    <input type="checkbox" checked={false} onChange={() => tick(m.id, true)} className="accent-blue-600" />
+                    <span className="tabular-nums text-slate-500 w-20 shrink-0">{m.due.slice(5)}</span>
+                    <span className="flex-1 min-w-0">{m.title}</span>
+                    {o && <span className="shrink-0 text-[11px] text-amber-300">log your {o.label.toLowerCase()} for this date</span>}
+                  </label>
+                );
+              })}
+            </div>
+          )}
           {due.length > 0 && <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Checkpoints coming up</p>}
           {due.map((m) => (
             <div key={m.id} className="flex items-center gap-2 text-xs text-slate-300 py-0.5">
               <label className="flex flex-1 min-w-0 items-center gap-2 cursor-pointer">
                 <input type="checkbox" checked={m.done} onChange={(e) => tick(m.id, e.target.checked)} className="accent-blue-600" />
                 <span className="tabular-nums text-slate-500 w-20 shrink-0">{m.due.slice(5)}</span>
-                <span className={m.done ? "text-slate-500 line-through" : ""}>{m.title}</span>
+                <span className={m.done ? "text-slate-500 line-through" : ""}>
+                  {m.title}
+                  {!m.done && replanNote(m.due) && <span className="ml-1.5 text-[11px] text-sky-300/90">· {replanNote(m.due)}</span>}
+                </span>
               </label>
               {m.done && (
                 <button onClick={() => tick(m.id, false)} className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-blue-300 hover:bg-blue-500/10">
@@ -618,9 +699,13 @@ function GoalCard({
                   <div key={m.id} className="flex items-center gap-2 text-xs py-0.5">
                     <span className="tabular-nums text-slate-600 w-20 pl-6 shrink-0">{m.due.slice(5)}</span>
                     <span className="flex-1 min-w-0 text-slate-500 line-through">{m.title}</span>
-                    <button onClick={() => tick(m.id, false)} className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-blue-300 hover:bg-blue-500/10">
-                      Not done
-                    </button>
+                    {m.result ? (
+                      <span className="shrink-0 text-[11px]">{resultChip(m)}</span>
+                    ) : (
+                      <button onClick={() => tick(m.id, false)} className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-blue-300 hover:bg-blue-500/10">
+                        Not done
+                      </button>
+                    )}
                   </div>
                 ))}
             </div>
