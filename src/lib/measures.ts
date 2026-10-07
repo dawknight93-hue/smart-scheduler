@@ -628,3 +628,39 @@ export function withUnit(v: number, unit: string | null | undefined): string {
   }
   return u ? `${num} ${u}` : num;
 }
+
+// ---------------------------------------------------------------------------
+// Goal checkpoints that track a logged number close themselves once their date passes.
+
+/** The outcome measure (and its checkpoint) a goal checkpoint on this date tracks, if any. */
+export function measuredCheckpoint(outcomes: GoalMeasure[], due: string): GoalMeasure | null {
+  return outcomes.find((m) => m.kind === "outcome" && m.checkpoints.some((c) => c.due === due)) ?? null;
+}
+
+/**
+ * Past-due goal checkpoints that match a logged number's checkpoint (same date)
+ * are marked done with how they went (met / close / missed, and the number), so
+ * a missed one leaves "coming up" instead of lingering. Returns the updated list,
+ * or null when nothing changed. Checkpoints with no number logged by their date
+ * stay open.
+ */
+export function resolveMilestones<T extends { id: string; due: string; done: boolean; result?: "met" | "close" | "missed" | null; value?: number | null }>(
+  milestones: T[],
+  outcomes: GoalMeasure[],
+  entries: MeasureEntry[],
+  now = new Date()
+): T[] | null {
+  const todayStr = formatLocalDate(new Date(now.getFullYear(), now.getMonth(), now.getDate()));
+  let changed = false;
+  const next = milestones.map((ms) => {
+    if (ms.done || ms.due >= todayStr) return ms;
+    const m = measuredCheckpoint(outcomes, ms.due);
+    if (!m) return ms;
+    const mine = entries.filter((e) => e.measure_id === m.id).sort((a, b) => a.logged_on.localeCompare(b.logged_on) || a.created_at.localeCompare(b.created_at));
+    const r = planCheckpoints(m, mine, todayStr).past.find((c) => c.due === ms.due);
+    if (!r || r.met === null) return ms;
+    changed = true;
+    return { ...ms, done: true, result: r.met ? "met" : r.close ? "close" : "missed", value: r.value };
+  });
+  return changed ? next : null;
+}

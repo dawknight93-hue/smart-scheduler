@@ -22,6 +22,10 @@ export interface Milestone {
   due: string; // YYYY-MM-DD
   metric: string | null;
   done: boolean;
+  /** Set when the checkpoint closed itself from a logged number: how it went. */
+  result?: "met" | "close" | "missed" | null;
+  /** The number logged for it (by its date). */
+  value?: number | null;
 }
 
 export type PlanMode = "schedule" | "count";
