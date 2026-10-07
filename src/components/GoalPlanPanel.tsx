@@ -271,6 +271,7 @@ export function GoalPlanPanel({ goalId }: { goalId: string }) {
           <MeasureEditor
             draft={editing}
             calendars={calendars}
+            efforts={measures.filter((x) => x.kind === "effort" && x.status !== "archived" && x.id !== editing.id)}
             onCancel={() => setEditing(null)}
             onSaved={async () => {
               setEditing(null);
@@ -340,7 +341,7 @@ export function GoalPlanPanel({ goalId }: { goalId: string }) {
               </div>
             ) : (
               <div key={m.id} className="relative">
-                <OutcomeTracker measure={m} entries={entries} onChange={setEntries} showHistory deadline={goal.deadline} />
+                <OutcomeTracker measure={m} entries={entries} onChange={setEntries} showHistory deadline={goal.deadline} countedFrom={measures.find((x) => x.id === m.counts_measure_id)?.label} />
                 <div className="absolute top-2 right-9">
                   <MeasureActions onEdit={() => setEditing(m)} onArchive={() => setStatus(m, "archived")} small />
                 </div>
@@ -374,11 +375,13 @@ function MeasureActions({ onEdit, onArchive, small }: { onEdit: () => void; onAr
 function MeasureEditor({
   draft: initial,
   calendars,
+  efforts,
   onCancel,
   onSaved,
 }: {
   draft: Partial<GoalMeasure> & { goal_id: string };
   calendars: CalendarOption[];
+  efforts: GoalMeasure[];
   onCancel: () => void;
   onSaved: () => void;
 }) {
@@ -629,6 +632,26 @@ function MeasureEditor({
               </label>
             )}
           </div>
+          {efforts.length > 0 && (
+            <label className="block text-xs text-slate-400">
+              Where the number comes from
+              <select
+                className={`${field} mt-1`}
+                value={d.counts_measure_id ?? ""}
+                onChange={(e) => set({ counts_measure_id: e.target.value || null, ...(e.target.value ? { direction: "up" as const } : {}) })}
+              >
+                <option value="">I log it myself</option>
+                {efforts.map((x) => (
+                  <option key={x.id} value={x.id}>
+                    Count my ticked “{x.label}” sessions
+                  </option>
+                ))}
+              </select>
+              <span className="mt-1 block text-[11px] text-slate-500">
+                Counting numbers (check-ins, date nights…) that match an effort's name are linked automatically.
+              </span>
+            </label>
+          )}
           <div>
             <div className="flex items-baseline justify-between gap-2 mb-1">
               <span className="text-xs text-slate-400">Checkpoints</span>

@@ -262,6 +262,10 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
         await setSessionDone(plan.goal, { item: entry.item, habitId: entry.habitId, start: entry.start, minutes: entry.minutes }, weekStart, done);
         setItems(await loadDailyItems(weekStart, addDays(weekStart, 7)));
       }
+      // Numbers that count ticks (e.g. Check-ins Completed) move with this one.
+      if (measures.some((m) => m.counts_measure_id)) {
+        setEntries(await loadEntries(measures.filter((m) => m.kind === "outcome" && m.status === "active").map((m) => m.id)));
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save");
     }
@@ -393,6 +397,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
               review={reviewFor(plan.goal)}
               firstOfGoal={viewPlans.findIndex((p) => p.goal.id === plan.goal.id) === idx}
               outcomes={outcomesFor(plan.goal.id)}
+              allMeasures={measures}
               entries2={entries}
               onEntries={setEntries}
               removed={removed}
@@ -457,6 +462,7 @@ function GoalCard({
   firstOfGoal,
   outcomes,
   entries2,
+  allMeasures,
   onEntries,
 }: {
   plan: GoalWeekPlan;
@@ -465,6 +471,7 @@ function GoalCard({
   firstOfGoal: boolean;
   outcomes: GoalMeasure[];
   entries2: MeasureEntry[];
+  allMeasures: GoalMeasure[];
   onEntries: (e: MeasureEntry[]) => void;
   removed: Set<string>;
   busy: boolean;
@@ -630,7 +637,7 @@ function GoalCard({
         <div className="mt-3 border-t border-slate-800 pt-2 space-y-2">
           <p className="text-[11px] uppercase tracking-wide text-slate-500">Numbers to log</p>
           {outcomes.map((m) => (
-            <OutcomeTracker key={m.id} measure={m} entries={entries2} onChange={onEntries} deadline={g.deadline} />
+            <OutcomeTracker key={m.id} measure={m} entries={entries2} onChange={onEntries} deadline={g.deadline} countedFrom={allMeasures.find((x) => x.id === m.counts_measure_id)?.label} />
           ))}
         </div>
       )}

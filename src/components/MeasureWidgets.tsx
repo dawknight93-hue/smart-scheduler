@@ -41,6 +41,7 @@ export function OutcomeTracker({
   showHistory = false,
   deadline,
   defaultOpen,
+  countedFrom,
 }: {
   measure: GoalMeasure;
   entries: MeasureEntry[];
@@ -50,6 +51,8 @@ export function OutcomeTracker({
   deadline?: string | null;
   /** Start expanded (remembered per number after you open or close it). */
   defaultOpen?: boolean;
+  /** For a number that counts an effort's ticks: that effort's name. */
+  countedFrom?: string;
 }) {
   const s = outcomeStatus(measure, entries);
   const ladder = paceLadder(measure, entries, deadline);
@@ -245,6 +248,9 @@ export function OutcomeTracker({
         </div>
       )}
 
+      {measure.counts_measure_id ? (
+        <p className="mt-2 text-[11px] text-sky-300/90">Counts itself: each ticked {countedFrom ?? "session"} adds 1 (tick them on the calendar or in Review).</p>
+      ) : (
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <input
           type="number"
@@ -261,6 +267,7 @@ export function OutcomeTracker({
           {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />} Log
         </button>
       </div>
+      )}
       {error && <p className="mt-1 text-xs text-rose-300">{error}</p>}
       {reached === "ask" && (
         <div className="mt-2 rounded-lg border border-emerald-600/40 bg-emerald-600/10 p-2.5">
@@ -301,7 +308,9 @@ export function OutcomeTracker({
                   {fmt(e.value)}
                   {unit}
                 </span>
-                {confirmDel === e.id ? (
+                {e.id.startsWith("auto-") ? (
+                  <span className="ml-auto text-[10px] text-slate-500">from a tick</span>
+                ) : confirmDel === e.id ? (
                   <button onClick={() => void remove(e.id)} className="ml-auto rounded bg-rose-600 px-2 py-0.5 text-[11px] text-white">Delete</button>
                 ) : (
                   <button onClick={() => setConfirmDel(e.id)} className="ml-auto p-0.5 rounded hover:bg-slate-700" aria-label="Delete entry">
