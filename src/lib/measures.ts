@@ -187,7 +187,8 @@ function applyMeasureDefaults(ms: GoalMeasure[]): GoalMeasure[] {
     patches.push({ id: m.id, patch });
     return { ...m, ...patch };
   });
-  for (const p of patches) void supabase.from("goal_measures").update(p.patch).eq("id", p.id);
+  // (A Supabase query only runs once it is awaited or then-ed.)
+  for (const p of patches) void supabase.from("goal_measures").update(p.patch).eq("id", p.id).then(() => undefined);
   return out;
 }
 
