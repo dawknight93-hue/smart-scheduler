@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { deviceTimeZone, homeClockActive } from "@/lib/homeClock";
 import { CalendarDays, CheckSquare, Target, ClipboardCheck, Sunrise } from "lucide-react";
 import { CalendarView } from "@/components/CalendarView";
 import { TasksView } from "@/components/TasksView";
@@ -109,6 +110,11 @@ function App() {
           </div>
         </nav>
         {/* The Calendar puts its "not on your calendar" tray here. */}
+        {homeClockActive && (
+          <p className="mx-3 mb-2 rounded-lg border border-sky-500/30 bg-sky-500/10 px-2.5 py-1.5 text-[11px] leading-snug text-sky-200" title={`This device is set to ${deviceTimeZone}.`}>
+            Times shown in Miami time (this device is on {deviceTimeZone.replace(/_/g, " ")}).
+          </p>
+        )}
         <div id="sidebar-slot" className="flex-1 min-h-0 overflow-y-auto px-3 pb-3 empty:hidden" />
       </aside>
 
