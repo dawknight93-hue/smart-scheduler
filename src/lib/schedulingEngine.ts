@@ -265,6 +265,11 @@ export const CONNECTION_MAX_HOURS = 3;
 const AWAY_BLOCKED_CONTEXTS: ContextTag[] = ["home", "errand"];
 export const FLIGHT_TITLE = /([A-Z]{3})\u200b?\u2192\u200b?([A-Z]{3})\s*\u2022/;
 export const HOME_BASE = "MIA";
+/** "✈ CVG→ORD • AA 4097" → "AA 4097". */
+function legLabel(name: string): string {
+  const m = /\u2022\s*(.+)$/.exec(name);
+  return m ? m[1].trim() : name;
+}
 const HOUR_MS = 3600000;
 const DAY_MS = 24 * HOUR_MS;
 
@@ -478,12 +483,26 @@ interface Placeable {
   quietOk?: boolean;
 }
 
+export interface EngineOptions {
+  /**
+   * Big interruptions go to you, not the algorithm: an item whose time a trip
+   * (flight legs, report time, connections, layovers away for home items,
+   * drives to and from the airport) or a UTA day took is listed as
+   * "not on your calendar" instead of being moved somewhere else. On by
+   * default; the goal planner turns it off when it's testing where a new
+   * session could fit.
+   */
+  interruptionsToList?: boolean;
+}
+
 export function runEngine(
   weekStart: Date,
   fixedEvents: FixedEvent[],
   habits: Habit[],
-  tasks: Task[]
+  tasks: Task[],
+  options: EngineOptions = {}
 ): { placed: PlacedItem[]; unscheduled: UnscheduledItem[] } {
+  const interruptionsToList = options.interruptionsToList !== false;
   const allSlots = slotsInWeek(weekStart);
   const busy = buildBusy(fixedEvents, allSlots);
   // Report time: nothing in the 45 minutes before a flight leg departs.
@@ -491,12 +510,21 @@ export function runEngine(
     .filter((ev) => !ev.is_all_day)
     .map((ev) => ({ ev, m: FLIGHT_TITLE.exec(ev.name) }))
     .filter((x): x is { ev: FixedEvent; m: RegExpExecArray } => !!x.m)
-    .map(({ ev, m }) => ({ origin: m[1], dest: m[2], dep: new Date(ev.start_time).getTime(), arr: new Date(ev.end_time).getTime() }))
+    .map(({ ev, m }) => ({ id: ev.id, label: legLabel(ev.name), origin: m[1], dest: m[2], dep: new Date(ev.start_time).getTime(), arr: new Date(ev.end_time).getTime() }))
     .sort((a, b) => a.dep - b.dep);
   const markBusy = (set: Set<string>, from: number, to: number) => {
     for (const sl of allSlots) if (sl.getTime() >= from && sl.getTime() < to) set.add(slotKey(sl));
   };
-  for (const leg of legs) markBusy(busy, leg.dep - REPORT_BUFFER_MIN * 60000, leg.dep);
+  // What a big interruption took, slot by slot, and what to call it in the list.
+  const tripBy = new Map<string, string>();
+  const awayBy = new Map<string, string>();
+  const markBy = (map: Map<string, string>, from: number, to: number, label: string) => {
+    for (const sl of allSlots) if (sl.getTime() >= from && sl.getTime() < to && !map.has(slotKey(sl))) map.set(slotKey(sl), label);
+  };
+  for (const leg of legs) {
+    markBusy(busy, leg.dep - REPORT_BUFFER_MIN * 60000, leg.dep);
+    markBy(tripBy, leg.dep - REPORT_BUFFER_MIN * 60000, leg.arr, leg.label);
+  }
   // Between legs away from home: a short connection is duty time (blocked for
   // everything); a longer layover keeps home, errand and family items off.
   const awayBusy = new Set<string>();
@@ -504,15 +532,30 @@ export function runEngine(
     const a = legs[i];
     const b = legs[i + 1];
     if (a.dest === HOME_BASE || b.origin !== a.dest || b.dep <= a.arr) continue;
-    if (b.dep - a.arr < CONNECTION_MAX_HOURS * HOUR_MS) markBusy(busy, a.arr, b.dep);
-    else markBusy(awayBusy, a.arr, b.dep);
+    if (b.dep - a.arr < CONNECTION_MAX_HOURS * HOUR_MS) {
+      markBusy(busy, a.arr, b.dep);
+      markBy(tripBy, a.arr, b.dep, `${a.label} connection`);
+    } else {
+      markBusy(awayBusy, a.arr, b.dep);
+      markBy(awayBy, a.arr, b.dep, `layover in ${a.dest}`);
+    }
   }
+  // Drives to and from the airport count as part of the trip.
+  const enroute = fixedEvents.filter((ev) => ev.engine_only && ev.id.startsWith("enroute-"));
+  for (const ev of enroute) markBy(tripBy, new Date(ev.start_time).getTime(), new Date(ev.end_time).getTime(), ev.name.replace(/^[^A-Za-z]+/, "").trim() || "Enroute");
+  // Where things would go with no trips at all — the yardstick for "pushed out".
+  const tripIds = new Set([...legs.map((l) => l.id), ...enroute.map((e) => e.id)]);
+  const calmFixed = fixedEvents.filter((ev) => !tripIds.has(ev.id));
+  const calmBusy = buildBusy(calmFixed, allSlots);
+  const calmPlan = buildPlanContext(calmFixed);
+  const calmContexts: PlacedContext[] = [];
 
   const utaBusy = new Set<string>();
   const uta = utaRanges(fixedEvents);
   for (const s of allSlots) {
     if (isUtaTime(s, uta)) utaBusy.add(slotKey(s));
   }
+  const utaBy = new Map<string, string>([...utaBusy].map((k) => [k, "UTA"]));
 
   const placeables: Placeable[] = [];
 
@@ -603,6 +646,46 @@ export function runEngine(
         ? new Set([...busy, ...(isHomeOnly ? utaBusy : []), ...(needsHome ? awayBusy : [])])
         : busy;
     const earliest = new Date(Math.max(p.searchStart.getTime(), allSlots[0]?.getTime() ?? 0));
+    if (interruptionsToList) {
+      // Where would it go if there were no trips and no UTA? If a trip or UTA
+      // took that time, it goes to your list — you decide where it goes next.
+      const calmScorer = (a: Date, b: Date) => scoreSlot(calmPlan, p.effort, p.tier, earliest, a, b).score;
+      const calm = findSlot(calmBusy, allSlots, p.durationMin, p.searchStart, p.searchEnd, calmContexts, p.context, calmScorer);
+      if (calm) {
+        for (const w of calm) calmBusy.add(slotKey(w));
+        const calmEnd = addMinutes(calm[0], p.durationMin);
+        calmContexts.push({ start: calm[0], end: calmEnd, context: p.context });
+        const ck = homeDayKey(calm[0]);
+        calmPlan.load.set(ck, (calmPlan.load.get(ck) ?? 0) + p.durationMin);
+        let by: string | undefined;
+        let at: Date | undefined;
+        for (const w of calm) {
+          const k = slotKey(w);
+          by = tripBy.get(k) ?? (needsHome ? awayBy.get(k) : undefined) ?? (isHomeOnly ? utaBy.get(k) : undefined);
+          if (by) {
+            at = w;
+            break;
+          }
+        }
+        if (by) {
+          if (p.searchStart >= addDays(weekStart, 7)) continue;
+          unscheduled.push({
+            id: p.id,
+            name: p.name,
+            kind: p.kind,
+            tier: p.tier,
+            deadline: p.searchEnd,
+            windowStart: p.searchStart,
+            durationMin: p.durationMin,
+            reason: "interrupted",
+            isBatch: p.isBatch,
+            interruptedBy: by,
+            interruptedAt: at,
+          });
+          continue;
+        }
+      }
+    }
     const scorer = (a: Date, b: Date) => scoreSlot(plan, p.effort, p.tier, earliest, a, b).score;
     const window = findSlot(effectiveBusy, allSlots, p.durationMin, p.searchStart, p.searchEnd, placedContexts, p.context, scorer);
     if (window) {

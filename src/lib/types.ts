@@ -198,7 +198,8 @@ export type UnscheduledReason =
   | "window_too_short" // the window is shorter than the item's duration
   | "outside_hours" // no part of the window falls inside scheduling hours (6 AM–10 PM)
   | "family_uta" // the only open time is on a UTA day, which Family/Desk/Home/Errand items can't use
-  | "no_free_time"; // scheduling hours in the window are already booked
+  | "no_free_time" // scheduling hours in the window are already booked
+  | "interrupted"; // a trip or UTA took the time it would have had — you place it yourself
 
 export interface UnscheduledItem {
   id: string;
@@ -210,6 +211,9 @@ export interface UnscheduledItem {
   durationMin: number;
   reason: UnscheduledReason;
   isBatch?: boolean;
+  /** "interrupted": what took its time (e.g. "AA 4097", "Enroute to MIA", "UTA") and when. */
+  interruptedBy?: string;
+  interruptedAt?: Date;
 }
 
 export const CONTEXT_COLORS: Record<ContextTag, { bg: string; border: string; text: string; dot: string; soft: string }> = {

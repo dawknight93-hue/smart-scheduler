@@ -522,7 +522,8 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), bl
           context: goal.session_context ?? "other",
           pillar: goal.pillar,
         };
-        const r = runEngine(week.weekStart, avoid.length ? [...busy, ...avoid] : busy, [candidate], []);
+        // Testing where a new session could fit: let it look past trips in its window.
+        const r = runEngine(week.weekStart, avoid.length ? [...busy, ...avoid] : busy, [candidate], [], { interruptionsToList: false });
         const p = r.placed.find((x) => x.id === candidate.id);
         if (p) return { key: candidate.id, goalId: goal.id, start: p.start, end: p.end, routine: routine.label };
       }
