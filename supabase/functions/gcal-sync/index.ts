@@ -139,6 +139,8 @@ interface GoogleEvent {
   organizer?: { email?: string; self?: boolean };
   guestsCanModify?: boolean;
   locked?: boolean;
+  /** "transparent" = shown as Free in Google; "opaque" (or missing) = Busy. */
+  transparency?: string;
 }
 
 /**
@@ -600,6 +602,8 @@ async function pullEvents(
       if (evStart < weekStartDt || evStart >= weekEndDt) continue;
       // A finished workout: Runna's completed-activity events carry a "📊 Summary" (and an activity link).
       // Only this flag is kept from the description; the text itself isn't stored.
+      // Blocks your time only if its calendar blocks AND the event itself is Busy in Google.
+      const blocksSchedule = conn.role !== "display_only" && ev.transparency !== "transparent";
       const sourceDone = /📊\s*Summary/.test(ev.description ?? "") || /runna\.com\/[^\s]*activities\?activityId=/.test(ev.description ?? "");
 
       const { data: existing } = await supabase
@@ -618,7 +622,7 @@ async function pullEvents(
             name: ev.summary ?? "Untitled event",
             start_time: evStart.toISOString(),
             end_time: evEnd.toISOString(),
-            blocks_schedule: conn.role !== "display_only",
+            blocks_schedule: blocksSchedule,
             is_all_day: isAllDay,
             google_can_edit: googleCanEdit(accessRole, ev),
             source_done: sourceDone,
@@ -644,7 +648,7 @@ async function pullEvents(
               name: ev.summary ?? "Untitled event",
               start_time: evStart.toISOString(),
               end_time: evEnd.toISOString(),
-              blocks_schedule: conn.role !== "display_only",
+              blocks_schedule: blocksSchedule,
               is_all_day: isAllDay,
               pillar: guessedPillar,
               google_can_edit: googleCanEdit(accessRole, ev),
@@ -936,6 +940,7 @@ async function getSyncStatus() {
     .order("created_at");
 
   return {
+    functionVersion: "2026-10-08-freebusy",
     connected: !!tokenRow,
     email: tokenRow?.email ?? null,
     recentRuns: recentRuns ?? [],
