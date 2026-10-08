@@ -23,6 +23,7 @@ import {
   Pencil,
   Repeat,
   ExternalLink,
+  ChevronDown,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { recheckEnrouteBlocks, type StoredEnrouteBlock } from "@/lib/calendarHygiene";
@@ -399,6 +400,23 @@ export function CalendarView({
   const [showConnections, setShowConnections] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  // Header counts (Fixed / Habits / Tasks) stay tucked away unless opened; the choice is remembered.
+  const [showStats, setShowStats] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("cal.showStats") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleStats = () =>
+    setShowStats((v) => {
+      try {
+        localStorage.setItem("cal.showStats", v ? "0" : "1");
+      } catch {
+        /* storage unavailable */
+      }
+      return !v;
+    });
       const [recheckingEnroute, setRecheckingEnroute] = useState(false);
       const [recheckMessage, setRecheckMessage] = useState<string | null>(null);
 
@@ -416,6 +434,19 @@ export function CalendarView({
           setRecheckingEnroute(false);
         }
       }
+
+  // Sync / recheck results are a passing note: successes clear after a few seconds, problems stay until the next sync.
+  const isProblem = (m: string) => /could not|couldn't|failed|error|connect google/i.test(m);
+  useEffect(() => {
+    if (!syncMessage || isProblem(syncMessage)) return;
+    const t = setTimeout(() => setSyncMessage(null), 6000);
+    return () => clearTimeout(t);
+  }, [syncMessage]);
+  useEffect(() => {
+    if (!recheckMessage || isProblem(recheckMessage)) return;
+    const t = setTimeout(() => setRecheckMessage(null), 6000);
+    return () => clearTimeout(t);
+  }, [recheckMessage]);
   const [eventMap, setEventMap] = useState<EventMapEntry[]>([]);
   const [showOverflow, setShowOverflow] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
@@ -2203,26 +2234,37 @@ export function CalendarView({
           </div>
         </div>
 
-        {/* Stats bar */}
-        <div className="px-4 sm:px-6 pb-3 flex items-center gap-4 text-xs">
-          {syncMessage && <span className="text-blue-300">{syncMessage}</span>}
-              {recheckMessage && <span className="text-emerald-300">{recheckMessage}</span>}
-          <span className={`flex items-center gap-1.5 ${syncFreshness.colorClass}`}>
+        {/* Stats bar: just the sync time; counts open on request; problems always show */}
+        <div className="px-4 sm:px-6 pb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+          {syncMessage && <span className={isProblem(syncMessage) ? "text-amber-300" : "text-blue-300"}>{syncMessage}</span>}
+          {recheckMessage && <span className={isProblem(recheckMessage) ? "text-amber-300" : "text-emerald-300"}>{recheckMessage}</span>}
+          <button
+            type="button"
+            onClick={toggleStats}
+            className={`flex items-center gap-1.5 rounded hover:text-slate-200 ${syncFreshness.colorClass}`}
+            aria-expanded={showStats}
+            title={showStats ? "Hide counts" : "Show counts"}
+          >
             <RefreshCw className="w-3 h-3" />
             Synced {syncFreshness.label}
-          </span>
-          <span className="flex items-center gap-1.5 text-slate-400">
-            <span className="w-2 h-2 rounded-full bg-slate-500"></span>
-            {stats.fixed} Fixed
-          </span>
-          <span className="flex items-center gap-1.5 text-slate-400">
-            <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-            {stats.habits} Habits
-          </span>
-          <span className="flex items-center gap-1.5 text-slate-400">
-            <span className="w-2 h-2 rounded-full bg-blue-500"></span>
-            {stats.tasks} Tasks
-          </span>
+            <ChevronDown className={`w-3 h-3 transition-transform ${showStats ? "rotate-180" : ""}`} />
+          </button>
+          {showStats && (
+            <>
+              <span className="flex items-center gap-1.5 text-slate-400">
+                <span className="w-2 h-2 rounded-full bg-slate-500"></span>
+                {stats.fixed} Fixed
+              </span>
+              <span className="flex items-center gap-1.5 text-slate-400">
+                <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                {stats.habits} Habits
+              </span>
+              <span className="flex items-center gap-1.5 text-slate-400">
+                <span className="w-2 h-2 rounded-full bg-blue-500"></span>
+                {stats.tasks} Tasks
+              </span>
+            </>
+          )}
           {stats.unscheduled > 0 && (
             <span className="flex items-center gap-1.5 text-amber-400">
               <AlertTriangle className="w-3 h-3" />
