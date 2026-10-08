@@ -4,7 +4,7 @@
 // app itself owns (tagged with a private extended property).
 import type { FixedEvent, Habit, Task, LifePillar, PlacedItem } from "./types";
 import { supabase } from "./supabase";
-import { runEngine, getWeekStart, addDays, HOME_TIME_ZONE, homeWallParts, homeDate } from "./schedulingEngine";
+import { runEngine, getWeekStart, addDays, HOME_TIME_ZONE, homeWallParts, homeDate, enrouteAsBusy, getReadyBlocks } from "./schedulingEngine";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, type RecurrenceRule } from "./recurrence";
 
 export const MIRROR_WEEKS = 6;
@@ -291,7 +291,7 @@ export async function buildMirrorItems(
   const fixedEvents = (feRes.data as FixedEvent[]) ?? [];
   const habits = (habRes.data as Habit[]) ?? [];
   const tasks = (taskRes.data as Task[]) ?? [];
-  const enroute = (ebRes.data as { id: string; name: string; start_time: string; end_time: string }[]) ?? [];
+  const enroute = (ebRes.data as { id: string; name: string; start_time: string; end_time: string; direction: "to" | "from" }[]) ?? [];
   // Fixed events that came FROM Google are already there — never push them back.
   const pulledIds = new Set(
     ((mapRes.data as { item_id: string | null; calendar_role: string }[]) ?? [])
@@ -400,7 +400,8 @@ export async function buildMirrorItems(
   for (let w = 0; w < weeks; w++) {
     const weekStart = addDays(windowStart, w * 7);
     const weekEnd = addDays(weekStart, 7);
-    const busyFixed = [...nonRecurringFixed, ...fixedOccurrencesInRange(recurringAppFixed, feOccByKey, weekStart, weekEnd)];
+    // Drives and get-ready time are busy here too, so Google shows exactly what the calendar shows.
+    const busyFixed = [...nonRecurringFixed, ...fixedOccurrencesInRange(recurringAppFixed, feOccByKey, weekStart, weekEnd), ...enrouteAsBusy(enroute)];
     const { placed } = runEngine(weekStart, busyFixed, nonRecurringHabits, nonRecurringTasks);
     for (const p of placed as PlacedItem[]) {
       if (p.kind !== "Habit" && p.kind !== "Task") continue;
@@ -437,6 +438,24 @@ export async function buildMirrorItems(
         allDay: false,
         start: localWall(new Date(b.start_time)),
         end: localWall(new Date(b.end_time)),
+        timeZone,
+      })
+    );
+  }
+
+  // 5) Get-ready time before each drive out — a busy event, so booking pages
+  // (Cal.com) that check this calendar won't offer a lesson that runs into it.
+  for (const r of getReadyBlocks(enroute)) {
+    items.push(
+      withHash({
+        key: `enroute:${r.enrouteId}:ready`,
+        target: "tasks",
+        summary: `🧳 ${r.name}`,
+        description: describe("Enroute", "civ_career", "Get ready before the drive to MIA"),
+        colorId: PILLAR_COLOR.civ_career,
+        allDay: false,
+        start: localWall(new Date(r.start_time)),
+        end: localWall(new Date(r.end_time)),
         timeZone,
       })
     );

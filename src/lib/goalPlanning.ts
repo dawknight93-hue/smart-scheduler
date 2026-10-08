@@ -183,7 +183,7 @@ export async function loadWeekData(weekStart: Date): Promise<WeekData> {
     supabase.from("fixed_event_occurrences").select("*"),
     supabase.from("habit_occurrences").select("*"),
     supabase.from("task_occurrences").select("*"),
-    supabase.from("enroute_blocks").select("id, name, start_time, end_time").lt("start_time", weekEnd.toISOString()).gt("end_time", weekStart.toISOString()),
+    supabase.from("enroute_blocks").select("id, name, start_time, end_time, direction").lt("start_time", weekEnd.toISOString()).gt("end_time", weekStart.toISOString()),
     supabase
       .from("goal_daily_items")
       .select("goal_id, source_item_id, day, start_at, minutes, focus")
@@ -201,7 +201,7 @@ export async function loadWeekData(weekStart: Date): Promise<WeekData> {
   const inWeek = fixed.filter((e) => !e.recurrence_enabled && new Date(e.start_time) < weekEnd && new Date(e.end_time) > weekStart);
   const busy: FixedEvent[] = [
     ...inWeek,
-    ...enrouteAsBusy((eb.data as { id: string; name: string; start_time: string; end_time: string }[]) ?? []),
+    ...enrouteAsBusy((eb.data as { id: string; name: string; start_time: string; end_time: string; direction: "to" | "from" }[]) ?? []),
     ...occurrenceEvents(
       fixed.filter((e) => e.recurrence_enabled),
       (feo.data as OccRow[]) ?? [],

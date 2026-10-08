@@ -142,9 +142,25 @@ function slotKey(d: Date): string {
   return d.toISOString();
 }
 
-/** Enroute drive blocks as busy time for the engine (they're drawn separately). */
-export function enrouteAsBusy(blocks: { id: string; name: string; start_time: string; end_time: string }[]): FixedEvent[] {
-  return blocks.map((b) => ({ id: `enroute-${b.id}`, name: b.name, start_time: b.start_time, end_time: b.end_time, blocks_schedule: true, engine_only: true }));
+/** Time to get ready before the drive to the airport, so nothing (a lesson, a goal session) ends right as you need to leave. */
+export const GET_READY_MIN = 60;
+export const GET_READY_NAME = "Get ready for trip";
+
+type DriveBlock = { id: string; name: string; start_time: string; end_time: string; direction?: "to" | "from" };
+
+/** The get-ready block that sits right before each drive to the airport. */
+export function getReadyBlocks(blocks: DriveBlock[]): { id: string; name: string; start_time: string; end_time: string; enrouteId: string }[] {
+  return blocks
+    .filter((b) => b.direction === "to")
+    .map((b) => {
+      const end = new Date(b.start_time);
+      return { id: `${b.id}-ready`, name: GET_READY_NAME, start_time: new Date(end.getTime() - GET_READY_MIN * 60000).toISOString(), end_time: end.toISOString(), enrouteId: b.id };
+    });
+}
+
+/** Enroute drive blocks (and the get-ready time before each drive out) as busy time for the engine (they're drawn separately). */
+export function enrouteAsBusy(blocks: DriveBlock[]): FixedEvent[] {
+  return [...blocks, ...getReadyBlocks(blocks)].map((b) => ({ id: `enroute-${b.id}`, name: b.name, start_time: b.start_time, end_time: b.end_time, blocks_schedule: true, engine_only: true }));
 }
 
 export function buildBusy(

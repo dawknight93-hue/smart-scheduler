@@ -4,7 +4,7 @@
  * Enroute blocks, goals) so the briefing never disagrees with the calendar.
  */
 import { supabase } from "./supabase";
-import { addDays, getWeekStart, runEngine, utaRanges, WORK_START_HOUR, WORK_END_HOUR } from "./schedulingEngine";
+import { addDays, getReadyBlocks, getWeekStart, runEngine, utaRanges, WORK_START_HOUR, WORK_END_HOUR } from "./schedulingEngine";
 import { HOME_AIRPORT, parseFlightLeg, type StoredEnrouteBlock } from "./calendarHygiene";
 import { formatLocalDate } from "./recurrence";
 import {
@@ -62,7 +62,8 @@ export interface BriefItem {
   allDay: boolean;
   pillar: LifePillar | null;
   flight?: { origin: string; destination: string };
-  enroute?: "to" | "from";
+  /** Drive to / from the airport, or the get-ready time before the drive out. */
+  enroute?: "to" | "from" | "ready";
   goalSession?: boolean;
   /** Name of the Google calendar it came from, if pulled. */
   source?: string;
@@ -128,6 +129,18 @@ async function loadRange(start: Date, end: Date): Promise<RangeData> {
       seenAllDay.add(e.id);
       items.push({ id: e.id, name: e.name, kind: "Fixed Event", start: s, end: en, allDay: true, pillar: e.pillar ?? null, blocks: e.blocks_schedule !== false, source: sourceOf.get(e.id) });
     }
+  }
+  for (const r of getReadyBlocks((eb.data as StoredEnrouteBlock[]) ?? [])) {
+    items.push({
+      id: `enroute-${r.id}`,
+      name: `🧳 ${r.name}`,
+      kind: "Enroute",
+      start: new Date(r.start_time),
+      end: new Date(r.end_time),
+      allDay: false,
+      pillar: "civ_career",
+      enroute: "ready",
+    });
   }
   for (const b of (eb.data as StoredEnrouteBlock[]) ?? []) {
     items.push({
