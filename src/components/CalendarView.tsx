@@ -636,7 +636,9 @@ export function CalendarView({
     const result = runEngine(
       displayStart,
       [...fixedEvents.filter((e) => !e.recurrence_enabled), ...fixedOccurrenceEvents, ...enrouteAsBusy(enrouteBlocks)],
-      habits.filter((h) => !h.recurrence_enabled),
+      // One-off habits (e.g. last week's 🎯 sessions) whose window closed before this view
+      // starts belong to an earlier week — they're not "missing" from this one.
+      habits.filter((h) => !h.recurrence_enabled && new Date(h.search_end) > displayStart),
       nonRecurringTasks
     );
     const mapByItemId = new Map<string, EventMapEntry>();
