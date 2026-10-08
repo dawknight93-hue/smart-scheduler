@@ -26,6 +26,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { QuickCreate, rangeText, type QuickCreateRange } from "./QuickCreate";
 import { recheckEnrouteBlocks, type StoredEnrouteBlock } from "@/lib/calendarHygiene";
 import {
   runEngine,
@@ -396,6 +397,16 @@ export function CalendarView({
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [addPrefillDate, setAddPrefillDate] = useState<Date | null>(null);
+  const [addPrefillEnd, setAddPrefillEnd] = useState<Date | null>(null);
+  const [addPrefillName, setAddPrefillName] = useState("");
+  // Press on empty grid and drag: a block follows the pointer; letting go opens the quick-create box.
+  const [createDrag, setCreateDrag] = useState<{ col: number; day: Date; anchor: number; cur: number; moved: boolean } | null>(null);
+  const createDragRef = useRef(createDrag);
+  createDragRef.current = createDrag;
+  const createColEl = useRef<HTMLElement | null>(null);
+  const createPointer = useRef({ x: 0, y: 0 });
+  const suppressGridClick = useRef(0);
+  const [quick, setQuick] = useState<QuickCreateRange | null>(null);
   const [selectedItem, setSelectedItem] = useState<PlacedItem | null>(null);
   const [showConnections, setShowConnections] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -1707,6 +1718,116 @@ export function CalendarView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resizeState]);
 
+  /** Minutes since midnight under the pointer in the column being swept, in 15-minute steps. */
+  function createMinuteAt(clientY: number): number {
+    const el = createColEl.current;
+    if (!el) return GRID_START_HOUR * 60;
+    const y = clientY - el.getBoundingClientRect().top;
+    const m = GRID_START_HOUR * 60 + Math.floor(y / PX_PER_MIN / SLOT_MIN) * SLOT_MIN;
+    return Math.max(GRID_START_HOUR * 60, Math.min(m, GRID_END_HOUR * 60 - SLOT_MIN));
+  }
+
+  /** The swept range: from the earlier slot to the end of the later one. */
+  function createRange(d: { day: Date; anchor: number; cur: number }) {
+    const lo = Math.min(d.anchor, d.cur);
+    const hi = Math.max(d.anchor, d.cur) + SLOT_MIN;
+    const start = new Date(d.day);
+    start.setHours(0, lo, 0, 0);
+    const end = new Date(d.day);
+    end.setHours(0, hi, 0, 0);
+    return { start, end };
+  }
+
+  /** What's already on the calendar in a time range (a warning only — never stops you). */
+  function overlapNames(start: Date, end: Date): string[] {
+    const names = placed
+      .filter((p) => !p.isAllDay && !p.isProposal && p.start < end && p.end > start)
+      .map((p) => p.name);
+    return [...new Set(names)];
+  }
+
+  function startCreateDrag(e: React.MouseEvent, col: number, day: Date) {
+    if (embed || e.button !== 0 || dragItem || resizeState) return;
+    e.preventDefault(); // no text selection while sweeping
+    createColEl.current = (e.currentTarget as HTMLElement).parentElement;
+    createPointer.current = { x: e.clientX, y: e.clientY };
+    const m = createMinuteAt(e.clientY);
+    setCreateDrag({ col, day, anchor: m, cur: m, moved: false });
+  }
+
+  useEffect(() => {
+    if (!createDrag) return;
+    const scroller = createColEl.current?.closest(".cal-scroll") as HTMLElement | null;
+    const update = () =>
+      setCreateDrag((d) => {
+        if (!d) return d;
+        const cur = createMinuteAt(createPointer.current.y);
+        return cur === d.cur ? d : { ...d, cur, moved: true };
+      });
+    const onMove = (e: MouseEvent) => {
+      createPointer.current = { x: e.clientX, y: e.clientY };
+      update();
+    };
+    // Near the top or bottom edge, keep scrolling so a long event can be swept in one go.
+    let raf = 0;
+    const tick = () => {
+      if (scroller) {
+        const r = scroller.getBoundingClientRect();
+        const y = createPointer.current.y;
+        const edge = 40;
+        const v = y < r.top + edge ? -Math.ceil((r.top + edge - y) / 4) : y > r.bottom - edge ? Math.ceil((y - (r.bottom - edge)) / 4) : 0;
+        if (v) {
+          scroller.scrollTop += v;
+          update();
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    const onUp = () => {
+      const d = createDragRef.current;
+      setCreateDrag(null);
+      // A plain click (no sweep) keeps opening the full form, as before.
+      if (!d || !d.moved) return;
+      suppressGridClick.current = Date.now() + 400;
+      const { start, end } = createRange(d);
+      setQuick({ start, end, overlaps: overlapNames(start, end), x: createPointer.current.x, y: createPointer.current.y });
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setCreateDrag(null);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("keydown", onKey);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createDrag !== null]);
+
+  function renderCreateGhost(col: number) {
+    if (!createDrag || createDrag.col !== col || !createDrag.moved) return null;
+    const { start, end } = createRange(createDrag);
+    const top = ((start.getHours() - GRID_START_HOUR) * 60 + start.getMinutes()) * PX_PER_MIN;
+    const height = Math.max(18, ((end.getTime() - start.getTime()) / 60000) * PX_PER_MIN - 2);
+    const over = overlapNames(start, end);
+    return (
+      <div
+        className={`absolute left-1 right-1 z-30 rounded-md border-2 px-2 py-1 pointer-events-none shadow-lg shadow-black/50 ${
+          over.length ? "border-amber-400 bg-amber-500/25" : "border-blue-400 bg-blue-500/25"
+        }`}
+        style={{ top, height }}
+      >
+        <span className="block text-xs font-semibold text-white">(No title)</span>
+        <span className="block text-[11px] text-slate-200 tabular-nums">{rangeText(start, end)}</span>
+        {over.length > 0 && <span className="block text-[10px] text-amber-200 truncate">Overlaps {over.slice(0, 2).join(", ")}</span>}
+      </div>
+    );
+  }
+
   async function handleDrop(targetDate: Date) {
     const item = dragItem;
     endDrag();
@@ -1968,6 +2089,7 @@ export function CalendarView({
             notScheduledCount={notScheduled.length}
             renderTray={() => renderTray(false)}
             onSelect={selectItem}
+            onCreateRange={(start, end) => setQuick({ start, end, overlaps: overlapNames(start, end) })}
             onAddAt={(d) => {
               setAddPrefillDate(d);
               setShowAdd(true);
@@ -2410,8 +2532,10 @@ export function CalendarView({
                   {HOURS.map((h) => (
                     <div
                       key={h}
-                      className="h-16 border-b border-slate-800/50 hover:bg-slate-800/20 transition-colors cursor-pointer"
+                      className="h-16 border-b border-slate-800/50 hover:bg-slate-800/20 transition-colors cursor-pointer select-none"
+                      onMouseDown={(e) => startCreateDrag(e, dayIdx, addDays(weekStart, dayIdx))}
                       onClick={(e) => {
+                        if (Date.now() < suppressGridClick.current) return;
                         const rect = e.currentTarget.getBoundingClientRect();
                         const y = e.clientY - rect.top;
                         const slot = Math.floor(y / 16) * 15;
@@ -2422,6 +2546,8 @@ export function CalendarView({
                       }}
                     />
                   ))}
+
+                  {renderCreateGhost(dayIdx)}
 
                   {/* Placed items */}
                   {itemsByDay[dayIdx].map((item, idx) => {
@@ -2549,8 +2675,10 @@ export function CalendarView({
                 {HOURS.map((h) => (
                   <div
                     key={h}
-                    className="h-16 border-b border-slate-800/50 hover:bg-slate-800/20 transition-colors cursor-pointer"
+                    className="h-16 border-b border-slate-800/50 hover:bg-slate-800/20 transition-colors cursor-pointer select-none"
+                    onMouseDown={(e) => startCreateDrag(e, -1, mobileDate)}
                     onClick={(e) => {
+                      if (Date.now() < suppressGridClick.current) return;
                       const rect = e.currentTarget.getBoundingClientRect();
                       const y = e.clientY - rect.top;
                       const slot = Math.floor(y / 16) * 15;
@@ -2561,6 +2689,7 @@ export function CalendarView({
                     }}
                   />
                 ))}
+                {renderCreateGhost(-1)}
                 {itemsByDay[mobileDayIndex].map((item, idx) => {
                   const effectiveEnd = resizeState && resizeState.item.id === item.id ? resizeState.previewEnd : item.end;
                   const topOffset =
@@ -2638,9 +2767,30 @@ export function CalendarView({
       {showAdd && (
         <AddItemModal
           weekStart={weekStart}
-          onClose={() => { setShowAdd(false); setAddPrefillDate(null); }}
-          onSaved={loadData}
+          onClose={() => { setShowAdd(false); setAddPrefillDate(null); setAddPrefillEnd(null); setAddPrefillName(""); }}
+          onSaved={() => { void loadData(); scheduleAutoPush(); }}
           prefillDate={addPrefillDate}
+          prefillEnd={addPrefillEnd}
+          prefillName={addPrefillName}
+        />
+      )}
+
+      {/* Quick create after sweeping a time range */}
+      {quick && (
+        <QuickCreate
+          range={quick}
+          onClose={() => setQuick(null)}
+          onSaved={() => {
+            void loadData();
+            scheduleAutoPush();
+          }}
+          onMore={(name) => {
+            setAddPrefillDate(quick.start);
+            setAddPrefillEnd(quick.end);
+            setAddPrefillName(name);
+            setQuick(null);
+            setShowAdd(true);
+          }}
         />
       )}
 

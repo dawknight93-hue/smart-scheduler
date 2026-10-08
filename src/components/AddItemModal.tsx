@@ -82,6 +82,8 @@ export function AddItemModal({
   onSaved,
   editTarget,
   prefillDate,
+  prefillEnd,
+  prefillName,
   onDelete,
 }: {
   weekStart: Date;
@@ -89,6 +91,10 @@ export function AddItemModal({
   onSaved: () => void;
   editTarget?: EditTarget | null;
   prefillDate?: Date | null;
+  /** End of a range swept on the grid (otherwise an hour after the start). */
+  prefillEnd?: Date | null;
+  /** Title typed into the quick-create box before "More options". */
+  prefillName?: string;
   /** When provided (edit mode), shows a Delete button that asks for a second tap before running. */
   onDelete?: () => Promise<void>;
 }) {
@@ -120,12 +126,12 @@ export function AddItemModal({
   // New items start from right now (next quarter hour) unless a calendar slot was clicked.
   const [defaultSearchStart] = useState(() => nextQuarterHour());
   const defaultEventStart = prefillDate ?? defaultSearchStart;
-  const defaultEventEnd = new Date(defaultEventStart.getTime() + 60 * 60 * 1000);
+  const defaultEventEnd = prefillEnd && prefillEnd > defaultEventStart ? prefillEnd : new Date(defaultEventStart.getTime() + 60 * 60 * 1000);
 
   // Event state
   const [evName, setEvName] = useState(() => {
     if (editTarget?.kind === "Fixed Event") return (editTarget.data as FixedEvent).name;
-    return "";
+    return prefillName ?? "";
   });
   const [evStart, setEvStart] = useState(() => {
     if (editTarget?.kind === "Fixed Event") {

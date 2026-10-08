@@ -210,6 +210,8 @@ interface Props {
   renderTray: () => ReactNode;
   onSelect: (item: PlacedItem) => void;
   onAddAt: (date: Date | null) => void;
+  /** Hold on empty grid, then drag: the swept range goes to the quick-create box. */
+  onCreateRange: (start: Date, end: Date) => void;
   syncing: boolean;
   syncLabel: string;
   syncMessage: string | null;
@@ -357,6 +359,7 @@ export function MobileCalendar(props: Props) {
           onSelect={props.onSelect}
           onPickDay={(d) => goTo(d)}
           onAddAt={props.onAddAt}
+          onCreateRange={props.onCreateRange}
           checkMove={props.checkMove}
           checkResize={props.checkResize}
           onMoveItem={props.onMoveItem}
@@ -643,6 +646,7 @@ function TimeGrid({
   onSelect,
   onPickDay,
   onAddAt,
+  onCreateRange,
   checkMove,
   checkResize,
   onMoveItem,
@@ -655,6 +659,7 @@ function TimeGrid({
   onSelect: (p: PlacedItem) => void;
   onPickDay: (d: Date) => void;
   onAddAt: (d: Date | null) => void;
+  onCreateRange: (start: Date, end: Date) => void;
   checkMove: (item: PlacedItem, start: Date) => MoveCheck;
   checkResize: (item: PlacedItem, end: Date) => string | undefined;
   onMoveItem: (item: PlacedItem, start: Date) => void;
@@ -753,6 +758,94 @@ function TimeGrid({
   useEffect(() => {
     if (!drag) stopAutoScroll();
   }, [drag]);
+
+  /* ---- Hold on empty grid, then drag to sweep out a new event ---- */
+  type CreateData = { col: number; anchor: number; moved: boolean };
+  const [sweep, setSweep] = useState<{ col: number; anchor: number; cur: number; moved: boolean } | null>(null);
+  const sweepRef = useRef(sweep);
+  sweepRef.current = sweep;
+  const sweepScroll = useRef<number | null>(null);
+  const minuteAtY = (y: number) => {
+    const rect = colsRef.current!.getBoundingClientRect();
+    const m = GRID_START_HOUR * 60 + Math.floor((y - rect.top) / pxPerMin / 15) * 15;
+    return Math.max(GRID_START_HOUR * 60, Math.min(m, GRID_END_HOUR * 60 - 15));
+  };
+  function sweepRange(d: { col: number; anchor: number; cur: number; moved: boolean }) {
+    // Held and let go without dragging: an hour, like a tap in Google Calendar.
+    const lo = d.moved ? Math.min(d.anchor, d.cur) : d.anchor;
+    const hi = d.moved ? Math.max(d.anchor, d.cur) + 15 : Math.min(d.anchor + 60, GRID_END_HOUR * 60);
+    const start = new Date(days[d.col]);
+    start.setHours(0, lo, 0, 0);
+    const end = new Date(days[d.col]);
+    end.setHours(0, hi, 0, 0);
+    return { start, end };
+  }
+  function stopSweepScroll() {
+    if (sweepScroll.current) cancelAnimationFrame(sweepScroll.current);
+    sweepScroll.current = null;
+  }
+  const createPress = usePressDrag<CreateData>({
+    onActivate: (s) => {
+      const m = minuteAtY(s.y0);
+      s.data.anchor = m;
+      setSweep({ col: s.data.col, anchor: m, cur: m, moved: false });
+      const tick = () => {
+        const el = scrollRef.current;
+        if (el) {
+          const r = el.getBoundingClientRect();
+          const edge = 56;
+          const v = s.y < r.top + edge ? -Math.ceil((r.top + edge - s.y) / 6) : s.y > r.bottom - edge ? Math.ceil((s.y - (r.bottom - edge)) / 6) : 0;
+          if (v) {
+            el.scrollTop += v;
+            const cur = minuteAtY(s.y);
+            setSweep((d) => (d && cur !== d.cur ? { ...d, cur, moved: true } : d));
+          }
+        }
+        sweepScroll.current = requestAnimationFrame(tick);
+      };
+      sweepScroll.current = requestAnimationFrame(tick);
+    },
+    onMove: (s) => {
+      const cur = minuteAtY(s.y);
+      setSweep((d) => (d && cur !== d.cur ? { ...d, cur, moved: true } : d));
+    },
+    onEnd: (s) => {
+      stopSweepScroll();
+      const d = sweepRef.current;
+      setSweep(null);
+      if (!d) return;
+      const cur = minuteAtY(s.y);
+      const { start, end } = sweepRange(cur !== d.cur ? { ...d, cur, moved: true } : d);
+      onCreateRange(start, end);
+    },
+  });
+  useEffect(() => () => stopSweepScroll(), []);
+  useEffect(() => {
+    if (!sweep) stopSweepScroll();
+  }, [sweep]);
+
+  function renderSweep(colIdx: number) {
+    if (!sweep || sweep.col !== colIdx) return null;
+    const { start, end } = sweepRange(sweep);
+    const top = ((start.getHours() - GRID_START_HOUR) * 60 + start.getMinutes()) * pxPerMin;
+    const height = Math.max(20, ((end.getTime() - start.getTime()) / 60000) * pxPerMin - 2);
+    const over = cols[colIdx].timed.filter((p) => p.start < end && p.end > start).map((p) => p.name);
+    const mins = Math.round((end.getTime() - start.getTime()) / 60000);
+    return (
+      <div
+        className={`absolute left-0.5 right-0.5 z-30 rounded-md border-2 px-1.5 py-1 pointer-events-none shadow-xl shadow-black/60 ${
+          over.length ? "border-amber-400 bg-amber-950/85" : "border-blue-400 bg-blue-950/85"
+        }`}
+        style={{ top, height }}
+      >
+        <span className={`block ${compact ? "text-[10.5px]" : "text-xs"} font-semibold text-white truncate`}>(No title)</span>
+        <span className={`block ${compact ? "text-[10px]" : "text-[11px]"} text-slate-200 tabular-nums`}>
+          {hhmm(start)}–{hhmm(end)} · {mins >= 60 ? `${Math.floor(mins / 60)}h${mins % 60 ? ` ${mins % 60}m` : ""}` : `${mins}m`}
+        </span>
+        {over.length > 0 && <span className="block text-[10px] leading-tight text-amber-200 truncate">Overlaps {over.slice(0, 2).join(", ")}</span>}
+      </div>
+    );
+  }
 
   function renderGhost(colIdx: number) {
     if (!drag || drag.col !== colIdx) return null;
@@ -860,8 +953,15 @@ function TimeGrid({
                 <div
                   key={c.d.getTime()}
                   className={`relative flex-1 min-w-0 ${days.length > 1 ? "border-l border-slate-800/70" : ""}`}
+                  style={noCallout}
+                  onTouchStart={(e) => {
+                    if (e.target === e.currentTarget && !drag) createPress.start(e, { col: colIdx, anchor: 0, moved: false }, 300);
+                  }}
+                  onMouseDown={(e) => {
+                    if (e.target === e.currentTarget && !drag) createPress.start(e, { col: colIdx, anchor: 0, moved: false }, 300);
+                  }}
                   onClick={(e) => {
-                    if (e.target !== e.currentTarget || press.suppressed()) return;
+                    if (e.target !== e.currentTarget || press.suppressed() || createPress.suppressed()) return;
                     const y = e.nativeEvent.offsetY;
                     const mins = Math.floor(y / hourPx * 4) * 15 + GRID_START_HOUR * 60;
                     const at = new Date(c.d);
@@ -913,6 +1013,7 @@ function TimeGrid({
                     );
                   })}
                   {renderGhost(colIdx)}
+                  {renderSweep(colIdx)}
                   {sameDay(c.d, today) && (
                     <div
                       className="absolute left-0 right-0 z-10 pointer-events-none flex items-center"
