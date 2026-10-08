@@ -407,6 +407,8 @@ export function CalendarView({
   const createPointer = useRef({ x: 0, y: 0 });
   const suppressGridClick = useRef(0);
   const [quick, setQuick] = useState<QuickCreateRange | null>(null);
+  // The grid column the quick box belongs to, so the swept block stays on screen while you type.
+  const [quickCol, setQuickCol] = useState<number | null>(null);
   const [selectedItem, setSelectedItem] = useState<PlacedItem | null>(null);
   const [showConnections, setShowConnections] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -1791,6 +1793,7 @@ export function CalendarView({
       if (!d || !d.moved) return;
       suppressGridClick.current = Date.now() + 400;
       const { start, end } = createRange(d);
+      setQuickCol(d.col);
       setQuick({ start, end, overlaps: overlapNames(start, end), x: createPointer.current.x, y: createPointer.current.y });
     };
     const onKey = (e: KeyboardEvent) => {
@@ -1809,8 +1812,10 @@ export function CalendarView({
   }, [createDrag !== null]);
 
   function renderCreateGhost(col: number) {
-    if (!createDrag || createDrag.col !== col || !createDrag.moved) return null;
-    const { start, end } = createRange(createDrag);
+    const sweeping = createDrag && createDrag.col === col && createDrag.moved;
+    const pending = !createDrag && quick && quickCol === col;
+    if (!sweeping && !pending) return null;
+    const { start, end } = sweeping ? createRange(createDrag) : quick!;
     const top = ((start.getHours() - GRID_START_HOUR) * 60 + start.getMinutes()) * PX_PER_MIN;
     const height = Math.max(18, ((end.getTime() - start.getTime()) / 60000) * PX_PER_MIN - 2);
     const over = overlapNames(start, end);
@@ -2089,7 +2094,10 @@ export function CalendarView({
             notScheduledCount={notScheduled.length}
             renderTray={() => renderTray(false)}
             onSelect={selectItem}
-            onCreateRange={(start, end) => setQuick({ start, end, overlaps: overlapNames(start, end) })}
+            onCreateRange={(start, end) => {
+              setQuickCol(null);
+              setQuick({ start, end, overlaps: overlapNames(start, end) });
+            }}
             onAddAt={(d) => {
               setAddPrefillDate(d);
               setShowAdd(true);
