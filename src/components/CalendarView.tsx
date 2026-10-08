@@ -31,6 +31,7 @@ import { recheckEnrouteBlocks, type StoredEnrouteBlock } from "@/lib/calendarHyg
 import {
   runEngine,
   enrouteAsBusy,
+  getReadyBlocks,
   getWeekStart,
   addDays,
   GRID_START_HOUR,
@@ -718,6 +719,22 @@ export function CalendarView({
       isBatch: false,
       isAllDay: false,
     }));
+    // The hour before each drive to the airport: get ready (busy here, in Google, and so on Cal.com).
+    for (const r of getReadyBlocks(enrouteBlocks)) {
+      enrouteItems.push({
+        id: r.id,
+        name: `🧳 ${r.name}`,
+        kind: "Enroute" as ItemKind,
+        tier: 0,
+        context: "other" as ContextTag,
+        start: new Date(r.start_time),
+        end: new Date(r.end_time),
+        pillar: "civ_career" as LifePillar,
+        room: 0,
+        isBatch: false,
+        isAllDay: false,
+      });
+    }
 
     // Expand recurring tasks into individual occurrences
     const occByTaskDate = new Map<string, TaskOccurrence>();
@@ -1390,7 +1407,7 @@ export function CalendarView({
       };
     }
     if (placed.some((p) => p.kind === "Enroute" && rangesOverlap(newStart, newEnd, p.start, p.end))) {
-      return { blocked: "Can't drop on an Enroute block", overlaps: [], notes: [] };
+      return { blocked: "Can't drop on trip drive or get-ready time", overlaps: [], notes: [] };
     }
     const notes: string[] = [];
     if (isRunnaEvent(item)) {
