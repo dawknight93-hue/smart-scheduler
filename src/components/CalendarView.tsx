@@ -40,6 +40,8 @@ import {
   utaRanges,
   isUtaBlocked,
   utaBlockLabel,
+  FLIGHT_TITLE,
+  REPORT_BUFFER_MIN,
 } from "@/lib/schedulingEngine";
 import type {
   FixedEvent,
@@ -172,6 +174,10 @@ function findNextFreeSlot(
   fixedEvents: FixedEvent[],
 ): Date | null {
   const durationMs = durationMin * 60 * 1000;
+  // Report time: the 45 minutes before each flight leg departs is taken too.
+  const reportTimes = allItems
+    .filter((p) => p.kind === "Fixed Event" && !p.isAllDay && FLIGHT_TITLE.test(p.name))
+    .map((p) => ({ start: new Date(p.start.getTime() - REPORT_BUFFER_MIN * 60000), end: p.start }));
   const origDay = new Date(newStart.getFullYear(), newStart.getMonth(), newStart.getDate());
   for (let dayOffset = 0; dayOffset < 14; dayOffset++) {
     const day = new Date(origDay.getTime() + dayOffset * 24 * 60 * 60 * 1000);
@@ -184,9 +190,12 @@ function findNextFreeSlot(
         if (isQuietTime(slotStart, slotEnd)) continue;
         if (isUtaBlocked(itemToMove.pillar, itemToMove.context) && overlapsUta(slotStart, slotEnd, fixedEvents)) continue;
         let conflict = false;
+        if (reportTimes.some((r) => rangesOverlap(slotStart, slotEnd, r.start, r.end))) continue;
         for (const other of allItems) {
           if (other.id === itemToMove.id) continue;
-          if (other.kind === "Enroute") continue;
+          // All-day events never hold time (same as the scheduler); drive, get-ready
+          // and hotel-commute blocks always do.
+          if (other.isAllDay) continue;
           if (isNonBlocking(other)) continue;
           if (rangesOverlap(slotStart, slotEnd, other.start, other.end)) {
             conflict = true;
@@ -2025,10 +2034,19 @@ export function CalendarView({
     if (!(await updateItemTime(item, newStart))) return;
     if (allow) await markOverride(item, allow);
 
+    // The calendar as it will be: the moved item in its new spot, and each bumped
+    // item where it lands — so nothing gets bumped back under something else.
+    let after = placed.map((p) =>
+      p === item || (p.id === item.id && p.start.getTime() === item.start.getTime())
+        ? { ...p, start: newStart, end: new Date(newStart.getTime() + durationMin * 60000) }
+        : p
+    );
     for (const other of overlapping) {
-      const nextSlot = findNextFreeSlot(other, newStart, Math.round((other.end.getTime() - other.start.getTime()) / 60000), placed, fixedEvents);
+      const otherMin = Math.round((other.end.getTime() - other.start.getTime()) / 60000);
+      const nextSlot = findNextFreeSlot(other, newStart, otherMin, after, fixedEvents);
       if (nextSlot) {
         await updateItemTime(other, nextSlot);
+        after = after.map((p) => (p === other ? { ...p, start: nextSlot, end: new Date(nextSlot.getTime() + otherMin * 60000) } : p));
       }
     }
 
