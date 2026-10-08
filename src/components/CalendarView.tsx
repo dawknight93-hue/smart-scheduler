@@ -237,6 +237,10 @@ function unscheduledReasonText(u: UnscheduledItem): string {
       return `The only open time in its window is on a UTA day, and Family, Desk, Home and Errand items can't go on UTA days.`;
     case "no_free_time":
       return `No free ${formatDuration(u.durationMin)} block in its window (${window}) — that time is already booked.`;
+    case "interrupted": {
+      const day = u.interruptedAt ? ` (${u.interruptedAt.toLocaleDateString("en-US", { weekday: "short" })})` : "";
+      return `Pushed out by ${u.interruptedBy ?? "a trip"}${day}. It waits here so you can choose where it goes.`;
+    }
   }
 }
 
