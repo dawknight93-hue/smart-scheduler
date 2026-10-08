@@ -407,6 +407,8 @@ export function CalendarView({
   const createPointer = useRef({ x: 0, y: 0 });
   const suppressGridClick = useRef(0);
   const [quick, setQuick] = useState<QuickCreateRange | null>(null);
+  // Phone: a tray item waiting for you to tap the time it should go.
+  const [placing, setPlacing] = useState<PlacedItem | null>(null);
   // The grid column the quick box belongs to, so the swept block stays on screen while you type.
   const [quickCol, setQuickCol] = useState<number | null>(null);
   const [selectedItem, setSelectedItem] = useState<PlacedItem | null>(null);
@@ -1624,6 +1626,11 @@ export function CalendarView({
         search_start: newStart.toISOString(),
         search_end: searchEnd.toISOString(),
       }).eq("id", item.id);
+      // A 🎯 goal session's daily item follows it, so the Review and Goals tabs see the new day.
+      await supabase
+        .from("goal_daily_items")
+        .update({ day: formatLocalDate(newStart), week_start: formatLocalDate(getWeekStart(newStart)), start_at: newStart.toISOString(), minutes: Math.round(durationMs / 60000) })
+        .eq("habit_id", item.id);
     } else {
       const deadline = new Date(newStart.getTime() + durationMs);
       await supabase.from(table).update({
@@ -2004,7 +2011,31 @@ export function CalendarView({
     unscheduled: notScheduled.length,
   };
 
+  /**
+   * An item from the "not on your calendar" list, shaped like a calendar item so the
+   * same move rules and save path apply when you drag it (or, on a phone, tap a time).
+   * Only one-off habits and tasks: their window becomes exactly the slot you choose,
+   * so the scheduler places it there and goal links / ticks keep working by id.
+   */
+  function trayItemAsPlaced(u: UnscheduledItem): PlacedItem | null {
+    if (u.isBatch) return null;
+    if (u.kind === "Habit") {
+      const h = habits.find((x) => x.id === u.id);
+      if (!h || h.recurrence_enabled) return null;
+      const start = new Date(h.search_start);
+      return { id: h.id, name: h.name, kind: "Habit", tier: h.tier, context: h.context, pillar: h.pillar ?? null, start, end: new Date(start.getTime() + h.duration_min * 60000), room: 0, isBatch: false, utaOverride: !!h.uta_override, quietOverride: !!h.quiet_override };
+    }
+    if (u.kind === "Task") {
+      const t = tasks.find((x) => x.id === u.id);
+      if (!t || t.recurrence_enabled) return null;
+      const start = new Date(t.search_start);
+      return { id: t.id, name: t.name, kind: "Task", tier: t.tier, context: t.context, pillar: t.pillar ?? null, start, end: new Date(start.getTime() + t.duration_min * 60000), room: 0, isBatch: false, utaOverride: !!t.uta_override, quietOverride: !!t.quiet_override };
+    }
+    return null;
+  }
+
   function renderTray(compact: boolean) {
+    const canDragOut = layout === "desktop" && !embed;
     return (
       <>
         <div className="flex items-center gap-2">
@@ -2015,19 +2046,40 @@ export function CalendarView({
         </div>
         <p className={`mt-1 mb-2 ${compact ? "text-[11px] leading-snug" : "text-xs"} text-slate-400`}>
           {compact
-            ? "Not shown here or in Google Calendar this week. Tap one to fix its window or duration, or delete it."
-            : "These don't appear here or in Google Calendar. Tap one to change its time window or duration, or to delete it."}
+            ? "Not on the calendar this week. Drag one onto the calendar to book it, or click it to change its window or duration."
+            : layout === "desktop"
+            ? "These don't appear here or in Google Calendar. Drag one onto the calendar to book it, or click it to change its window or duration."
+            : "These don't appear here or in Google Calendar. Tap Place, then tap a time on the calendar — or tap the item to change its window or duration."}
         </p>
         <div className="flex flex-col gap-2">
           {notScheduled.map((u) => {
             const overdue = u.reason === "window_ended" && u.kind === "Task";
+            const asPlaced = trayItemAsPlaced(u);
+            const draggable = canDragOut && !!asPlaced;
             return (
+              <div key={u.id} className="relative">
               <button
-                key={u.id}
                 type="button"
                 onClick={() => editUnscheduled(u)}
                 disabled={u.isBatch}
-                className={`text-left ${compact ? "px-2.5 py-2" : "px-3 py-2"} rounded-lg border text-xs ${
+                draggable={draggable}
+                onDragStart={
+                  draggable
+                    ? (e) => {
+                        dragGrabOffset.current = 6;
+                        setDragItem(asPlaced);
+                        e.dataTransfer.effectAllowed = "move";
+                        try {
+                          e.dataTransfer.setData("text/plain", asPlaced!.name);
+                        } catch {
+                          /* some browsers refuse; the drag still works */
+                        }
+                      }
+                    : undefined
+                }
+                onDragEnd={draggable ? endDrag : undefined}
+                title={draggable ? "Drag onto the calendar to book it" : undefined}
+                className={`w-full text-left ${compact ? "px-2.5 py-2" : "px-3 py-2"} ${draggable ? "cursor-grab active:cursor-grabbing" : ""} ${layout === "mobile" && asPlaced ? "pr-16" : ""} rounded-lg border text-xs ${
                   overdue
                     ? "bg-red-500/10 border-red-500/30 text-red-300 hover:bg-red-500/15"
                     : "bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/15"
@@ -2049,6 +2101,16 @@ export function CalendarView({
                 )}
                 <div className={`mt-0.5 text-slate-300/80 ${compact ? "text-[11px] leading-snug" : ""}`}>{unscheduledReasonText(u)}</div>
               </button>
+              {layout === "mobile" && asPlaced && (
+                <button
+                  type="button"
+                  onClick={() => setPlacing(asPlaced)}
+                  className="absolute right-2 top-2 rounded-md bg-blue-600 px-2.5 py-1 text-[11px] font-semibold text-white"
+                >
+                  Place
+                </button>
+              )}
+              </div>
             );
           })}
         </div>
@@ -2094,6 +2156,13 @@ export function CalendarView({
             notScheduledCount={notScheduled.length}
             renderTray={() => renderTray(false)}
             onSelect={selectItem}
+            placingName={placing?.name ?? null}
+            onPlaceAt={(at) => {
+              const it = placing;
+              setPlacing(null);
+              if (it) void moveItemTo(it, at, true);
+            }}
+            onCancelPlacing={() => setPlacing(null)}
             onCreateRange={(start, end) => {
               setQuickCol(null);
               setQuick({ start, end, overlaps: overlapNames(start, end) });

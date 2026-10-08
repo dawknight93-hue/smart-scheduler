@@ -212,6 +212,10 @@ interface Props {
   onAddAt: (date: Date | null) => void;
   /** Hold on empty grid, then drag: the swept range goes to the quick-create box. */
   onCreateRange: (start: Date, end: Date) => void;
+  /** A tray item waiting for a tap on the time it should go (null when not placing). */
+  placingName: string | null;
+  onPlaceAt: (at: Date) => void;
+  onCancelPlacing: () => void;
   syncing: boolean;
   syncLabel: string;
   syncMessage: string | null;
@@ -232,6 +236,21 @@ export function MobileCalendar(props: Props) {
   const { placed, weekStart, view, setView, now } = props;
   const [drawer, setDrawer] = useState(false);
   const [tray, setTray] = useState(false);
+  // Placing a tray item: close the list and show a time grid to tap on; put the view back after.
+  const viewBeforePlacing = useRef<MobileView | null>(null);
+  useEffect(() => {
+    if (props.placingName) {
+      setTray(false);
+      if (view === "schedule" || view === "month") {
+        viewBeforePlacing.current = view;
+        setView("day");
+      }
+    } else if (viewBeforePlacing.current) {
+      setView(viewBeforePlacing.current);
+      viewBeforePlacing.current = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.placingName]);
   const [showMini, setShowMini] = useState(false);
   const [hidden, setHidden] = useState<Set<string>>(() => {
     try {
@@ -335,6 +354,16 @@ export function MobileCalendar(props: Props) {
         </button>
       </header>
       {props.syncMessage && <p className="shrink-0 px-4 pb-1 text-[11px] text-blue-300 line-clamp-2">{props.syncMessage}</p>}
+      {props.placingName && (
+        <div className="shrink-0 mx-3 mb-1.5 flex items-center gap-2 rounded-lg border border-blue-500/40 bg-blue-950/70 px-3 py-2">
+          <p className="flex-1 min-w-0 text-xs text-blue-100">
+            Tap a time for <span className="font-semibold">{props.placingName}</span>
+          </p>
+          <button onClick={props.onCancelPlacing} className="text-xs font-semibold text-blue-300">
+            Cancel
+          </button>
+        </div>
+      )}
 
       {props.loading && !placed.length ? (
         <div className="flex-1 flex items-center justify-center text-slate-500 text-sm animate-pulse">Loading schedule…</div>
@@ -358,7 +387,7 @@ export function MobileCalendar(props: Props) {
           now={now}
           onSelect={props.onSelect}
           onPickDay={(d) => goTo(d)}
-          onAddAt={props.onAddAt}
+          onAddAt={props.placingName ? props.onPlaceAt : props.onAddAt}
           onCreateRange={props.onCreateRange}
           checkMove={props.checkMove}
           checkResize={props.checkResize}
