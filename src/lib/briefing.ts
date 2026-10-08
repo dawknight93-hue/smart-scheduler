@@ -97,11 +97,15 @@ async function loadRange(start: Date, end: Date): Promise<RangeData> {
   const items: BriefItem[] = [];
   const unscheduled: UnscheduledItem[] = [];
   const seenAllDay = new Set<string>();
+  const placedIds = new Set<string>();
   for (const week of weeks) {
     const goalHabitIds = new Set(week.habits.filter((h) => h.goal_id).map((h) => h.id));
     const sourceOf = new Map(week.map.filter((m) => m.item_id).map((m) => [m.item_id as string, calName.get(m.calendar_id)]));
     const r = runEngine(week.weekStart, week.busy, week.habits, week.tasks);
-    unscheduled.push(...r.unscheduled);
+    // Each week only speaks for items whose time falls in it: a later week sees
+    // this week's items as "window ended", which doesn't mean they're missing.
+    unscheduled.push(...r.unscheduled.filter((u) => u.deadline > week.weekStart && u.windowStart < week.weekEnd));
+    for (const p of r.placed) placedIds.add(p.id);
     for (const p of r.placed) {
       if (p.isAllDay) continue; // handled below with their real calendar dates
       if (p.end <= start || p.start >= end) continue;
@@ -167,7 +171,8 @@ async function loadRange(start: Date, end: Date): Promise<RangeData> {
     });
   }
   items.sort((a, b) => a.start.getTime() - b.start.getTime());
-  return { items, unscheduled, weeks, tasks: (tk.data as Task[]) ?? [] };
+  // Placed in some week of the range: it's on the calendar, whatever another week said.
+  return { items, unscheduled: unscheduled.filter((u) => !placedIds.has(u.id)), weeks, tasks: (tk.data as Task[]) ?? [] };
 }
 
 async function loadGoals(): Promise<PlanGoal[]> {
