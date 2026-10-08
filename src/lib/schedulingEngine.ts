@@ -158,6 +158,34 @@ export function getReadyBlocks(blocks: DriveBlock[]): { id: string; name: string
     });
 }
 
+/** On a multi-day trip, the ride from the airport to the hotel after the day's last leg. */
+export const HOTEL_COMMUTE_MIN = 60;
+export const HOTEL_COMMUTE_NAME = "Commute to hotel";
+
+/**
+ * One block after each leg that ends the day away from MIA: the next leg leaves
+ * from the same airport, and not for a while (a layover, not a connection).
+ * Capped so it never runs into that next leg.
+ */
+export function hotelCommuteBlocks(fixed: { id: string; name: string; start_time: string; end_time: string; is_all_day?: boolean | null }[]): { id: string; name: string; start_time: string; end_time: string; legId: string; airport: string }[] {
+  const seen = new Set<string>();
+  const legs = fixed
+    .filter((ev) => !ev.is_all_day && !seen.has(ev.id) && (seen.add(ev.id), true))
+    .map((ev) => ({ ev, m: FLIGHT_TITLE.exec(ev.name) }))
+    .filter((x): x is { ev: (typeof fixed)[number]; m: RegExpExecArray } => !!x.m)
+    .map(({ ev, m }) => ({ id: ev.id, origin: m[1], dest: m[2], dep: new Date(ev.start_time).getTime(), arr: new Date(ev.end_time).getTime() }))
+    .sort((a, b) => a.dep - b.dep);
+  const out: { id: string; name: string; start_time: string; end_time: string; legId: string; airport: string }[] = [];
+  for (let i = 0; i < legs.length - 1; i++) {
+    const a = legs[i];
+    const b = legs[i + 1];
+    if (a.dest === HOME_BASE || b.origin !== a.dest || b.dep - a.arr < CONNECTION_MAX_HOURS * HOUR_MS) continue;
+    const end = Math.min(a.arr + HOTEL_COMMUTE_MIN * 60000, b.dep);
+    out.push({ id: `${a.id}-hotel`, name: HOTEL_COMMUTE_NAME, start_time: new Date(a.arr).toISOString(), end_time: new Date(end).toISOString(), legId: a.id, airport: a.dest });
+  }
+  return out;
+}
+
 /** Enroute drive blocks (and the get-ready time before each drive out) as busy time for the engine (they're drawn separately). */
 export function enrouteAsBusy(blocks: DriveBlock[]): FixedEvent[] {
   return [...blocks, ...getReadyBlocks(blocks)].map((b) => ({ id: `enroute-${b.id}`, name: b.name, start_time: b.start_time, end_time: b.end_time, blocks_schedule: true, engine_only: true }));
@@ -555,6 +583,13 @@ export function runEngine(
       markBusy(awayBusy, a.arr, b.dep);
       markBy(awayBy, a.arr, b.dep, `layover in ${a.dest}`);
     }
+  }
+  // The ride to the hotel after the day's last leg is off-limits for everything.
+  for (const h of hotelCommuteBlocks(fixedEvents)) {
+    const from = new Date(h.start_time).getTime();
+    const to = new Date(h.end_time).getTime();
+    markBusy(busy, from, to);
+    markBy(tripBy, from, to, h.name);
   }
   // Drives to and from the airport count as part of the trip.
   const enroute = fixedEvents.filter((ev) => ev.engine_only && ev.id.startsWith("enroute-"));
