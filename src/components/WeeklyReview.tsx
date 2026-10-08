@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, Loader2, X, Flag, Hourglass, RefreshCw } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, Clock, Loader2, X, Flag, Hourglass, RefreshCw } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { addDays, getWeekStart } from "@/lib/schedulingEngine";
 import { scheduleAutoPush } from "@/lib/gcalSync";
@@ -32,6 +32,8 @@ import { DAY_SHORT, daysText, effortGoals, fmt, loadEntries, loadMeasures, measu
 import { OutcomeTracker } from "@/components/MeasureWidgets";
 import { completeGoal } from "@/lib/goalCompletion";
 import { blockRanges, loadLifeBlocks, DEFAULT_BLOCKS } from "@/lib/lifeBlocks";
+import { loadDayRoutines } from "@/lib/dayRoutines";
+import { DayRoutinesEditor } from "@/components/DayRoutinesEditor";
 import { CalendarView, type Allow, type CalendarEmbed, type EmbedProposal } from "@/components/CalendarView";
 import type { PlacedItem } from "@/lib/types";
 
@@ -61,6 +63,7 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
   const [mobileTab, setMobileTab] = useState<"review" | "calendar">("review");
   // Proposed sessions you dragged or resized in the calendar (saved when you approve).
   const [calToken, setCalToken] = useState(0);
+  const [showRoutines, setShowRoutines] = useState(false);
   const [moved, setMoved] = useState<Record<string, { start: Date; end: Date; allow: Allow }>>({});
 
   useEffect(() => {
@@ -84,13 +87,13 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
         if (!sErr) for (const g of stuck) g.status = "active";
       }
       setGoals(all);
-      const [week, ms, blocks] = await Promise.all([loadWeekData(weekStart), loadMeasures(), loadLifeBlocks()]);
+      const [week, ms, blocks, routines] = await Promise.all([loadWeekData(weekStart), loadMeasures(), loadLifeBlocks(), loadDayRoutines()]);
       blockNames = Object.fromEntries(blocks.map((b) => [b.key, b.label]));
       setWeekData(week);
       setMeasures(ms);
       setEntries(await loadEntries(ms.filter((m) => m.kind === "outcome" && m.status === "active").map((m) => m.id)));
       // One card per effort measure (goals without measures keep their single weekly target).
-      setPlans(planWeek(effortGoals(all, ms), week, new Date(), blockRanges(blocks, week.busy, week.weekStart, week.weekEnd)));
+      setPlans(planWeek(effortGoals(all, ms), week, new Date(), blockRanges(blocks, week.busy, week.weekStart, week.weekEnd), routines));
       setReviews(await loadReviews(weekStart));
       setItems(await loadDailyItems(weekStart, addDays(weekStart, 7)));
     } catch (e) {
@@ -327,7 +330,22 @@ export function WeeklyReview({ onOpenGoals }: { onOpenGoals: () => void }) {
         <button onClick={() => setWeekStart(addDays(weekStart, 7))} className="p-1.5 rounded-lg hover:bg-slate-800" aria-label="Next week">
           <ChevronRight className="w-4 h-4" />
         </button>
+        <button
+          onClick={() => setShowRoutines(true)}
+          className="ml-auto flex items-center gap-1 rounded-lg bg-slate-800 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-700"
+          title="When goal sessions may be suggested on UTA, flying, reserve, off and normal days"
+        >
+          <Clock className="w-3.5 h-3.5" /> Day routines
+        </button>
       </div>
+      {showRoutines && (
+        <DayRoutinesEditor
+          onClose={(changed) => {
+            setShowRoutines(false);
+            if (changed) void load({ quiet: true });
+          }}
+        />
+      )}
 
       {error && <div className="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-300">{error}</div>}
 
@@ -605,10 +623,11 @@ function GoalCard({
                     <span className="w-28">{dayLabel(s.start)}</span>
                     <span>{hhmm(s.start)}–{hhmm(s.end)}</span>
                     {s.movedFrom && !gone && (
-                      <span className="text-[11px] text-amber-300" title="Your chosen day had no open slot; this is the nearest open day. Move it after approving if you like.">
-                        {DAY_SHORT[s.movedFrom.getDay()]} full → nearest open day
+                      <span className="text-[11px] text-amber-300" title="Your chosen day had no room in its routine; this is the nearest day that does. Move it after approving if you like.">
+                        {DAY_SHORT[s.movedFrom.getDay()]} {s.movedWhy && s.movedWhy !== "full" ? `is ${s.movedWhy}` : "full"} → nearest open day
                       </span>
                     )}
+                    {s.routine && !gone && !s.movedFrom && <span className="text-[11px] text-slate-500">{s.routine}</span>}
                     {!gone && (
                       <button onClick={() => onRemove(s)} className="ml-auto p-1 rounded text-slate-500 hover:text-rose-300 hover:bg-rose-500/10" aria-label="Remove this session">
                         <X className="w-3.5 h-3.5" />
