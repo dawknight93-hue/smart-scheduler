@@ -4,8 +4,9 @@
  * order, (2) re-run the scheduler afterwards to confirm the sessions held.
  */
 import { supabase } from "./supabase";
-import { runEngine, addDays, getWeekStart, enrouteAsBusy, WORK_START_HOUR, WORK_END_HOUR } from "./schedulingEngine";
+import { runEngine, addDays, getWeekStart, enrouteAsBusy } from "./schedulingEngine";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate } from "./recurrence";
+import { DEFAULT_ROUTINES, PLAN_DAY_END, PLAN_DAY_START, routineForDay, sessionWindows, type DayRoutine } from "./dayRoutines";
 import type { ContextTag, FixedEvent, Habit, LifePillar, Task } from "./types";
 import { loadDailyItems, writeDailyPlan, type DailySession } from "./goalDaily";
 import { ownsHabit, planKey, periodBounds, type Period } from "./measures";
@@ -71,11 +72,12 @@ export interface PlanGoal {
 export const PLAN_GOAL_COLUMNS =
   "id, pillar, specific, time_bound, status, approach, deadline, cadence_sessions_per_week, cadence_label, cadence_confirmed, milestones, weekly_target, plan_mode, session_minutes, session_context, preferred_time, count_calendar_id, count_keyword, cascade_generated_at, blocked_blocks, blocks_asked";
 
+/** Preferred times of day for goal sessions — never in quiet hours (21:00–09:00). */
 export const PREFERRED_WINDOWS: Record<PreferredTime, [number, number]> = {
-  any: [WORK_START_HOUR, WORK_END_HOUR],
-  morning: [WORK_START_HOUR, 12],
+  any: [PLAN_DAY_START, PLAN_DAY_END],
+  morning: [PLAN_DAY_START, 12],
   afternoon: [12, 17],
-  evening: [17, WORK_END_HOUR],
+  evening: [17, PLAN_DAY_END],
 };
 
 export function goalShortName(g: Pick<PlanGoal, "specific" | "weekly_target">): string {
@@ -299,6 +301,10 @@ export interface ProposedSession {
   end: Date;
   /** Set when the chosen weekday had no room and this is the nearest open day instead. */
   movedFrom?: Date;
+  /** Why the chosen day didn't work: its routine's name when it allows no sessions (e.g. "UTA"), else "full". */
+  movedWhy?: string;
+  /** The day routine the session was placed under (e.g. "Day off"). */
+  routine?: string;
   /** You moved it onto a UTA day / into quiet hours in the review and overrode the rule. */
   utaOverride?: boolean;
   quietOverride?: boolean;
@@ -457,7 +463,17 @@ export function goalSessionsInWeek(goal: Pick<PlanGoal, "id" | "measure_id">, we
   return [...once, ...occ].sort((a, b) => new Date(a.search_start).getTime() - new Date(b.search_start).getTime());
 }
 
-export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), blocks: BlockRange[] = []): GoalWeekPlan[] {
+export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), blocks: BlockRange[] = [], routines: DayRoutine[] = DEFAULT_ROUTINES): GoalWeekPlan[] {
+  // The routine each day of the week follows (the same for every goal).
+  const routineCache = new Map<number, DayRoutine>();
+  const routineOf = (dayIdx: number): DayRoutine => {
+    let r = routineCache.get(dayIdx);
+    if (!r) {
+      r = routineForDay(addDays(week.weekStart, dayIdx), routines, week.busy);
+      routineCache.set(dayIdx, r);
+    }
+    return r;
+  };
   // Everything the scheduler already places this week counts as busy.
   const base = runEngine(week.weekStart, week.busy, week.habits, week.tasks);
   const busy: FixedEvent[] = [
@@ -488,25 +504,29 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), bl
     // Chosen weekdays (e.g. Tue & Thu) come first; otherwise spread across the week.
     const allowedIdx = goal.days?.length ? [0, 1, 2, 3, 4, 5, 6].filter((i) => goal.days!.includes(addDays(week.weekStart, i).getDay())) : [0, 1, 2, 3, 4, 5, 6];
 
+    // Each day follows its routine (UTA, Flying, Reserve, Day off, Normal…): sessions only
+    // go inside that routine's windows, within the preferred time, never in quiet hours.
     const tryDay = (dayIdx: number, i: number): ProposedSession | null => {
-        const day = addDays(week.weekStart, dayIdx);
-        const winStart = new Date(day.getFullYear(), day.getMonth(), day.getDate(), fromH, 0);
-        const winEnd = new Date(day.getFullYear(), day.getMonth(), day.getDate(), toH, 0);
-        const earliest = new Date(Math.max(winStart.getTime(), roundUp15(now).getTime()));
-        if (winEnd.getTime() - earliest.getTime() < minutes * 60000) return null;
+      const day = addDays(week.weekStart, dayIdx);
+      const routine = routineOf(dayIdx);
+      for (const w of sessionWindows(day, routine, fromH, toH)) {
+        const earliest = new Date(Math.max(w.start.getTime(), roundUp15(now).getTime()));
+        if (w.end.getTime() - earliest.getTime() < minutes * 60000) continue;
         const candidate: Habit = {
           id: `proposal-${planKey(goal)}-${i}`,
           name: goal.weekly_target ?? "Session",
           tier: 1,
           duration_min: minutes,
           search_start: earliest.toISOString(),
-          search_end: winEnd.toISOString(),
+          search_end: w.end.toISOString(),
           context: goal.session_context ?? "other",
           pillar: goal.pillar,
         };
         const r = runEngine(week.weekStart, avoid.length ? [...busy, ...avoid] : busy, [candidate], []);
         const p = r.placed.find((x) => x.id === candidate.id);
-        return p ? { key: candidate.id, goalId: goal.id, start: p.start, end: p.end } : null;
+        if (p) return { key: candidate.id, goalId: goal.id, start: p.start, end: p.end, routine: routine.label };
+      }
+      return null;
     };
 
     for (let i = 0; i < need; i++) {
@@ -524,7 +544,8 @@ export function planWeek(goals: PlanGoal[], week: WeekData, now = new Date(), bl
             if (usedDays.has(addDays(week.weekStart, dayIdx).getDay())) continue;
             const p = tryDay(dayIdx, i);
             if (p) {
-              placed = { ...p, movedFrom: addDays(week.weekStart, want) };
+              const wr = routineOf(want);
+              placed = { ...p, movedFrom: addDays(week.weekStart, want), movedWhy: wr.windows.length ? "full" : wr.label };
               break;
             }
           }
