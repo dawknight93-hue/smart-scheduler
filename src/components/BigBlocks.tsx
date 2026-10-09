@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { appSettings } from "@/lib/appSettings";
 import { Check, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { blockKey, deleteLifeBlock, loadLifeBlocks, saveLifeBlock, type LifeBlock } from "@/lib/lifeBlocks";
@@ -176,7 +177,7 @@ export function LifeBlocksEditor({ onClose }: { onClose: () => void }) {
           <div>
             <h2 className="text-lg font-semibold text-slate-100">Big life blocks</h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              Found on your calendar by words in event titles (all-day or 8+ hour events). Flying is every flight leg plus layovers away from MIA.
+              Found on your calendar by words in event titles (all-day or 8+ hour events). Flying is every flight leg plus layovers away from {appSettings.homeAirport}.
             </p>
           </div>
           <button onClick={onClose} className="ml-auto p-1.5 rounded-lg hover:bg-slate-800" aria-label="Close">
@@ -212,7 +213,7 @@ export function LifeBlocksEditor({ onClose }: { onClose: () => void }) {
                   )}
                 </div>
                 {b.kind === "trips" ? (
-                  <p className="mt-1 text-[11px] text-slate-500">Flight legs and time away from MIA between them (from your crew schedule).</p>
+                  <p className="mt-1 text-[11px] text-slate-500">Flight legs and time away from {appSettings.homeAirport} between them (from your crew schedule).</p>
                 ) : (
                   <label className="mt-1.5 block text-[11px] text-slate-400">
                     Title words (comma-separated)

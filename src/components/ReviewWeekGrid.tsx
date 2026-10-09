@@ -5,6 +5,7 @@ import { addDays, runEngine } from "@/lib/schedulingEngine";
 import { layoutColumns, type ItemLayout } from "@/lib/calendarLayout";
 import type { GoalWeekPlan, WeekData } from "@/lib/goalPlanning";
 import { planKey } from "@/lib/measures";
+import { appSettings } from "@/lib/appSettings";
 
 /**
  * The review's week, beside the cards: what's already on the calendar, plus
@@ -14,8 +15,8 @@ import { planKey } from "@/lib/measures";
 
 const HOUR_PX = 40;
 const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const QUIET_START = 21;
-const QUIET_END = 9;
+const QUIET_START = appSettings.quietStartHour;
+const QUIET_END = appSettings.quietEndHour;
 const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 
 interface Block {

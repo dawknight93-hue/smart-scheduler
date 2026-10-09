@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import type { LifePillar, PlacedItem } from "@/lib/types";
 import { PILLARS, PILLAR_LABELS, getPillarColor } from "@/lib/types";
+import { appSettings } from "@/lib/appSettings";
 import { addDays, getWeekStart, GRID_START_HOUR, GRID_END_HOUR } from "@/lib/schedulingEngine";
 import { layoutColumns, type ItemLayout } from "@/lib/calendarLayout";
 
@@ -485,7 +486,7 @@ export function MobileCalendar(props: Props) {
               <span className="flex-1 text-left">Sync Google Calendar</span>
               <span className="text-[11px] text-slate-500">{props.syncLabel}</span>
             </button>
-            <button onClick={() => props.onRecheckFlights()} disabled={props.recheckingFlights} className="flex items-center gap-3.5 h-11 px-3.5 rounded-full text-[15px] text-slate-300 active:bg-slate-800 disabled:opacity-60">
+            <button onClick={() => props.onRecheckFlights()} disabled={props.recheckingFlights} hidden={!appSettings.features.trips} className="flex items-center gap-3.5 h-11 px-3.5 rounded-full text-[15px] text-slate-300 active:bg-slate-800 disabled:opacity-60">
               <Plane className={`w-5 h-5 ${props.recheckingFlights ? "animate-pulse" : ""}`} />
               Recheck flights
             </button>

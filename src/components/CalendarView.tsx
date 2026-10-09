@@ -40,9 +40,10 @@ import {
   utaRanges,
   isUtaBlocked,
   utaBlockLabel,
-  FLIGHT_TITLE,
+  matchFlight,
   REPORT_BUFFER_MIN,
 } from "@/lib/schedulingEngine";
+import { appSettings } from "@/lib/appSettings";
 import type {
   FixedEvent,
   Habit,
@@ -93,8 +94,10 @@ const PX_PER_MIN = 64 / 60; // one hour row is h-16 (64px)
 function minutesFromGridTop(d: Date): number {
   return (d.getHours() - GRID_START_HOUR) * 60 + d.getMinutes();
 }
-const NIGHT_START_HOUR = 21;
-const NIGHT_END_HOUR = 9;
+const NIGHT_START_HOUR = appSettings.quietStartHour;
+const NIGHT_END_HOUR = appSettings.quietEndHour;
+/** Quiet hours as text, e.g. "21:00–09:00". */
+const QUIET_TEXT = `${String(NIGHT_START_HOUR).padStart(2, "0")}:00–${String(NIGHT_END_HOUR).padStart(2, "0")}:00`;
 
 function snapToSlot(d: Date): Date {
   const m = d.getMinutes();
@@ -176,7 +179,7 @@ function findNextFreeSlot(
   const durationMs = durationMin * 60 * 1000;
   // Report time: the 45 minutes before each flight leg departs is taken too.
   const reportTimes = allItems
-    .filter((p) => p.kind === "Fixed Event" && !p.isAllDay && FLIGHT_TITLE.test(p.name))
+    .filter((p) => p.kind === "Fixed Event" && !p.isAllDay && !!matchFlight(p.name))
     .map((p) => ({ start: new Date(p.start.getTime() - REPORT_BUFFER_MIN * 60000), end: p.start }));
   const origDay = new Date(newStart.getFullYear(), newStart.getMonth(), newStart.getDate());
   for (let dayOffset = 0; dayOffset < 14; dayOffset++) {
@@ -1422,7 +1425,7 @@ export function CalendarView({
     const newEnd = new Date(newStart.getTime() + (item.end.getTime() - item.start.getTime()));
     if (!allow.quiet && !item.quietOverride && isQuietTime(newStart, newEnd)) {
       const again = isRetry(item, "quiet");
-      return { blocked: `Can't schedule between 21:00 and 09:00${again ? " — drop it here to override" : ""}`, rule: "quiet", overlaps: [], notes: [] };
+      return { blocked: `Can't schedule between ${QUIET_TEXT.replace("–", " and ")}${again ? " — drop it here to override" : ""}`, rule: "quiet", overlaps: [], notes: [] };
     }
     if (!allow.uta && !item.utaOverride && isUtaBlocked(item.pillar, item.context) && overlapsUta(newStart, newEnd, fixedEvents)) {
       const again = isRetry(item, "uta");
@@ -1611,7 +1614,7 @@ export function CalendarView({
   }
 
   function isRunnaEvent(item: PlacedItem): boolean {
-    if (!isFromGoogle(item)) return false;
+    if (!appSettings.features.fitnessApp || !isFromGoogle(item)) return false;
     return calendarConnections.some((c) => c.calendar_id === item.googleCalendarId && /runna/i.test(c.name));
   }
 
@@ -1741,7 +1744,7 @@ export function CalendarView({
       const minEnd = new Date(resizeState.item.start.getTime() + 15 * 60 * 1000);
       const hint = (h: string) => setResizeState((prev) => (prev && prev.hint !== h ? { ...prev, hint: h } : prev));
       if (snapped < minEnd) return hint("15 min minimum");
-      if (!resizeState.item.quietOverride && isQuietTime(resizeState.item.start, snapped)) return hint("can't run into 21:00–09:00");
+      if (!resizeState.item.quietOverride && isQuietTime(resizeState.item.start, snapped)) return hint(`can't run into ${QUIET_TEXT}`);
       if (!resizeState.item.utaOverride && isUtaBlocked(resizeState.item.pillar, resizeState.item.context) && overlapsUta(resizeState.item.start, snapped, fixedEvents)) return hint(`${utaBlockLabel(resizeState.item.pillar, resizeState.item.context)} items can't go on UTA days`);
       setResizeState((prev) => (prev ? { ...prev, previewEnd: snapped, hint: undefined } : null));
     };
@@ -1975,7 +1978,7 @@ export function CalendarView({
   /** Why a new end time isn't allowed (same rules as the desktop resize), or undefined. */
   function checkResize(item: PlacedItem, newEnd: Date): string | undefined {
     if (newEnd.getTime() < item.start.getTime() + SLOT_MIN * 60000) return "15 min minimum";
-    if (!item.quietOverride && isQuietTime(item.start, newEnd)) return "Can't run into 21:00–09:00";
+    if (!item.quietOverride && isQuietTime(item.start, newEnd)) return `Can't run into ${QUIET_TEXT}`;
     if (!item.utaOverride && isUtaBlocked(item.pillar, item.context) && overlapsUta(item.start, newEnd, fixedEvents)) return `${utaBlockLabel(item.pillar, item.context)} items can't go on UTA days`;
     return undefined;
   }
@@ -2415,6 +2418,7 @@ export function CalendarView({
             <button
               onClick={() => void recheckFlights()}
               disabled={recheckingEnroute}
+              hidden={!appSettings.features.trips}
               className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700 transition-colors disabled:opacity-50"
               aria-label="Recheck flights"
               title="Recheck flights (rebuild Enroute drive-time blocks)"
@@ -3092,12 +3096,12 @@ export function CalendarView({
             <p className="text-sm text-slate-300 mb-2">
               <span className="font-medium text-white">{overrideConfirm.item.name}</span> would go on{" "}
               {overrideConfirm.newStart.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })} at {formatTime(overrideConfirm.newStart)}
-              {overrideConfirm.rule === "uta" ? ", during UTA." : ", inside quiet hours (21:00–09:00)."}
+              {overrideConfirm.rule === "uta" ? ", during UTA." : `, inside quiet hours (${QUIET_TEXT}).`}
             </p>
             <p className="text-xs text-slate-500 mb-4">
               {overrideConfirm.rule === "uta"
                 ? `${utaBlockLabel(overrideConfirm.item.pillar, overrideConfirm.item.context)} items normally stay off UTA days.`
-                : "Nothing is normally scheduled between 21:00 and 09:00."}{" "}
+                : `Nothing is normally scheduled between ${QUIET_TEXT.replace("–", " and ")}.`}{" "}
               This overrides that for this one only — the scheduler will leave it there, and Undo puts it back.
             </p>
             <div className="flex gap-2">
