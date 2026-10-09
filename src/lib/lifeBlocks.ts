@@ -11,7 +11,7 @@
  */
 import { supabase } from "./supabase";
 import type { FixedEvent } from "./types";
-import { FLIGHT_TITLE, HOME_BASE } from "./schedulingEngine";
+import { matchFlight, HOME_BASE } from "./schedulingEngine";
 
 export type BlockKind = "keywords" | "trips";
 
@@ -100,7 +100,7 @@ export function blockRanges(blocks: LifeBlock[], events: FixedEvent[], from: Dat
     if (b.kind === "trips") {
       const legs = events
         .filter((e) => !e.is_all_day)
-        .map((e) => ({ e, m: FLIGHT_TITLE.exec(e.name) }))
+        .map((e) => ({ e, m: matchFlight(e.name) }))
         .filter((x): x is { e: FixedEvent; m: RegExpExecArray } => !!x.m && !seen.has(`${b.key}|${x.e.id}`))
         .map(({ e, m }) => {
           seen.add(`${b.key}|${e.id}`);

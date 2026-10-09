@@ -1,5 +1,6 @@
 import type { FixedEvent } from "./types";
 import { supabase } from "./supabase";
+import { appSettings } from "./appSettings";
 
 /**
  * Calendar Hygiene: keeping goal tasks off travel and duty time.
@@ -7,7 +8,7 @@ import { supabase } from "./supabase";
  */
 
 /** The pilot's home base. Drive-time (Enroute) blocks only ever touch this airport. */
-export const HOME_AIRPORT = "MIA";
+export const HOME_AIRPORT = appSettings.homeAirport;
 
 /**
  * Minimum ground time, on the home-airport side of a gap between two legs,
@@ -29,6 +30,7 @@ export interface FlightLeg {
 
 /** Parses a fixed_events row into a FlightLeg if its name matches the flight title format, else null. */
 export function parseFlightLeg(event: FixedEvent): FlightLeg | null {
+  if (!appSettings.features.trips) return null;
   const match = FLIGHT_NAME_PATTERN.exec(event.name);
   if (!match) return null;
   return { event, origin: match[1], destination: match[2] };
@@ -281,7 +283,7 @@ export async function recheckEnrouteBlocks(): Promise<RecheckSummary> {
   if (toCreate.length > 0) {
     const rows = toCreate.map((plan) => ({
       flight_id: plan.flight.id,
-      name: plan.direction === "to" ? "Enroute to MIA" : "Enroute home",
+      name: plan.direction === "to" ? `Enroute to ${HOME_AIRPORT}` : "Enroute home",
       direction: plan.direction,
       start_time: plan.start.toISOString(),
       end_time: plan.end.toISOString(),

@@ -16,7 +16,9 @@
  * Imported first in main.tsx, before anything else creates a Date.
  */
 
-export const HOME_ZONE = "America/New_York";
+import { appSettings } from "./appSettings";
+
+export const HOME_ZONE = appSettings.homeTimeZone;
 
 const Real = Date;
 const deviceZone = (() => {
@@ -170,7 +172,7 @@ function install() {
       const mm = String(a % 60).padStart(2, "0");
       const w = wall(this);
       const p2 = (n: number) => String(n).padStart(2, "0");
-      return `${p2(w.getUTCHours())}:${p2(w.getUTCMinutes())}:${p2(w.getUTCSeconds())} GMT${sign}${hh}${mm} (Miami time)`;
+      return `${p2(w.getUTCHours())}:${p2(w.getUTCMinutes())}:${p2(w.getUTCSeconds())} GMT${sign}${hh}${mm} (${appSettings.homeTimeLabel})`;
     },
     toString(this: Date) {
       return `${(proto as Date).toDateString.call(this)} ${(proto as Date).toTimeString.call(this)}`;

@@ -4,7 +4,7 @@
 // app itself owns (tagged with a private extended property).
 import type { FixedEvent, Habit, Task, LifePillar, PlacedItem } from "./types";
 import { supabase } from "./supabase";
-import { runEngine, getWeekStart, addDays, HOME_TIME_ZONE, homeWallParts, homeDate, enrouteAsBusy, getReadyBlocks, hotelCommuteBlocks } from "./schedulingEngine";
+import { runEngine, getWeekStart, addDays, HOME_TIME_ZONE, homeWallParts, homeDate, enrouteAsBusy, getReadyBlocks, hotelCommuteBlocks, HOME_BASE } from "./schedulingEngine";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, type RecurrenceRule } from "./recurrence";
 
 export const MIRROR_WEEKS = 6;
@@ -451,7 +451,7 @@ export async function buildMirrorItems(
         key: `enroute:${r.enrouteId}:ready`,
         target: "tasks",
         summary: `🧳 ${r.name}`,
-        description: describe("Enroute", "civ_career", "Get ready before the drive to MIA"),
+        description: describe("Enroute", "civ_career", `Get ready before the drive to ${HOME_BASE}`),
         colorId: PILLAR_COLOR.civ_career,
         allDay: false,
         start: localWall(new Date(r.start_time)),

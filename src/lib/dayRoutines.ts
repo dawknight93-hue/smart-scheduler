@@ -10,6 +10,7 @@
  * sessions that day; the session moves to the nearest day that has room.
  */
 import { supabase } from "./supabase";
+import { appSettings } from "./appSettings";
 import type { FixedEvent } from "./types";
 import { blockRanges, type LifeBlock } from "./lifeBlocks";
 
@@ -32,10 +33,11 @@ export interface DayRoutine {
 }
 
 /** Goal sessions are never suggested in quiet hours (21:00–09:00), the same rule as dragging. */
-export const PLAN_DAY_START = 9;
-export const PLAN_DAY_END = 21;
+export const PLAN_DAY_START = appSettings.quietEndHour;
+export const PLAN_DAY_END = appSettings.quietStartHour;
+const hh = (h: number) => `${String(h).padStart(2, "0")}:00`;
 
-export const DEFAULT_ROUTINES: DayRoutine[] = [
+const STARTER_ROUTINES: DayRoutine[] = [
   { key: "uta", label: "UTA", kind: "keywords", keywords: "uta, drill weekend", windows: [], enabled: true, position: 10 },
   { key: "flying", label: "Flying", kind: "trips", keywords: "", windows: [], enabled: true, position: 20 },
   { key: "reserve", label: "Reserve", kind: "keywords", keywords: "reserve", windows: [{ from: "09:00", to: "11:00" }], enabled: true, position: 30 },
@@ -51,8 +53,13 @@ export const DEFAULT_ROUTINES: DayRoutine[] = [
     enabled: true,
     position: 40,
   },
-  { key: "normal", label: "Normal day", kind: "default", keywords: "", windows: [{ from: "09:00", to: "21:00" }], enabled: true, position: 100 },
+  { key: "normal", label: "Normal day", kind: "default", keywords: "", windows: [{ from: hh(PLAN_DAY_START), to: hh(PLAN_DAY_END) }], enabled: true, position: 100 },
 ];
+
+/** The starter list, without the kinds of day this copy has switched off (drill, trips). */
+export const DEFAULT_ROUTINES: DayRoutine[] = STARTER_ROUTINES.filter(
+  (r) => !((r.key === "uta" && !appSettings.features.drill) || ((r.key === "flying" || r.key === "reserve") && !appSettings.features.trips))
+);
 
 const normalize = (r: DayRoutine): DayRoutine => ({
   ...r,

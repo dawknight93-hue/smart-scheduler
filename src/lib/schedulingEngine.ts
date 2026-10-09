@@ -9,6 +9,7 @@ import type {
   LifePillar,
 } from "./types";
 import { BAND_FIT, BAND_LABELS, EFFORT_LABELS, energyBand, guessEffort, maxEffort, type Effort } from "./effort";
+import { appSettings } from "./appSettings";
 
 export const WORK_START_HOUR = 6;
 export const WORK_END_HOUR = 22;
@@ -45,7 +46,7 @@ export function addMinutes(date: Date, minutes: number): Date {
  * the same schedule is produced on every device — a phone that's switched to
  * another time zone on a trip won't reshuffle the plan (or Google Calendar).
  */
-export const HOME_TIME_ZONE = "America/New_York";
+export const HOME_TIME_ZONE = appSettings.homeTimeZone;
 
 const homeParts = new Intl.DateTimeFormat("en-US", {
   timeZone: HOME_TIME_ZONE,
@@ -95,6 +96,7 @@ export function utaBlockLabel(pillar: LifePillar | null | undefined, context: Co
 export function utaRanges(fixed: FixedEvent[]): [Date, Date][] {
   const out: [Date, Date][] = [];
   for (const ev of fixed) {
+    if (!appSettings.features.drill) break; // drill days switched off: no UTA rules
     if (!ev.is_all_day || ev.name.trim().toUpperCase() !== "UTA") continue;
     const s = new Date(ev.start_time);
     const e = new Date(ev.end_time);
@@ -171,7 +173,7 @@ export function hotelCommuteBlocks(fixed: { id: string; name: string; start_time
   const seen = new Set<string>();
   const legs = fixed
     .filter((ev) => !ev.is_all_day && !seen.has(ev.id) && (seen.add(ev.id), true))
-    .map((ev) => ({ ev, m: FLIGHT_TITLE.exec(ev.name) }))
+    .map((ev) => ({ ev, m: matchFlight(ev.name) }))
     .filter((x): x is { ev: (typeof fixed)[number]; m: RegExpExecArray } => !!x.m)
     .map(({ ev, m }) => ({ id: ev.id, origin: m[1], dest: m[2], dep: new Date(ev.start_time).getTime(), arr: new Date(ev.end_time).getTime() }))
     .sort((a, b) => a.dep - b.dep);
@@ -308,7 +310,12 @@ export const REPORT_BUFFER_MIN = 45;
 export const CONNECTION_MAX_HOURS = 3;
 const AWAY_BLOCKED_CONTEXTS: ContextTag[] = ["home", "errand"];
 export const FLIGHT_TITLE = /([A-Z]{3})\u200b?\u2192\u200b?([A-Z]{3})\s*\u2022/;
-export const HOME_BASE = "MIA";
+export const HOME_BASE = appSettings.homeAirport;
+
+/** A flight leg title ("✈ CVG→ORD • AA 4097"), or null — always null when trips are switched off. */
+export function matchFlight(name: string): RegExpExecArray | null {
+  return appSettings.features.trips ? FLIGHT_TITLE.exec(name) : null;
+}
 /** "✈ CVG→ORD • AA 4097" → "AA 4097". */
 function legLabel(name: string): string {
   const m = /\u2022\s*(.+)$/.exec(name);
@@ -359,7 +366,7 @@ function buildPlanContext(fixed: FixedEvent[]): PlanContext {
       ctx.load.set(k, (ctx.load.get(k) ?? 0) + Math.max(0, (e.getTime() - s.getTime()) / 60000));
       ctx.meetingEnds.push(e.getTime());
     }
-    const leg = FLIGHT_TITLE.exec(ev.name);
+    const leg = matchFlight(ev.name);
     if (leg) {
       if (leg[2] === HOME_BASE) ctx.recovery.push([e.getTime(), e.getTime() + RECOVERY_HOURS * HOUR_MS]);
       if (leg[1] === HOME_BASE) {
@@ -552,7 +559,7 @@ export function runEngine(
   // Report time: nothing in the 45 minutes before a flight leg departs.
   const legs = fixedEvents
     .filter((ev) => !ev.is_all_day)
-    .map((ev) => ({ ev, m: FLIGHT_TITLE.exec(ev.name) }))
+    .map((ev) => ({ ev, m: matchFlight(ev.name) }))
     .filter((x): x is { ev: FixedEvent; m: RegExpExecArray } => !!x.m)
     .map(({ ev, m }) => ({ id: ev.id, label: legLabel(ev.name), origin: m[1], dest: m[2], dep: new Date(ev.start_time).getTime(), arr: new Date(ev.end_time).getTime() }))
     .sort((a, b) => a.dep - b.dep);
