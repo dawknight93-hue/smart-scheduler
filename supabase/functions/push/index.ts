@@ -107,21 +107,28 @@ async function sendToAll(payload: Payload) {
 // and a plain morning briefing nudge when the app didn't plan one (it plans the
 // detailed one each time it's opened).
 
-const HOME_TZ = "America/New_York";
-const homeFmt = new Intl.DateTimeFormat("en-US", {
-  timeZone: HOME_TZ,
-  hourCycle: "h23",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  weekday: "short",
-});
+// This copy's home time zone (app_settings); the original setup is Eastern.
+let HOME_TZ = "America/New_York";
+async function loadHomeTz() {
+  const { data } = await supabase.from("app_settings").select("settings").eq("id", 1).maybeSingle();
+  const tz = (data?.settings as { homeTimeZone?: string } | undefined)?.homeTimeZone;
+  if (tz) HOME_TZ = tz;
+}
+const homeFmt = () =>
+  new Intl.DateTimeFormat("en-US", {
+    timeZone: HOME_TZ,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    weekday: "short",
+  });
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
 function homeNow(d = new Date()) {
-  const p = Object.fromEntries(homeFmt.formatToParts(d).map((x) => [x.type, x.value]));
+  const p = Object.fromEntries(homeFmt().formatToParts(d).map((x) => [x.type, x.value]));
   const y = +p.year, mo = +p.month, day = +p.day;
   return { y, mo, day, mins: (+p.hour % 24) * 60 + +p.minute, weekday: p.weekday, date: `${p.year}-${p.month}-${p.day}` };
 }
@@ -134,6 +141,7 @@ const toMins = (hm: string) => {
 async function scheduleServerReminders() {
   const { data: s } = await supabase.from("reminder_settings").select("*").eq("id", 1).maybeSingle();
   if (!s?.enabled) return;
+  await loadHomeTz();
   const h = homeNow();
   // A 15-minute window, so a late or skipped cron minute still catches it; keys stop repeats.
   const within = (hm: string) => h.mins >= toMins(hm) && h.mins < toMins(hm) + 15;
