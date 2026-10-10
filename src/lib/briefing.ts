@@ -4,6 +4,8 @@
  * Enroute blocks, goals) so the briefing never disagrees with the calendar.
  */
 import { supabase } from "./supabase";
+import { appSettings } from "./appSettings";
+import { PILLARS, PILLAR_LABELS } from "./types";
 import { addDays, getReadyBlocks, hotelCommuteBlocks, getWeekStart, runEngine, utaRanges, WORK_START_HOUR, WORK_END_HOUR } from "./schedulingEngine";
 import { HOME_AIRPORT, parseFlightLeg, type StoredEnrouteBlock } from "./calendarHygiene";
 import { formatLocalDate } from "./recurrence";
@@ -245,7 +247,17 @@ export function weatherStops(items: BriefItem[]): WeatherStop[] {
 const FUNCTION_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/briefing`;
 const HEADERS = { Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`, "Content-Type": "application/json" };
 
+/** Who the briefing is for, from this copy's settings (unset parts keep the original owner's). */
+function whoFor() {
+  return {
+    name: appSettings.displayName || undefined,
+    about: appSettings.aboutMe,
+    roles: PILLARS.map((p) => PILLAR_LABELS[p]),
+  };
+}
+
 async function callBriefing<T>(body: Record<string, unknown>): Promise<T> {
+  if (body.action === "summary") body = { ...body, who: whoFor() };
   const res = await fetch(FUNCTION_URL, { method: "POST", headers: HEADERS, body: JSON.stringify(body) });
   const data = await res.json();
   if (!res.ok || data.error) throw new Error(data.error || `Request failed (${res.status})`);

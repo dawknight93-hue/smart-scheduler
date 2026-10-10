@@ -26,6 +26,8 @@ export interface AppFeatures {
 
 export interface AppSettings {
   displayName: string;
+  /** A sentence about you for the AI coach and briefing (unset = the original owner's description). */
+  aboutMe?: string;
   /** IANA zone everything is planned in, e.g. "America/New_York". */
   homeTimeZone: string;
   /** How that zone is named on screen, e.g. "Miami time". */
@@ -43,6 +45,10 @@ export interface AppSettings {
   /** False until the first-time setup has been finished (used by the setup screens). */
   setupDone: boolean;
 }
+
+/** The original owner's description, used for the AI coach and briefing until a copy saves its own. */
+export const ORIGINAL_ABOUT =
+  "an airline First Officer based in MIA with a family and a military reserve career; energy is highest in the morning, lower in the afternoon, lowest after 20:30";
 
 export const DEFAULT_SETTINGS: AppSettings = {
   displayName: "",
