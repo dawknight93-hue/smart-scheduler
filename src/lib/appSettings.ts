@@ -37,6 +37,8 @@ export interface AppSettings {
   quietEndHour: number;
   /** Your own names for the built-in roles, e.g. { mil_career: "Work" }. */
   roleLabels: Record<string, string>;
+  /** The roles in use, in the order they're listed (built-in keys). Empty = all, built-in order. */
+  roleOrder: string[];
   features: AppFeatures;
   /** False until the first-time setup has been finished (used by the setup screens). */
   setupDone: boolean;
@@ -50,6 +52,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   quietStartHour: 21,
   quietEndHour: 9,
   roleLabels: {},
+  roleOrder: [],
   features: { trips: true, drill: true, fitnessApp: true, bookingPage: true, briefing: true, weeklyReview: true },
   setupDone: true,
 };

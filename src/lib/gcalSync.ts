@@ -52,7 +52,8 @@ export interface SyncResult {
 export function getOAuthUrl(): string {
   const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
   if (!clientId) return "";
-  const redirectUri = "https://web-app-development-acoa.bolt.host/gcal-callback";
+  // This copy's own address, so each copy of the app gets its own callback.
+  const redirectUri = `${window.location.origin}/gcal-callback`;
   const scopes = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -105,6 +106,27 @@ async function callEdgeFunction(body: Record<string, unknown>): Promise<SyncResu
   const data = await resp.json();
   if (data.error) return { success: false, error: friendlyError(data.error) };
   return { success: true, ...data };
+}
+
+export interface GoogleCalendarInfo {
+  id: string;
+  name: string;
+  /** owner / writer / reader / freeBusyReader */
+  accessRole: string;
+  primary: boolean;
+}
+
+/** The connected Google account's calendars (first-time setup). */
+export async function listGoogleCalendars(): Promise<{ calendars: GoogleCalendarInfo[]; error?: string }> {
+  const r = (await callEdgeFunction({ action: "list-calendars" })) as SyncResult & { calendars?: GoogleCalendarInfo[] };
+  return r.success ? { calendars: r.calendars ?? [] } : { calendars: [], error: r.error };
+}
+
+/** Creates a calendar in the connected Google account and returns its id. */
+export async function createGoogleCalendar(calendarName: string, timeZone: string): Promise<{ id: string; name: string }> {
+  const r = (await callEdgeFunction({ action: "create-calendar", calendarName, timeZone })) as SyncResult & { calendar?: { id: string; name: string } };
+  if (!r.success || !r.calendar) throw new Error(r.error ?? "Could not create the calendar");
+  return r.calendar;
 }
 
 export async function exchangeOAuthCode(code: string): Promise<SyncResult> {

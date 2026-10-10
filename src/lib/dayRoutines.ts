@@ -37,7 +37,7 @@ export const PLAN_DAY_START = appSettings.quietEndHour;
 export const PLAN_DAY_END = appSettings.quietStartHour;
 const hh = (h: number) => `${String(h).padStart(2, "0")}:00`;
 
-const STARTER_ROUTINES: DayRoutine[] = [
+export const STARTER_ROUTINES: DayRoutine[] = [
   { key: "uta", label: "UTA", kind: "keywords", keywords: "uta, drill weekend", windows: [], enabled: true, position: 10 },
   { key: "flying", label: "Flying", kind: "trips", keywords: "", windows: [], enabled: true, position: 20 },
   { key: "reserve", label: "Reserve", kind: "keywords", keywords: "reserve", windows: [{ from: "09:00", to: "11:00" }], enabled: true, position: 30 },
