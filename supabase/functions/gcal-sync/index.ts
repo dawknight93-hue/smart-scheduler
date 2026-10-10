@@ -7,7 +7,13 @@ const corsHeaders = {
 };
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const HOME_TIME_ZONE = "America/New_York";
+// This copy's home time zone (app_settings), read at the start of each request.
+let HOME_TIME_ZONE = "America/New_York";
+async function loadHomeTimeZone() {
+  const { data } = await supabase.from("app_settings").select("settings").eq("id", 1).maybeSingle();
+  const tz = (data?.settings as { homeTimeZone?: string } | undefined)?.homeTimeZone;
+  if (tz) HOME_TIME_ZONE = tz;
+}
 const GOOGLE_EVENTS_URL = (calendarId: string) =>
   `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`;
 
@@ -740,7 +746,7 @@ async function pullEvents(
 // trip alert when new flights appear in the next few days (e.g. a reserve
 // assignment posted by Crew Scheduling).
 
-const easternParts = new Intl.DateTimeFormat("en-US", {
+const easternParts = () => new Intl.DateTimeFormat("en-US", {
   timeZone: HOME_TIME_ZONE,
   hourCycle: "h23",
   weekday: "short",
@@ -751,7 +757,7 @@ const easternParts = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 function eastern(iso: string) {
-  const p = Object.fromEntries(easternParts.formatToParts(new Date(iso)).map((x) => [x.type, x.value]));
+  const p = Object.fromEntries(easternParts().formatToParts(new Date(iso)).map((x) => [x.type, x.value]));
   return { day: `${p.weekday}, ${p.month} ${p.day}`, time: `${p.hour}:${p.minute}` };
 }
 
@@ -967,7 +973,7 @@ async function getSyncStatus() {
     .order("created_at");
 
   return {
-    functionVersion: "2026-10-10-setup",
+    functionVersion: "2026-10-10-settings",
     connected: !!tokenRow,
     email: tokenRow?.email ?? null,
     recentRuns: recentRuns ?? [],
@@ -1037,6 +1043,7 @@ Deno.serve(async (req: Request) => {
   try {
     const body: SyncRequest = await req.json();
     let result: Record<string, unknown>;
+    await loadHomeTimeZone().catch(() => undefined);
 
     switch (body.action) {
       case "oauth-exchange": {
@@ -1117,7 +1124,7 @@ Deno.serve(async (req: Request) => {
 
       case "create-calendar": {
         if (!body.calendarName) throw new Error("A calendar name is required.");
-        result = await createGoogleCalendar(body.calendarName, body.timeZone ?? "America/New_York");
+        result = await createGoogleCalendar(body.calendarName, body.timeZone ?? HOME_TIME_ZONE);
         break;
       }
 
