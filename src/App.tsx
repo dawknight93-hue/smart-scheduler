@@ -11,6 +11,7 @@ import { BriefingView } from "@/components/BriefingView";
 import { useReviewDue } from "@/lib/useReviewDue";
 import { GoogleCallback } from "@/components/GoogleCallback";
 import { PrivacyPolicy } from "@/components/PrivacyPolicy";
+import { SetupWizard } from "@/components/SetupWizard";
 import { getWeekStart } from "@/lib/schedulingEngine";
 import { registerServiceWorker } from "@/lib/push";
 import { syncReminders } from "@/lib/reminders";
@@ -50,6 +51,18 @@ function App() {
 
   if (window.location.pathname === "/gcal-callback") return <GoogleCallback />;
   if (window.location.pathname === "/privacy") return <PrivacyPolicy />;
+  // First-time setup: a copy nobody has set up yet, or ?setup=preview (a dry run).
+  const setupPreview = new URLSearchParams(window.location.search).get("setup") === "preview";
+  if (!appSettings.setupDone || setupPreview) {
+    return (
+      <SetupWizard
+        preview={setupPreview && appSettings.setupDone}
+        onClose={() => {
+          window.location.href = "/";
+        }}
+      />
+    );
+  }
 
   const tabs: { id: View; label: string; icon: typeof Sunrise }[] = [
     { id: "briefing", label: "Briefing", icon: Sunrise },
@@ -57,7 +70,7 @@ function App() {
     { id: "tasks", label: "Tasks", icon: CheckSquare },
     { id: "goals", label: "Goals", icon: Target },
     { id: "review", label: "Review", icon: ClipboardCheck },
-  ];
+  ].filter((t) => (t.id !== "briefing" || appSettings.features.briefing) && (t.id !== "review" || appSettings.features.weeklyReview));
   const tabButton = (t: (typeof tabs)[number], vertical: boolean) => {
     const Icon = t.icon;
     const active = view === t.id;
