@@ -194,17 +194,22 @@ async function groqText(system: string, user: string): Promise<string> {
   return String(data.choices?.[0]?.message?.content ?? "").trim();
 }
 
-async function handleSummary(kind: string, facts: string, memory: string[], retryNote: string | null) {
+type Who = { name?: string; about?: string; roles?: string[] };
+async function handleSummary(kind: string, facts: string, memory: string[], retryNote: string | null, who: Who = {}) {
+  // Who the briefing is for, from this copy's settings (the app sends it); defaults are the original owner.
+  const name = who.name?.trim() || "Oshane";
+  const about = who.about !== undefined ? who.about.trim() : "an airline First Officer based in MIA";
+  const roles = who.roles?.length ? who.roles : ["Spiritual", "Family", "Physical", "Civ Career", "Mil Career", "Mental", "Financial"];
   const system =
-    "You write a short briefing for Oshane, an airline First Officer based in MIA who plans his life around seven pillars (Spiritual, Family, Physical, Civ Career, Mil Career, Mental, Financial). " +
+    "You write a short briefing for " + name + (about ? ", " + about + "," : "") + " who plans their life around " + roles.length + " roles (" + roles.join(", ") + "). " +
     "Using ONLY the facts provided, write 3 to 5 sentences of plain prose (no lists, no headings, no markdown), friendly and direct like a good crew briefing. " +
     "Lead with what matters most for this " + kind + " briefing: the first commitment or departure, flights and any notable weather (thunderstorms, low visibility, strong gusts), goal progress, and heads-ups that need action. " +
     "Use 24-hour times like 07:30. Never invent events, numbers or advice not supported by the facts. Only mention weather if an 'Airport weather' line is in the facts. If there is little going on, say so briefly. " +
     "Situational-awareness facts come from info-only calendars: they are context and actions, never booked time or commitments. When they include a reserve day, proffer window, assignment timing, open-time or bid window, payday or bill, weave the most important one into a sentence that starts 'For your situational awareness,' and keep its exact times and actions. " +
-    "For weekly and monthly briefings, use the duty-day counts to say how the period went and what it means for the month (for example, reserve days with no flying count toward his days off). " +
+    "For weekly and monthly briefings, use the duty-day counts to say how the period went and what it means for the month (for example, reserve days with no flying count toward their days off). " +
     "Every time, date and number you write must appear in the facts exactly; if you're not sure, leave it out." +
     (memory.length
-      ? "\n\nHis standing corrections from earlier briefings — always follow these:\n" + memory.map((m) => `- ${m}`).join("\n")
+      ? "\n\nTheir standing corrections from earlier briefings — always follow these:\n" + memory.map((m) => `- ${m}`).join("\n")
       : "");
   const user = facts.slice(0, 16000) + (retryNote ? `\n\nYOUR PREVIOUS DRAFT HAD PROBLEMS. Rewrite the whole summary and drop or fix these sentences (only use times, dates and numbers that appear in the facts):\n${retryNote}` : "");
   const key = Deno.env.get("ANTHROPIC_API_KEY");
@@ -231,7 +236,12 @@ Deno.serve(async (req: Request) => {
     } else if (body.action === "summary") {
       if (typeof body.facts !== "string") throw new Error("facts is required.");
       const memory = Array.isArray(body.memory) ? body.memory.filter((m: unknown) => typeof m === "string" && m.trim()).slice(0, 40).map((m: string) => m.slice(0, 300)) : [];
-      result = await handleSummary(String(body.kind ?? "daily"), body.facts, memory, typeof body.retryNote === "string" ? body.retryNote.slice(0, 1500) : null);
+      const who: Who = body.who && typeof body.who === "object" ? {
+        name: typeof body.who.name === "string" ? body.who.name.slice(0, 80) : undefined,
+        about: typeof body.who.about === "string" ? body.who.about.slice(0, 400) : undefined,
+        roles: Array.isArray(body.who.roles) ? body.who.roles.filter((r: unknown) => typeof r === "string").slice(0, 7).map((r: string) => r.slice(0, 40)) : undefined,
+      } : {};
+      result = await handleSummary(String(body.kind ?? "daily"), body.facts, memory, typeof body.retryNote === "string" ? body.retryNote.slice(0, 1500) : null, who);
     } else {
       throw new Error("Unknown action.");
     }
