@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { deviceTimeZone, homeClockActive } from "@/lib/homeClock";
 import { appSettings } from "@/lib/appSettings";
 import { SETTINGS_EVENT } from "@/lib/appSettingsLoader";
-import { CalendarDays, CheckSquare, Target, ClipboardCheck, Sunrise } from "lucide-react";
+import { CalendarDays, CheckSquare, Target, ClipboardCheck, Sunrise, Settings as SettingsIcon } from "lucide-react";
 import { CalendarView } from "@/components/CalendarView";
 import { TasksView } from "@/components/TasksView";
 import { GoalsView } from "@/components/GoalsView";
@@ -12,6 +12,8 @@ import { useReviewDue } from "@/lib/useReviewDue";
 import { GoogleCallback } from "@/components/GoogleCallback";
 import { PrivacyPolicy } from "@/components/PrivacyPolicy";
 import { SetupWizard } from "@/components/SetupWizard";
+import { SettingsPanel } from "@/components/SettingsPanel";
+import { SCHEMA_VERSION, databaseVersion } from "@/lib/version";
 import { getWeekStart } from "@/lib/schedulingEngine";
 import { registerServiceWorker } from "@/lib/push";
 import { syncReminders } from "@/lib/reminders";
@@ -33,6 +35,18 @@ function App() {
     const redraw = () => setSettingsTick((t) => t + 1);
     window.addEventListener(SETTINGS_EVENT, redraw);
     return () => window.removeEventListener(SETTINGS_EVENT, redraw);
+  }, []);
+  // Settings opens from the sidebar, or from anywhere via an "open-settings" event (the phone menu).
+  const [showSettings, setShowSettings] = useState(false);
+  useEffect(() => {
+    const open = () => setShowSettings(true);
+    window.addEventListener("open-settings", open);
+    return () => window.removeEventListener("open-settings", open);
+  }, []);
+  // This copy's database is missing an update the code needs: say so instead of misbehaving quietly.
+  const [dbBehind, setDbBehind] = useState(false);
+  useEffect(() => {
+    void databaseVersion().then((v) => setDbBehind(v < SCHEMA_VERSION));
   }, []);
 
   // Service worker (for notifications) and the next week's reminders, on launch
@@ -71,6 +85,8 @@ function App() {
     { id: "goals", label: "Goals", icon: Target },
     { id: "review", label: "Review", icon: ClipboardCheck },
   ].filter((t) => (t.id !== "briefing" || appSettings.features.briefing) && (t.id !== "review" || appSettings.features.weeklyReview));
+  // A tab switched off in Settings (e.g. ?view=briefing with the briefing off) falls back to the calendar.
+  const cur: View = tabs.some((t) => t.id === view) ? view : "calendar";
   const tabButton = (t: (typeof tabs)[number], vertical: boolean) => {
     const Icon = t.icon;
     const active = view === t.id;
@@ -121,7 +137,7 @@ function App() {
       className={`w-full overflow-x-clip bg-slate-950 text-slate-100 flex flex-col md:flex-row pb-[calc(58px+env(safe-area-inset-bottom))] md:pb-0 ${
         // Calendar: fixed to the screen so only the hour grid scrolls and the
         // tabs, header, day names and all-day row stay frozen.
-        view === "calendar" ? "h-[100dvh] overflow-y-hidden" : "min-h-screen"
+        cur === "calendar" ? "h-[100dvh] overflow-y-hidden" : "min-h-screen"
       }`}
     >
       {/* Tabs — a block on the left on wider screens (frees the top for the calendar) */}
@@ -138,29 +154,44 @@ function App() {
           </p>
         )}
         <div id="sidebar-slot" className="flex-1 min-h-0 overflow-y-auto px-3 pb-3 empty:hidden" />
+        <div className="mt-auto p-3 pt-0">
+          <button
+            onClick={() => setShowSettings(true)}
+            className="w-full flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+          >
+            <SettingsIcon className="w-4 h-4" />
+            Settings
+          </button>
+        </div>
       </aside>
 
       {/* Tabs — a bottom tab bar on phones, like an iPhone app */}
       <nav
-        className="md:hidden fixed bottom-0 inset-x-0 z-40 border-t border-slate-800 bg-slate-900/95 backdrop-blur-md grid grid-cols-5 px-1 pt-1"
-        style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 4px)" }}
+        className="md:hidden fixed bottom-0 inset-x-0 z-40 border-t border-slate-800 bg-slate-900/95 backdrop-blur-md grid px-1 pt-1"
+        style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 4px)", gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}
         aria-label="Sections"
       >
         {tabs.map(bottomTab)}
       </nav>
 
       <div className="flex-1 min-w-0 min-h-0 flex flex-col">
-      {view === "calendar" ? (
+      {dbBehind && (
+        <p className="m-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          This copy’s database is missing an update this version of the app needs (database layout {SCHEMA_VERSION}). Some features may not work until it’s applied.
+        </p>
+      )}
+      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+      {cur === "calendar" ? (
         <CalendarView
           weekStart={weekStart}
           setWeekStart={setWeekStart}
           onOpenBriefing={() => setView("briefing")}
         />
-      ) : view === "tasks" ? (
+      ) : cur === "tasks" ? (
         <TasksView weekStart={weekStart} />
-      ) : view === "briefing" ? (
+      ) : cur === "briefing" ? (
         <BriefingView onOpenReview={() => setView("review")} />
-      ) : view === "review" ? (
+      ) : cur === "review" ? (
         <WeeklyReview onOpenGoals={() => setView("goals")} />
       ) : (
         <GoalsView />
