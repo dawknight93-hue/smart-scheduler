@@ -11,6 +11,22 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
+// ---- Who this copy is for (app_settings). With no saved settings: the original owner.
+const ORIGINAL_ABOUT = "an airline First Officer based in MIA with a family and a military reserve career; energy is highest in the morning, lower in the afternoon, lowest after 20:30";
+const BUILT_IN_ROLES: Record<string, string> = { spiritual: "Spiritual", family: "Family", physical: "Physical", civ_career: "Civ Career", mil_career: "Mil Career", mental: "Mental", financial: "Financial" };
+async function loadWho(): Promise<{ name: string; about: string; roles: string[] }> {
+  const { data } = await supabase.from("app_settings").select("settings").eq("id", 1).maybeSingle();
+  const s = (data?.settings ?? {}) as { displayName?: string; aboutMe?: string; roleLabels?: Record<string, string>; roleOrder?: string[] };
+  const labels = { ...BUILT_IN_ROLES, ...(s.roleLabels ?? {}) };
+  const order = s.roleOrder?.length ? s.roleOrder : Object.keys(BUILT_IN_ROLES);
+  return {
+    name: s.displayName?.trim() || "Oshane",
+    about: s.aboutMe !== undefined ? s.aboutMe.trim() : ORIGINAL_ABOUT,
+    roles: order.map((k) => labels[k] ?? k),
+  };
+}
+
+
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const EXTRACTION_MODEL = "openai/gpt-oss-120b";
 
@@ -641,14 +657,15 @@ async function handleMeasures(goalId: string, calendars: { id: string; name: str
     .eq("status", "active");
 
   const today = new Date().toISOString().slice(0, 10);
+  const who = await loadWho();
   const system =
-    "You design how progress on one personal goal is measured, for a planner app. Today is " + today + ". The user is Oshane, an airline First Officer based in MIA with a family and a military reserve career; his energy is highest in the morning, lower in the afternoon, lowest after 20:30. " +
+    "You design how progress on one personal goal is measured, for a planner app. Today is " + today + ". The user is " + who.name + (who.about ? ", " + who.about : "") + ". " +
     "Propose 2 to 4 measures that together show whether the goal is working, choosing from two kinds. " +
-    "EFFORT measures are things he does on a rhythm that are fully under his control; most are weekly, but give period 'day', 'month', 'quarter' or 'year' when that's the natural rhythm (e.g. one date night a month -> period 'month', sessions_per_week 1; a yearly physical -> period 'year'), in which case sessions_per_week holds the count per that period. Examples: sessions of a habit, blocks of time for a kind of work, a short recurring check. Express time budgets as sessions: pick a session length that suits the work — 45 to 90 minutes for focused work, 10 to 20 minutes for quick recurring checks — and give hours_per_week when the natural target is a time budget (for example 4 hours a week becomes 3 sessions of 80 minutes). " +
-    "Use plan_mode 'count' only when the chosen approach is an app or service that already puts each session on one of his calendars by itself (then set count_calendar_id to that calendar's id and an optional count_keyword found in those event titles); otherwise use 'schedule'. Pick context (desk, home, phone, errand, other), preferred_time (any, morning, afternoon, evening) and effort (focus = needs his sharpest hours, routine = needs attention, light = quick and easy). " +
-    "OUTCOME measures are numbers he can check objectively in under a minute (a scale reading, a count of open items, a score, a balance, minutes on a timed test). Give unit, direction ('down' if lower is better, 'up' if higher is better), baseline (only if the goal text states the current value, else null), target, log_every ('weekly' for most, 'daily' or 'monthly' when that fits better) and log_weekday (0 = Sunday … 6 = Saturday) for weekly logs, and checkpoints as dated numeric targets on the way — reuse the goal's existing milestones when they contain numbers, never in the past, the last one being the goal's target on its deadline. " +
-    "If his coach chat settled specific weekdays for an effort (e.g. email review on Tuesdays and Thursdays, focus blocks Monday and Friday), set days to those weekdays as numbers (0 = Sunday, 1 = Monday … 6 = Saturday) and match sessions_per_week to them; set preferred_time from any time of day agreed there. Leave days null when no days were agreed. " +
-    "Only propose an outcome measure when it can be measured objectively; never invent a number he couldn't read off something. Don't repeat a measure he already has. Each measure gets a short name (1 to 3 words) and a one-sentence 'why' in plain words. " +
+    "EFFORT measures are things they do on a rhythm that are fully under their control; most are weekly, but give period 'day', 'month', 'quarter' or 'year' when that's the natural rhythm (e.g. one date night a month -> period 'month', sessions_per_week 1; a yearly physical -> period 'year'), in which case sessions_per_week holds the count per that period. Examples: sessions of a habit, blocks of time for a kind of work, a short recurring check. Express time budgets as sessions: pick a session length that suits the work — 45 to 90 minutes for focused work, 10 to 20 minutes for quick recurring checks — and give hours_per_week when the natural target is a time budget (for example 4 hours a week becomes 3 sessions of 80 minutes). " +
+    "Use plan_mode 'count' only when the chosen approach is an app or service that already puts each session on one of their calendars by itself (then set count_calendar_id to that calendar's id and an optional count_keyword found in those event titles); otherwise use 'schedule'. Pick context (desk, home, phone, errand, other), preferred_time (any, morning, afternoon, evening) and effort (focus = needs their sharpest hours, routine = needs attention, light = quick and easy). " +
+    "OUTCOME measures are numbers they can check objectively in under a minute (a scale reading, a count of open items, a score, a balance, minutes on a timed test). Give unit, direction ('down' if lower is better, 'up' if higher is better), baseline (only if the goal text states the current value, else null), target, log_every ('weekly' for most, 'daily' or 'monthly' when that fits better) and log_weekday (0 = Sunday … 6 = Saturday) for weekly logs, and checkpoints as dated numeric targets on the way — reuse the goal's existing milestones when they contain numbers, never in the past, the last one being the goal's target on its deadline. " +
+    "If their coach chat settled specific weekdays for an effort (e.g. email review on Tuesdays and Thursdays, focus blocks Monday and Friday), set days to those weekdays as numbers (0 = Sunday, 1 = Monday … 6 = Saturday) and match sessions_per_week to them; set preferred_time from any time of day agreed there. Leave days null when no days were agreed. " +
+    "Only propose an outcome measure when it can be measured objectively; never invent a number they couldn't read off something. Don't repeat a measure they already have. Each measure gets a short name (1 to 3 words) and a one-sentence 'why' in plain words. " +
     "Respond with one JSON object only: {\"measures\": [{\"kind\": \"effort\"|\"outcome\", \"label\": string, \"why\": string, " +
     "\"plan_mode\": \"schedule\"|\"count\"|null, \"period\": \"day\"|\"week\"|\"month\"|\"quarter\"|\"year\"|null, \"days\": [integer]|null, \"sessions_per_week\": integer|null, \"session_minutes\": integer|null, \"hours_per_week\": number|null, \"context\": string|null, \"preferred_time\": string|null, \"effort\": string|null, \"count_calendar_id\": string|null, \"count_keyword\": string|null, " +
     "\"unit\": string|null, \"direction\": \"down\"|\"up\"|null, \"baseline\": number|null, \"target\": number|null, \"log_every\": string|null, \"log_weekday\": integer|null, \"checkpoints\": [{\"due\": \"YYYY-MM-DD\", \"target\": number}]}]}.";
@@ -657,13 +674,13 @@ async function handleMeasures(goalId: string, calendars: { id: string; name: str
     `Time-bound: ${goal.time_bound ?? "n/a"}\nDeadline: ${goal.deadline ? String(goal.deadline).slice(0, 10) : "not set"}\nChosen approach: ${goal.approach ?? "n/a"}\n` +
     `Committed cadence: ${goal.cadence_label ?? (goal.cadence_sessions_per_week ? goal.cadence_sessions_per_week + "x/week" : "none")}\n` +
     `Milestones: ${((goal.milestones ?? []) as Milestone[]).map((m) => `${m.due} ${m.title}${m.metric ? ` (${m.metric})` : ""}`).join("; ") || "none"}\n` +
-    `Measures he already has: ${((existing ?? []) as any[]).map((m) => `${m.kind} "${m.label}"${m.sessions_per_week ? ` ${m.sessions_per_week}/${m.period ?? "week"}` : ""}${m.unit ? ` in ${m.unit}` : ""}`).join("; ") || "none"}\n` +
-    `His calendars: ${calendars.map((c) => `${c.name} (id ${c.id})`).join("; ") || "none"}`;
+    `Measures they already have: ${((existing ?? []) as any[]).map((m) => `${m.kind} "${m.label}"${m.sessions_per_week ? ` ${m.sessions_per_week}/${m.period ?? "week"}` : ""}${m.unit ? ` in ${m.unit}` : ""}`).join("; ") || "none"}\n` +
+    `Their calendars: ${calendars.map((c) => `${c.name} (id ${c.id})`).join("; ") || "none"}`;
   // What he agreed with the coach (days, times, lengths) — the latest part of the chat.
   const chat = (await fetchAllMessages(goalId))
     .filter((m) => m.stage === "research")
     .slice(-12)
-    .map((m) => `${m.role === "user" ? "Oshane" : "Coach"}: ${m.content.replace(/\n+/g, " ").slice(0, 600)}`)
+    .map((m) => `${m.role === "user" ? who.name : "Coach"}: ${m.content.replace(/\n+/g, " ").slice(0, 600)}`)
     .join("\n");
   const userWithChat = chat ? `${user}\n\nLatest coach chat (for agreed days, times and session lengths):\n${chat}` : user;
 
