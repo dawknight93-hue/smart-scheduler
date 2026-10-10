@@ -95,7 +95,10 @@ async function resolvePillarForNewEvent(title: string): Promise<LifePillar | nul
 
 
 interface SyncRequest {
-  action: "oauth-exchange" | "pull" | "push" | "mirror" | "status" | "disconnect" | "delete" | "update-source-event" | "background-pull";
+  action: "oauth-exchange" | "pull" | "push" | "mirror" | "status" | "disconnect" | "delete" | "update-source-event" | "background-pull" | "list-calendars" | "create-calendar";
+  /** create-calendar: the new calendar's name and time zone. */
+  calendarName?: string;
+  timeZone?: string;
   code?: string;
   weekStart?: string;
   rangeDays?: number;
@@ -415,6 +418,30 @@ async function mirrorEvents(connections: MirrorConnection[], items: MirrorItem[]
     eventsPushed: created + updated,
     calendars: { personal: personalCal.name, tasks: tasksCal.name, habits: habitsCal.name },
   };
+}
+
+/** The connected account's calendars, for first-time setup. */
+async function listGoogleCalendars() {
+  const token = await getValidAccessToken();
+  const resp = await googleJson("https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=250", token);
+  if (!resp.ok) throw new Error(`Could not list calendars (${resp.status}): ${await resp.text()}`);
+  const data = await resp.json();
+  const calendars = ((data.items ?? []) as { id: string; summary?: string; summaryOverride?: string; accessRole?: string; primary?: boolean }[])
+    .filter((c) => c.id)
+    .map((c) => ({ id: c.id, name: c.summaryOverride ?? c.summary ?? c.id, accessRole: c.accessRole ?? "reader", primary: !!c.primary }));
+  return { calendars };
+}
+
+/** A new calendar in the connected account (e.g. "My Planner" for the app's plan). */
+async function createGoogleCalendar(name: string, timeZone: string) {
+  const token = await getValidAccessToken();
+  const resp = await googleJson("https://www.googleapis.com/calendar/v3/calendars", token, {
+    method: "POST",
+    body: JSON.stringify({ summary: name, timeZone }),
+  });
+  if (!resp.ok) throw new Error(`Could not create the calendar (${resp.status}): ${await resp.text()}`);
+  const cal = await resp.json();
+  return { calendar: { id: cal.id as string, name: (cal.summary as string) ?? name } };
 }
 
 async function exchangeCodeForTokens(code: string) {
@@ -940,7 +967,7 @@ async function getSyncStatus() {
     .order("created_at");
 
   return {
-    functionVersion: "2026-10-08-freebusy",
+    functionVersion: "2026-10-10-setup",
     connected: !!tokenRow,
     email: tokenRow?.email ?? null,
     recentRuns: recentRuns ?? [],
@@ -1080,6 +1107,17 @@ Deno.serve(async (req: Request) => {
 
       case "status": {
         result = await getSyncStatus();
+        break;
+      }
+
+      case "list-calendars": {
+        result = await listGoogleCalendars();
+        break;
+      }
+
+      case "create-calendar": {
+        if (!body.calendarName) throw new Error("A calendar name is required.");
+        result = await createGoogleCalendar(body.calendarName, body.timeZone ?? "America/New_York");
         break;
       }
 
