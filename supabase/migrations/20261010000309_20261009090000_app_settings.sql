@@ -8,4 +8,5 @@ ALTER TABLE app_settings ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "anon_all_app_settings" ON app_settings;
 CREATE POLICY "anon_all_app_settings" ON app_settings FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
 
-INSERT INTO app_settings (id, settings) VALUES (1, '{"setupDone": true}'::jsonb) ON CONFLICT (id) DO NOTHING;
+-- No starting row: a brand-new copy opens on first-time setup. (The original copy's row
+-- was added when this table was first created there.)
