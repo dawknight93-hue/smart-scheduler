@@ -510,6 +510,16 @@ export function MobileCalendar(props: Props) {
               <Monitor className="w-5 h-5" />
               Use desktop layout
             </button>
+            <button
+              onClick={() => {
+                setDrawer(false);
+                window.dispatchEvent(new Event("open-settings"));
+              }}
+              className="flex items-center gap-3.5 h-11 px-3.5 rounded-full text-[15px] text-slate-300 active:bg-slate-800"
+            >
+              <Settings className="w-5 h-5" />
+              Settings
+            </button>
           </nav>
         </div>
       )}

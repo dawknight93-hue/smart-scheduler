@@ -31,6 +31,7 @@ interface WeeklyBlock {
 interface Draft {
   step: number;
   name: string;
+  about: string;
   tz: string;
   calRoles: Record<string, CalChoice>;
   planCal: string; // a calendar id, or NEW_CAL
@@ -109,6 +110,7 @@ function freshDraft(): Draft {
   return {
     step: 0,
     name: appSettings.displayName,
+    about: "",
     tz: ZONES.some(([z]) => z === deviceZone) ? deviceZone : "America/New_York",
     calRoles: {},
     planCal: NEW_CAL,
@@ -228,6 +230,15 @@ export function SetupWizard({ preview, onClose }: { preview: boolean; onClose: (
             {!ZONES.some(([z]) => z === deviceZone) && <option value={deviceZone}>{zoneLabel(deviceZone)} ({deviceZone})</option>}
           </select>
           <p className={hint}>Everything is planned in this zone, even when your phone is somewhere else.</p>
+          <label className={q}>Anything the goal coach should know about you? (optional)</label>
+          <textarea
+            className={`${field} w-full`}
+            rows={2}
+            placeholder="e.g. nurse on 12-hour shifts, two kids, best energy in the morning"
+            value={d.about}
+            onChange={(e) => set({ about: e.target.value })}
+          />
+          <p className={hint}>Your goal coach and morning briefing write with this in mind.</p>
         </>
       ),
       ok: () => (d.name.trim() ? null : "Add your name"),
@@ -435,7 +446,7 @@ export function SetupWizard({ preview, onClose }: { preview: boolean; onClose: (
           <label className={q}>Quiet hours</label>
           <div className="flex items-center gap-2">
             <select className={field} value={d.quietStart} onChange={(e) => set({ quietStart: Number(e.target.value) })}>
-              {Array.from({ length: 6 }, (_, i) => 19 + i).map((h) => (
+              {Array.from({ length: 5 }, (_, i) => 19 + i).map((h) => (
                 <option key={h} value={h}>
                   {hourText(h % 24)}
                 </option>
@@ -589,6 +600,7 @@ export function SetupWizard({ preview, onClose }: { preview: boolean; onClose: (
       await saveAppSettings({
         setupDone: true,
         displayName: d.name.trim(),
+        aboutMe: d.about.trim(),
         homeTimeZone: d.tz,
         homeTimeLabel: zoneLabel(d.tz),
         quietStartHour: d.quietStart % 24,
