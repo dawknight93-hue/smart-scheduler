@@ -61,7 +61,7 @@ import type {
 } from "@/lib/types";
 import { CONTEXT_COLORS, TIER_LABELS, PILLARS, PILLAR_LABELS, PILLAR_COLORS, getPillarColor } from "@/lib/types";
 import { AddItemModal, type EditTarget } from "@/components/AddItemModal";
-import { CalendarConnectionsPanel } from "@/components/CalendarConnectionsPanel";
+import { CalendarConnectionsPanel, CALENDARS_CHANGED_EVENT } from "@/components/CalendarConnectionsPanel";
 import { getSyncStatus, pullFromGoogle, mirrorToGoogle, deleteFromGoogle, scheduleAutoPush, updateGoogleSourceEvent } from "@/lib/gcalSync";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, formatRecurrenceSummary } from "@/lib/recurrence";
 import { PLAN_GOAL_COLUMNS, type PlanGoal } from "@/lib/goalPlanning";
@@ -613,6 +613,19 @@ export function CalendarView({
       document.removeEventListener("visibilitychange", maybeSync);
       window.removeEventListener("pageshow", maybeSync);
     };
+  }, []);
+
+  // Calendar choices changed in settings: sync with the new setup right away.
+  useEffect(() => {
+    const onChanged = () => {
+      void (async () => {
+        await syncRef.current();
+        const status = await getSyncStatus();
+        if (status) setCalendarConnections((status.connections ?? []) as CalendarConnection[]);
+      })();
+    };
+    window.addEventListener(CALENDARS_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(CALENDARS_CHANGED_EVENT, onChanged);
   }, []);
 
   useEffect(() => {
