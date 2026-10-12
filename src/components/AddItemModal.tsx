@@ -314,7 +314,7 @@ export function AddItemModal({
           end_time: endIso,
           is_all_day: evAllDay,
           pillar: evPillar,
-          ...(evAllDay ? { recurrence_enabled: false } : buildRecurrencePayload()),
+          ...buildRecurrencePayload(),
         };
         if (editTarget?.kind === "Fixed Event") {
           // An event pulled from Google is changed in Google first, so the next
@@ -522,7 +522,6 @@ export function AddItemModal({
               <Field label="Pillar">
                 <PillarPicker value={evPillar} onChange={setEvPillar} />
               </Field>
-              {!evAllDay && (
               <RecurrenceSection
                   enabled={recEnabled}
                   onToggle={() => setRecEnabled(!recEnabled)}
@@ -547,7 +546,6 @@ export function AddItemModal({
                   count={recCount}
                   onCount={setRecCount}
                 />
-              )}
             </>
           )}
 

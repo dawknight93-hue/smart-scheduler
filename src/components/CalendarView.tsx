@@ -63,7 +63,7 @@ import { CONTEXT_COLORS, TIER_LABELS, PILLARS, PILLAR_LABELS, PILLAR_COLORS, get
 import { AddItemModal, type EditTarget } from "@/components/AddItemModal";
 import { CalendarConnectionsPanel, CALENDARS_CHANGED_EVENT } from "@/components/CalendarConnectionsPanel";
 import { getSyncStatus, pullFromGoogle, mirrorToGoogle, deleteFromGoogle, scheduleAutoPush, updateGoogleSourceEvent } from "@/lib/gcalSync";
-import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, formatRecurrenceSummary } from "@/lib/recurrence";
+import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, formatRecurrenceSummary, utcDateAsLocal } from "@/lib/recurrence";
 import { PLAN_GOAL_COLUMNS, type PlanGoal } from "@/lib/goalPlanning";
 import { effortGoals, loadMeasures } from "@/lib/measures";
 import { setCountedDone } from "@/lib/goalDaily";
@@ -660,7 +660,9 @@ export function CalendarView({
     // Expand recurring Fixed Events into individual occurrences
     for (const fe of recurringFixedEvents) {
       const rule = parseRecurrenceFromItem(fe);
-      const startDate = new Date(fe.start_time);
+      // All-day events are stored at UTC midnight of their date: repeat on that calendar date.
+      const allDay = !!fe.is_all_day;
+      const startDate = allDay ? utcDateAsLocal(fe.start_time) : new Date(fe.start_time);
       const occDates = expandRecurrence(rule, startDate, rangeStart, rangeEnd);
       for (const occDate of occDates) {
         const dateStr = formatLocalDate(occDate);
@@ -674,6 +676,9 @@ export function CalendarView({
         if (existing?.override_start && existing?.override_end) {
           itemStart = new Date(existing.override_start);
           itemEnd = new Date(existing.override_end);
+        } else if (allDay) {
+          itemStart = new Date(`${dateStr}T00:00:00.000Z`);
+          itemEnd = new Date(itemStart.getTime() + Math.max(durationMs, 86400000));
         } else {
           itemStart = new Date(occDate);
           itemStart.setHours(feStart.getHours(), feStart.getMinutes(), 0, 0);
@@ -698,7 +703,7 @@ export function CalendarView({
           pillar: fe.pillar ?? null,
           room: 0,
           isBatch: false,
-          isAllDay: false,
+          isAllDay: allDay,
           isRecurringOccurrence: true,
           recurringItemId: fe.id,
           recurringItemKind: "Fixed Event",
