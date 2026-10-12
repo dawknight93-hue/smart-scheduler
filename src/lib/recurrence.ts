@@ -50,6 +50,12 @@ export function parseRecurrenceFromTask(task: Task): RecurrenceRule {
   return parseRecurrenceFromItem(task);
 }
 
+/** An all-day event's date (stored as UTC midnight) as a local calendar date, for repeating it. */
+export function utcDateAsLocal(iso: string): Date {
+  const d = new Date(iso);
+  return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
 export function formatLocalDate(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }

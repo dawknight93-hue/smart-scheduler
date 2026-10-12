@@ -5,7 +5,7 @@
 import type { FixedEvent, Habit, Task, LifePillar, PlacedItem } from "./types";
 import { supabase } from "./supabase";
 import { runEngine, getWeekStart, addDays, HOME_TIME_ZONE, homeWallParts, homeDate, enrouteAsBusy, getReadyBlocks, hotelCommuteBlocks, HOME_BASE } from "./schedulingEngine";
-import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, type RecurrenceRule } from "./recurrence";
+import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, utcDateAsLocal, type RecurrenceRule } from "./recurrence";
 
 export const MIRROR_WEEKS = 6;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -244,7 +244,9 @@ function fixedOccurrencesInRange(
   const out: FixedEvent[] = [];
   for (const fe of recurring) {
     const rule = homeRule(parseRecurrenceFromItem(fe));
-    const feStart = toHomeCalendar(new Date(fe.start_time));
+    // All-day events are stored at UTC midnight of their date: repeat on that calendar date.
+    const allDay = !!fe.is_all_day;
+    const feStart = allDay ? utcDateAsLocal(fe.start_time) : toHomeCalendar(new Date(fe.start_time));
     const durationMs = new Date(fe.end_time).getTime() - new Date(fe.start_time).getTime();
     for (const occ of expandRecurrence(rule, feStart, rangeStart, rangeEnd)) {
       const dateStr = formatLocalDate(occ);
@@ -255,6 +257,9 @@ function fixedOccurrencesInRange(
       if (ex?.override_start && ex?.override_end) {
         s = new Date(ex.override_start);
         e = new Date(ex.override_end);
+      } else if (allDay) {
+        s = new Date(`${dateStr}T00:00:00.000Z`);
+        e = new Date(s.getTime() + Math.max(durationMs, DAY_MS));
       } else {
         s = homeInstant(occ, feStart.getHours(), feStart.getMinutes());
         e = new Date(s.getTime() + durationMs);
@@ -329,7 +334,8 @@ export async function buildMirrorItems(
         kind: "Fixed Event",
         pillar: fe.pillar,
         source: fe,
-        anchor: start,
+        // An all-day event's stored UTC midnight is the evening before at home: anchor at midday on its date.
+        anchor: fe.is_all_day ? (() => { const d = utcDateAsLocal(fe.start_time); return homeDate(d.getFullYear(), d.getMonth(), d.getDate(), 12, 0); })() : start,
         durationMs: end.getTime() - start.getTime(),
         allDay,
         occurrences: feOcc.get(fe.id) ?? [],

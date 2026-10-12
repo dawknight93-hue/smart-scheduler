@@ -5,7 +5,7 @@
  */
 import { supabase } from "./supabase";
 import { runEngine, addDays, getWeekStart, enrouteAsBusy } from "./schedulingEngine";
-import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate } from "./recurrence";
+import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, utcDateAsLocal } from "./recurrence";
 import { DEFAULT_ROUTINES, PLAN_DAY_END, PLAN_DAY_START, routineForDay, sessionWindows, type DayRoutine } from "./dayRoutines";
 import type { ContextTag, FixedEvent, Habit, LifePillar, Task } from "./types";
 import { loadDailyItems, writeDailyPlan, type DailySession } from "./goalDaily";
@@ -148,7 +148,7 @@ export interface KeptDone {
   focus: string;
 }
 
-function occurrenceEvents<T extends { id: string; name: string; pillar?: LifePillar | null; blocks_schedule?: boolean }>(
+function occurrenceEvents<T extends { id: string; name: string; pillar?: LifePillar | null; blocks_schedule?: boolean; is_all_day?: boolean }>(
   items: T[],
   occ: OccRow[],
   idKey: "item_id" | "task_id",
@@ -159,15 +159,22 @@ function occurrenceEvents<T extends { id: string; name: string; pillar?: LifePil
   const byKey = new Map(occ.map((o) => [`${o[idKey]}|${o.occurrence_date}`, o]));
   const out: FixedEvent[] = [];
   for (const it of items) {
-    const { start, minutes } = timing(it);
+    const { start: rawStart, minutes } = timing(it);
+    // All-day events are stored at UTC midnight of their date: repeat on that calendar date.
+    const allDay = !!it.is_all_day;
+    const start = allDay ? utcDateAsLocal(rawStart.toISOString()) : rawStart;
     const rule = parseRecurrenceFromItem(it as never);
     for (const day of expandRecurrence(rule, start, weekStart, weekEnd)) {
       const date = formatLocalDate(day);
       const ex = byKey.get(`${it.id}|${date}`);
       if (ex?.skipped) continue;
-      const s = ex?.override_start ? new Date(ex.override_start) : new Date(day.getFullYear(), day.getMonth(), day.getDate(), start.getHours(), start.getMinutes());
-      const e = ex?.override_end ? new Date(ex.override_end) : new Date(s.getTime() + minutes * 60000);
-      out.push({ id: `${it.id}--${date}`, name: it.name, start_time: s.toISOString(), end_time: e.toISOString(), pillar: it.pillar ?? null, blocks_schedule: it.blocks_schedule });
+      const s = ex?.override_start
+        ? new Date(ex.override_start)
+        : allDay
+          ? new Date(`${date}T00:00:00.000Z`)
+          : new Date(day.getFullYear(), day.getMonth(), day.getDate(), start.getHours(), start.getMinutes());
+      const e = ex?.override_end ? new Date(ex.override_end) : new Date(s.getTime() + (allDay ? Math.max(minutes, 1440) : minutes) * 60000);
+      out.push({ id: `${it.id}--${date}`, name: it.name, start_time: s.toISOString(), end_time: e.toISOString(), pillar: it.pillar ?? null, blocks_schedule: it.blocks_schedule, ...(allDay ? { is_all_day: true } : {}) });
     }
   }
   return out;
@@ -176,7 +183,8 @@ function occurrenceEvents<T extends { id: string; name: string; pillar?: LifePil
 export async function loadWeekData(weekStart: Date): Promise<WeekData> {
   const weekEnd = addDays(weekStart, 7);
   const [fe, hb, tk, mp, feo, ho, to, eb, kd] = await Promise.all([
-    supabase.from("fixed_events").select("*").lt("start_time", weekEnd.toISOString()).gte("end_time", addDays(weekStart, -60).toISOString()),
+    // Repeating events count from their first date, however long ago that was.
+    supabase.from("fixed_events").select("*").lt("start_time", weekEnd.toISOString()).or(`recurrence_enabled.eq.true,end_time.gte.${addDays(weekStart, -60).toISOString()}`),
     supabase.from("habits").select("*"),
     supabase.from("tasks").select("*"),
     supabase.from("gcal_event_map").select("item_id, item_name, calendar_id, calendar_role, start_time"),
