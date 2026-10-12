@@ -114,6 +114,8 @@ export interface GoogleCalendarInfo {
   /** owner / writer / reader / freeBusyReader */
   accessRole: string;
   primary: boolean;
+  /** Google's colour for the calendar, when given. */
+  color?: string | null;
 }
 
 /** The connected Google account's calendars (first-time setup). */
