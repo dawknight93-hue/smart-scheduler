@@ -211,6 +211,16 @@ async function googleJson(url: string, accessToken: string, init: RequestInit = 
   });
 }
 
+/** Google's reply when the sign-in didn't include calendar access (a box left unticked on its consent screen). */
+const NO_CALENDAR_ACCESS =
+  "Google didn't give this app access to your calendars. Open Settings → Calendars, press Reconnect, and tick the calendar box on Google's screen.";
+function googleFailure(prefix: string, status: number, text: string): Error {
+  if (status === 403 && /ACCESS_TOKEN_SCOPE_INSUFFICIENT|insufficient authentication scopes/i.test(text)) {
+    return new Error(NO_CALENDAR_ACCESS);
+  }
+  return new Error(`${prefix} (${status}): ${text}`);
+}
+
 async function listMirrorEvents(accessToken: string, calendarId: string): Promise<GoogleEvent[]> {
   const out: GoogleEvent[] = [];
   let pageToken: string | undefined;
@@ -223,7 +233,7 @@ async function listMirrorEvents(accessToken: string, calendarId: string): Promis
     if (pageToken) url.searchParams.set("pageToken", pageToken);
     const resp = await googleJson(url.toString(), accessToken);
     if (!resp.ok) {
-      throw new Error(`Failed to list Smart Scheduler events on ${calendarId} (${resp.status}): ${await resp.text()}`);
+      throw googleFailure(`Failed to list Smart Scheduler events on ${calendarId}`, resp.status, await resp.text());
     }
     const data = await resp.json();
     out.push(...((data.items ?? []) as GoogleEvent[]));
@@ -320,8 +330,8 @@ async function mirrorEvents(connections: MirrorConnection[], items: MirrorItem[]
   }
   const tasksCal = targets.find((c) => /task/i.test(c.name)) ?? targets[0];
   const habitsCal = targets.find((c) => /habit/i.test(c.name)) ?? targets[0];
-  const personalCal =
-    enabled.find((c) => c.role !== "schedule_target" && /personal|family/i.test(c.name)) ?? tasksCal;
+  // Only calendars you chose to write to: a read-only "Family" calendar is never written to.
+  const personalCal = targets.find((c) => /personal|family/i.test(c.name)) ?? tasksCal;
   const calFor = (t: MirrorItem["target"]) => (t === "personal" ? personalCal : t === "habits" ? habitsCal : tasksCal);
   const windowStartDt = new Date(windowStart);
   const errors: string[] = [];
@@ -430,11 +440,11 @@ async function mirrorEvents(connections: MirrorConnection[], items: MirrorItem[]
 async function listGoogleCalendars() {
   const token = await getValidAccessToken();
   const resp = await googleJson("https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=250", token);
-  if (!resp.ok) throw new Error(`Could not list calendars (${resp.status}): ${await resp.text()}`);
+  if (!resp.ok) throw googleFailure("Could not list calendars", resp.status, await resp.text());
   const data = await resp.json();
-  const calendars = ((data.items ?? []) as { id: string; summary?: string; summaryOverride?: string; accessRole?: string; primary?: boolean }[])
+  const calendars = ((data.items ?? []) as { id: string; summary?: string; summaryOverride?: string; accessRole?: string; primary?: boolean; backgroundColor?: string }[])
     .filter((c) => c.id)
-    .map((c) => ({ id: c.id, name: c.summaryOverride ?? c.summary ?? c.id, accessRole: c.accessRole ?? "reader", primary: !!c.primary }));
+    .map((c) => ({ id: c.id, name: c.summaryOverride ?? c.summary ?? c.id, accessRole: c.accessRole ?? "reader", primary: !!c.primary, color: c.backgroundColor ?? null }));
   return { calendars };
 }
 
@@ -580,7 +590,13 @@ async function pullEvents(
   const fullyListed = new Set<string>();
 
   for (const conn of sourceConnections) {
-    const ownIds = new Set((await listMirrorEvents(accessToken, conn.calendar_id)).map((e) => e.id));
+    // The app's own planned events (only on calendars it writes to). A calendar Google won't
+    // search this way (e.g. one subscribed by link) simply has none.
+    const own = await listMirrorEvents(accessToken, conn.calendar_id).catch((e: Error) => {
+      if (e.message === NO_CALENDAR_ACCESS) throw e;
+      return [] as GoogleEvent[];
+    });
+    const ownIds = new Set(own.map((e) => e.id));
     const url = new URL(GOOGLE_EVENTS_URL(conn.calendar_id));
     url.searchParams.set("timeMin", weekStartDt.toISOString());
     url.searchParams.set("timeMax", weekEndDt.toISOString());
@@ -594,7 +610,7 @@ async function pullEvents(
 
     if (!resp.ok) {
       const errText = await resp.text();
-      throw new Error(`Failed to read calendar ${conn.calendar_id} (${resp.status}): ${errText}`);
+      throw googleFailure(`Failed to read calendar ${conn.calendar_id}`, resp.status, errText);
     }
 
     const data = await resp.json();
@@ -973,7 +989,7 @@ async function getSyncStatus() {
     .order("created_at");
 
   return {
-    functionVersion: "2026-10-10-settings",
+    functionVersion: "2026-10-12-calendars",
     connected: !!tokenRow,
     email: tokenRow?.email ?? null,
     recentRuns: recentRuns ?? [],
