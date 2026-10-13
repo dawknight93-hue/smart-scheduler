@@ -95,6 +95,8 @@ export interface Task {
   /** True when the effort was guessed, false when you set it. */
   effort_auto?: boolean;
   completed_at: string | null;
+  /** App-only (not stored): keep it out of short-task batches (Plan a day previews). */
+  no_batch?: boolean;
   recurrence_enabled?: boolean;
   recurrence_frequency?: "daily" | "weekly" | "monthly" | null;
   recurrence_interval?: number | null;

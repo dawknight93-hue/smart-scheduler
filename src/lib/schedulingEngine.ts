@@ -447,11 +447,20 @@ function taskEffort(t: Task): { effort: Effort; auto: boolean } {
   return { effort: guessEffort({ name: t.name, context: t.context, durationMin: t.duration_min, pillar: t.pillar }).effort, auto: true };
 }
 
+/**
+ * Pinned: its window is just long enough for it (you dragged it there, or locked
+ * it in with Plan a day). Pinned items keep their time and are placed first.
+ */
+export function isPinnedWindow(start: Date | string, end: Date | string, durationMin: number): boolean {
+  return new Date(end).getTime() - new Date(start).getTime() <= durationMin * 60000 + 60000;
+}
+
 function batchShortTasks(taskList: Task[]): BatchedTask[] {
-  // A task you pinned into quiet hours stays on its own (never batched).
-  const short = taskList.filter((t) => t.duration_min <= SHORT_TASK_MAX && !t.quiet_override);
+  // A task you pinned (to a time, or into quiet hours) stays on its own (never batched).
+  const alone = (t: Task) => !!t.quiet_override || !!t.no_batch || isPinnedWindow(t.search_start, t.deadline, t.duration_min);
+  const short = taskList.filter((t) => t.duration_min <= SHORT_TASK_MAX && !alone(t));
   const normal: BatchedTask[] = taskList
-    .filter((t) => t.duration_min > SHORT_TASK_MAX || t.quiet_override)
+    .filter((t) => t.duration_min > SHORT_TASK_MAX || alone(t))
     .map((t) => ({
       name: t.name,
       tier: t.tier,
@@ -662,7 +671,9 @@ export function runEngine(
     });
   }
 
-  placeables.sort((a, b) => a.tier - b.tier || a.searchEnd.getTime() - b.searchEnd.getTime());
+  // Pinned items first, so a flexible item never takes a time you locked in.
+  const pinnedFirst = (p: Placeable) => (isPinnedWindow(p.searchStart, p.searchEnd, p.durationMin) ? 0 : 1);
+  placeables.sort((a, b) => pinnedFirst(a) - pinnedFirst(b) || a.tier - b.tier || a.searchEnd.getTime() - b.searchEnd.getTime());
 
   const placed: PlacedItem[] = [];
   const unscheduled: UnscheduledItem[] = [];
