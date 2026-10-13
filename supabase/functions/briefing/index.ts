@@ -7,6 +7,8 @@
  *             16 days out) plus the raw TAF / latest METAR from
  *             aviationweather.gov when the stop is close enough for them.
  *   summary — a short written summary of the briefing facts (Groq).
+ *   parse-tasks — turns a messy to-do list for one day into tasks with a
+ *             priority, length, energy, role and any time limits (Plan a day).
  */
 import { AIRPORTS_CSV } from "./airports.ts";
 
@@ -225,6 +227,104 @@ async function handleSummary(kind: string, facts: string, memory: string[], retr
   return { summary: await groqText(system, user), model: "Groq gpt-oss-120b (Claude key not set)" };
 }
 
+// ---- Plan a day: read a messy list ------------------------------------------
+
+type ParsedTask = {
+  name: string;
+  tier: number;
+  duration_min: number;
+  effort: "focus" | "routine" | "light";
+  pillar: string | null;
+  context: "desk" | "home" | "phone" | "errand" | "other";
+  not_before: string | null;
+  due_by: string | null;
+  note: string | null;
+};
+
+const EFFORTS = ["focus", "routine", "light"];
+const CONTEXTS = ["desk", "home", "phone", "errand", "other"];
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function firstJson(text: string): unknown {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) throw new Error("The AI didn't return a task list.");
+  return JSON.parse(text.slice(start, end + 1));
+}
+
+function cleanTasks(raw: unknown, roleKeys: string[]): ParsedTask[] {
+  const list = (raw as { tasks?: unknown[] })?.tasks;
+  if (!Array.isArray(list)) throw new Error("The AI didn't return a task list.");
+  const out: ParsedTask[] = [];
+  for (const r of list.slice(0, 40)) {
+    const t = r as Record<string, unknown>;
+    const name = typeof t.name === "string" ? t.name.trim().slice(0, 120) : "";
+    if (!name) continue;
+    const tier = Math.min(4, Math.max(1, Math.round(Number(t.tier) || 3)));
+    const dur = Math.min(480, Math.max(5, Math.round((Number(t.duration_min) || 30) / 5) * 5));
+    const effort = EFFORTS.includes(String(t.effort)) ? (t.effort as ParsedTask["effort"]) : "routine";
+    const context = CONTEXTS.includes(String(t.context)) ? (t.context as ParsedTask["context"]) : "other";
+    const pillar = typeof t.pillar === "string" && roleKeys.includes(t.pillar) ? t.pillar : null;
+    const nb = typeof t.not_before === "string" && HHMM.test(t.not_before) ? t.not_before : null;
+    const db = typeof t.due_by === "string" && HHMM.test(t.due_by) ? t.due_by : null;
+    const note = typeof t.note === "string" && t.note.trim() ? t.note.trim().slice(0, 140) : null;
+    out.push({ name, tier, duration_min: dur, effort, pillar, context, not_before: nb, due_by: db, note });
+  }
+  return out;
+}
+
+async function handleParseTasks(body: Record<string, unknown>) {
+  const text = String(body.text ?? "").slice(0, 4000);
+  if (!text.trim()) throw new Error("Type a few tasks first.");
+  const day = String(body.day ?? "");
+  const roles = Array.isArray(body.roles)
+    ? (body.roles as { key?: unknown; label?: unknown }[])
+        .filter((r) => typeof r?.key === "string" && typeof r?.label === "string")
+        .slice(0, 7)
+        .map((r) => ({ key: String(r.key), label: String(r.label).slice(0, 40) }))
+    : [];
+  const events = Array.isArray(body.events) ? (body.events as unknown[]).filter((e) => typeof e === "string").slice(0, 40).map((e) => String(e).slice(0, 120)) : [];
+  const about = typeof body.about === "string" ? body.about.slice(0, 400) : "";
+  const quiet = typeof body.quiet === "string" ? body.quiet.slice(0, 20) : "";
+
+  const system =
+    "You turn a person's messy to-do list for one day into structured tasks for their planner. Reply with JSON only, no prose: " +
+    '{"tasks":[{"name":string,"tier":1|2|3|4,"duration_min":number,"effort":"focus"|"routine"|"light","pillar":string|null,"context":"desk"|"home"|"phone"|"errand"|"other","not_before":"HH:MM"|null,"due_by":"HH:MM"|null,"note":string|null}]}. ' +
+    "One task per item they listed, in their order; split a line only if it clearly holds two separate tasks, never invent tasks. " +
+    "name: short and clear, in title-like sentence case, keep their meaning and any names. " +
+    "tier: 1 = critical (urgent, must, today, deadline), 2 = high (important or tied to a commitment), 3 = medium (the default), 4 = low ('if there's time', 'maybe', 'someday'). " +
+    "duration_min: use any length they gave; otherwise a realistic estimate in multiples of 5 (quick call or email 10–15, errand 30–45, focused work 60–90). " +
+    "effort: focus = needs deep concentration (study, writing, planning, bids, analysis); light = easy or mindless (errands, chores, quick messages); routine = everything else. " +
+    "pillar: the key of the best-fitting role from this list, or null if none fits: " + (roles.map((r) => `${r.key} (${r.label})`).join(", ") || "none") + ". " +
+    "context: phone for calls, errand for anything away from home (stores, pickups, appointments out), desk for computer work, home for chores at home, else other. " +
+    "not_before / due_by: 24-hour local times only when the list or their calendar clearly requires it (e.g. prep that must be done before a meeting gets due_by that meeting's start; 'after lunch' gets not_before 13:00; business calls get not_before 09:00 and due_by 17:00). Otherwise null. " +
+    "note: at most 12 words explaining a non-obvious choice (why a priority, a time limit, or a missing due date), else null.";
+  const user =
+    `Day: ${day}` +
+    (about ? `\nAbout them: ${about}` : "") +
+    (quiet ? `\nThey don't schedule anything during quiet hours ${quiet}.` : "") +
+    (events.length ? `\nAlready on their calendar that day:\n${events.map((e) => "- " + e).join("\n")}` : "\nNothing else is on their calendar that day.") +
+    `\n\nTheir list:\n${text}`;
+
+  const key = Deno.env.get("ANTHROPIC_API_KEY");
+  let raw: string;
+  let model: string;
+  if (key) {
+    try {
+      raw = await claudeText(system, user, key);
+      model = "Claude Sonnet 5";
+    } catch (e) {
+      console.error(e);
+      raw = await groqText(system, user);
+      model = "Groq gpt-oss-120b (Claude unavailable)";
+    }
+  } else {
+    raw = await groqText(system, user);
+    model = "Groq gpt-oss-120b";
+  }
+  return { tasks: cleanTasks(firstJson(raw), roles.map((r) => r.key)), model };
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
   try {
@@ -242,6 +342,8 @@ Deno.serve(async (req: Request) => {
         roles: Array.isArray(body.who.roles) ? body.who.roles.filter((r: unknown) => typeof r === "string").slice(0, 7).map((r: string) => r.slice(0, 40)) : undefined,
       } : {};
       result = await handleSummary(String(body.kind ?? "daily"), body.facts, memory, typeof body.retryNote === "string" ? body.retryNote.slice(0, 1500) : null, who);
+    } else if (body.action === "parse-tasks") {
+      result = await handleParseTasks(body);
     } else {
       throw new Error("Unknown action.");
     }
