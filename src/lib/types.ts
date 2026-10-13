@@ -192,6 +192,8 @@ export interface PlacedItem {
   decorClass?: string;
   /** A counted event you ticked done that its own calendar has since removed (kept here as a record). */
   keptDailyId?: string;
+  /** An all-day event being dragged onto a time (it becomes a timed event when dropped). */
+  fromAllDay?: boolean;
 }
 
 /** Why the engine couldn't place an item in the week being scheduled. */

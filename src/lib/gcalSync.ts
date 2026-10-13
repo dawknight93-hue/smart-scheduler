@@ -200,7 +200,9 @@ export async function updateGoogleSourceEvent(
   calendarId: string,
   start: Date | string,
   end: Date | string,
-  allDay = false
+  allDay = false,
+  /** Also set Busy (true) or Free (false) in Google. */
+  busy?: boolean
 ): Promise<SyncResult> {
   return callEdgeFunction({
     action: "update-source-event",
@@ -209,6 +211,7 @@ export async function updateGoogleSourceEvent(
     start: typeof start === "string" ? start : start.toISOString(),
     end: typeof end === "string" ? end : end.toISOString(),
     allDay,
+    ...(busy !== undefined ? { busy } : {}),
   });
 }
 
