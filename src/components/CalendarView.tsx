@@ -1552,6 +1552,23 @@ export function CalendarView({
     };
   }
 
+  /**
+   * Plan a day preview: a proposed task can't sit on a busy event (the planner would drop
+   * it to the "won't fit" list). Returns the event it would run into, if any.
+   */
+  function planClash(item: PlacedItem, start: Date, end: Date): string | null {
+    if (!item.id.startsWith(PLAN_PREFIX)) return null;
+    const hit = placed.find(
+      (p) =>
+        !p.isProposal &&
+        !p.isAllDay &&
+        (p.kind === "Fixed Event" || p.kind === "Enroute") &&
+        !isNonBlocking(p) &&
+        rangesOverlap(start, end, p.start, p.end)
+    );
+    return hit ? hit.name : null;
+  }
+
   /** Same rules the drop enforces, so the preview tells the truth before release. */
   function checkMove(item: PlacedItem, newStart: Date, allow: Allow = {}): { blocked?: string; rule?: OverrideRule; overlaps: string[]; notes: string[] } {
     const newEnd = new Date(newStart.getTime() + (item.end.getTime() - item.start.getTime()));
@@ -1571,6 +1588,8 @@ export function CalendarView({
     if (placed.some((p) => p.kind === "Enroute" && rangesOverlap(newStart, newEnd, p.start, p.end))) {
       return { blocked: "Can't drop on trip drive, get-ready or hotel commute time", overlaps: [], notes: [] };
     }
+    const clash = planClash(item, newStart, newEnd);
+    if (clash) return { blocked: `A planned task can't overlap ${clash}`, overlaps: [], notes: [] };
     const notes: string[] = [];
     if (isRunnaEvent(item)) {
       // Runna only accepts calendar moves within the workout's own (Mon–Sun) plan week,
@@ -1878,6 +1897,8 @@ export function CalendarView({
       if (snapped < minEnd) return hint("15 min minimum");
       if (!resizeState.item.quietOverride && isQuietTime(resizeState.item.start, snapped)) return hint(`can't run into ${QUIET_TEXT}`);
       if (!resizeState.item.utaOverride && isUtaBlocked(resizeState.item.pillar, resizeState.item.context) && overlapsUta(resizeState.item.start, snapped, fixedEvents)) return hint(`${utaBlockLabel(resizeState.item.pillar, resizeState.item.context)} items can't go on UTA days`);
+      const clash = planClash(resizeState.item, resizeState.item.start, snapped);
+      if (clash) return hint(`runs into ${clash}`);
       setResizeState((prev) => (prev ? { ...prev, previewEnd: snapped, hint: undefined } : null));
     };
     const onUp = async () => {
@@ -2134,6 +2155,8 @@ export function CalendarView({
     if (newEnd.getTime() < item.start.getTime() + SLOT_MIN * 60000) return "15 min minimum";
     if (!item.quietOverride && isQuietTime(item.start, newEnd)) return `Can't run into ${QUIET_TEXT}`;
     if (!item.utaOverride && isUtaBlocked(item.pillar, item.context) && overlapsUta(item.start, newEnd, fixedEvents)) return `${utaBlockLabel(item.pillar, item.context)} items can't go on UTA days`;
+    const clash = planClash(item, item.start, newEnd);
+    if (clash) return `Runs into ${clash}`;
     return undefined;
   }
 
