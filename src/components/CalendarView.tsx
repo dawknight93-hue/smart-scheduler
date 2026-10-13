@@ -64,6 +64,7 @@ import { CONTEXT_COLORS, TIER_LABELS, PILLARS, PILLAR_LABELS, PILLAR_COLORS, get
 import { AddItemModal, type EditTarget } from "@/components/AddItemModal";
 import { CalendarConnectionsPanel, CALENDARS_CHANGED_EVENT } from "@/components/CalendarConnectionsPanel";
 import { PlanDayPanel, type PlanSpot } from "@/components/PlanDayPanel";
+import { AllDayTimeDialog } from "@/components/AllDayTimeDialog";
 import { PLAN_PREFIX, PLAN_BUFFER_MIN, clearDraft, emptyDraft, loadDraft, lockInPlan, previewTasks, readListWithAi, saveDraft, todayKey, type PlanDraft } from "@/lib/planDay";
 import { getSyncStatus, pullFromGoogle, mirrorToGoogle, deleteFromGoogle, scheduleAutoPush, updateGoogleSourceEvent } from "@/lib/gcalSync";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, formatRecurrenceSummary, utcDateAsLocal } from "@/lib/recurrence";
@@ -471,6 +472,10 @@ export function CalendarView({
   const [quick, setQuick] = useState<QuickCreateRange | null>(null);
   // Phone: a tray item waiting for you to tap the time it should go.
   const [placing, setPlacing] = useState<PlacedItem | null>(null);
+  // An all-day event dropped on a time, waiting for its end time.
+  const [timeIt, setTimeIt] = useState<{ item: PlacedItem; start: Date } | null>(null);
+  const [timeItSaving, setTimeItSaving] = useState(false);
+  const [timeItError, setTimeItError] = useState<string | null>(null);
   // The grid column the quick box belongs to, so the swept block stays on screen while you type.
   const [quickCol, setQuickCol] = useState<number | null>(null);
   const [selectedItem, setSelectedItem] = useState<PlacedItem | null>(null);
@@ -2048,6 +2053,18 @@ export function CalendarView({
 
   /** Move an item to a new start (drag on desktop, press-and-hold on the phone). */
   async function moveItemTo(item: PlacedItem, targetDate: Date, offerUndo = false, allow: Allow = {}) {
+    if (item.fromAllDay) {
+      // An all-day event dropped on a time: it starts here; ask when it ends.
+      const at = snapToSlot(targetDate);
+      const check = checkMove(item, at, { quiet: true, uta: true });
+      if (check.blocked) {
+        showDragMessage(check.blocked);
+        return;
+      }
+      setTimeItError(null);
+      setTimeIt({ item, start: at });
+      return;
+    }
     const newStart = snapToSlot(targetDate);
     if (newStart.getTime() === item.start.getTime()) return;
 
@@ -2214,6 +2231,64 @@ export function CalendarView({
    * Only one-off habits and tasks: their window becomes exactly the slot you choose,
    * so the scheduler places it there and goal links / ticks keep working by id.
    */
+  /** A one-day all-day event that can be given a time (dragged onto the grid, or "Give it a time"). */
+  function canTimeAllDay(item: PlacedItem): boolean {
+    return (
+      !!item.isAllDay &&
+      item.kind === "Fixed Event" &&
+      !item.readOnly &&
+      !item.isProposal &&
+      !item.isRecurringOccurrence &&
+      !item.keptDailyId &&
+      item.end.getTime() - item.start.getTime() <= 24 * 60 * 60 * 1000 &&
+      fixedEvents.some((e) => e.id === item.id)
+    );
+  }
+
+  /** The all-day event as a 30-minute block on its own day, ready to drop on a time. */
+  function allDayAsTimed(item: PlacedItem): PlacedItem {
+    // All-day events are stored at UTC midnight of their date.
+    const day = new Date(item.start.getUTCFullYear(), item.start.getUTCMonth(), item.start.getUTCDate(), 9, 0, 0, 0);
+    return { ...item, isAllDay: false, fromAllDay: true, start: day, end: new Date(day.getTime() + 30 * 60000) };
+  }
+
+  /** Turns the all-day event into a timed one, in Google first if it came from there. */
+  async function saveAllDayTime(end: Date, busy: boolean, details: boolean) {
+    if (!timeIt) return;
+    const { item, start } = timeIt;
+    setTimeItSaving(true);
+    setTimeItError(null);
+    try {
+      const fromGoogle = item.googleEventId && item.googleCalendarId && item.googleCalendarRole !== "schedule_target";
+      if (fromGoogle) {
+        const res = await updateGoogleSourceEvent(item.googleEventId!, item.googleCalendarId!, start, end, false, busy);
+        if (!res.success) throw new Error(`Google Calendar refused the change: ${res.error ?? "unknown error"}`);
+      }
+      const { error } = await supabase
+        .from("fixed_events")
+        .update({
+          start_time: start.toISOString(),
+          end_time: end.toISOString(),
+          is_all_day: false,
+          blocks_schedule: busy && item.googleCalendarRole !== "display_only",
+        })
+        .eq("id", item.id);
+      if (error) throw new Error(error.message);
+      setTimeIt(null);
+      const fresh = await loadData();
+      scheduleAutoPush();
+      showDragMessage(`${item.name} is now ${timeLabel(start)}–${timeLabel(end).slice(4)}${fromGoogle ? " (updated in Google Calendar)" : ""}`, 5000);
+      if (details) {
+        const fe = fresh.fixedEvents.find((e) => e.id === item.id);
+        if (fe) setEditTarget({ kind: "Fixed Event", id: fe.id, data: fe });
+      }
+    } catch (e) {
+      setTimeItError(e instanceof Error ? e.message : "Couldn't save the time.");
+    } finally {
+      setTimeItSaving(false);
+    }
+  }
+
   function trayItemAsPlaced(u: UnscheduledItem): PlacedItem | null {
     if (u.isBatch) return null;
     if (u.kind === "Habit") {
@@ -2449,6 +2524,16 @@ export function CalendarView({
   return (
     <>
       {planUi}
+      {timeIt && (
+        <AllDayTimeDialog
+          name={timeIt.item.name}
+          start={timeIt.start}
+          saving={timeItSaving}
+          error={timeItError}
+          onSave={(end, busy, details) => void saveAllDayTime(end, busy, details)}
+          onCancel={() => setTimeIt(null)}
+        />
+      )}
       {layout === "mobile" ? (
         <>
           <MobileCalendar
@@ -2858,10 +2943,28 @@ export function CalendarView({
                   const colors = getPillarColor(item.pillar);
                   const leftPct = (span.startIdx / 7) * 100;
                   const widthPct = ((span.endIdx - span.startIdx + 1) / 7) * 100;
+                  const timeable = !embed && canTimeAllDay(item);
                   return (
                     <div
                       key={`${item.id}-${idx}`}
-                      className={`absolute rounded ${colors.bg} px-1.5 py-0.5 text-left overflow-hidden cursor-pointer group hover:z-10 hover:brightness-110 transition-all shadow-sm ${item.decorClass ?? ""}`}
+                      draggable={timeable}
+                      onDragStart={
+                        timeable
+                          ? (e) => {
+                              dragGrabOffset.current = 6;
+                              setDragItem(allDayAsTimed(item));
+                              e.dataTransfer.effectAllowed = "move";
+                              try {
+                                e.dataTransfer.setData("text/plain", item.name);
+                              } catch {
+                                /* some browsers refuse; the drag still works */
+                              }
+                            }
+                          : undefined
+                      }
+                      onDragEnd={timeable ? endDrag : undefined}
+                      title={timeable ? "Drag onto a time to give it a start and end" : undefined}
+                      className={`absolute rounded ${colors.bg} px-1.5 py-0.5 text-left overflow-hidden ${timeable ? "cursor-grab active:cursor-grabbing" : "cursor-pointer"} group hover:z-10 hover:brightness-110 transition-all shadow-sm ${item.decorClass ?? ""}`}
                       style={{
                         left: `calc(${leftPct}% + 2px)`,
                         width: `calc(${widthPct}% - 4px)`,
@@ -3212,6 +3315,15 @@ export function CalendarView({
               setSelectedItem(null);
             }
           }}
+          onGiveTime={
+            layout === "mobile" && !embed && canTimeAllDay(selectedItem)
+              ? () => {
+                  const it = allDayAsTimed(selectedItem);
+                  setSelectedItem(null);
+                  setPlacing(it);
+                }
+              : undefined
+          }
           onSetPillar={(p) => updatePillar(selectedItem, p)}
           onSetEffort={(e) => updateEffort(selectedItem, e)}
           canComplete={canComplete(selectedItem)}
@@ -3493,9 +3605,12 @@ function ItemDetail({
   onSetEffort,
   canComplete,
   onToggleComplete,
+  onGiveTime,
 }: {
   item: PlacedItem;
   source: ItemSource;
+  /** Phone: an all-day event can be placed on a time. */
+  onGiveTime?: () => void;
   onClose: () => void;
   onDelete: () => void;
   onEdit: () => void;
@@ -3528,6 +3643,14 @@ function ItemDetail({
           </button>
         </div>
         <h3 className={`text-lg font-semibold mb-3 ${item.completed ? "line-through text-slate-400" : ""}`}>{item.name}</h3>
+        {onGiveTime && (
+          <button
+            onClick={onGiveTime}
+            className="mb-3 w-full rounded-xl border border-blue-500/40 bg-blue-500/10 px-3 py-2.5 text-sm font-medium text-blue-200 active:bg-blue-500/20"
+          >
+            Give it a time — then tap where it starts
+          </button>
+        )}
         {canComplete && (
           <button
             onClick={onToggleComplete}
