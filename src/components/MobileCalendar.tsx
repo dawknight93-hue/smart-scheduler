@@ -15,6 +15,7 @@ import {
   Plus,
   RefreshCw,
   Settings,
+  CalendarCheck,
   Square,
   Sunrise,
   CheckCircle2,
@@ -509,6 +510,16 @@ export function MobileCalendar(props: Props) {
             >
               <Monitor className="w-5 h-5" />
               Use desktop layout
+            </button>
+            <button
+              onClick={() => {
+                setDrawer(false);
+                window.dispatchEvent(new Event("open-plan-day"));
+              }}
+              className="flex items-center gap-3.5 h-11 px-3.5 rounded-full text-[15px] text-blue-200 active:bg-slate-800"
+            >
+              <CalendarCheck className="w-5 h-5" />
+              Plan a day
             </button>
             <button
               onClick={() => {

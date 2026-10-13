@@ -42,6 +42,7 @@ import {
   utaBlockLabel,
   matchFlight,
   REPORT_BUFFER_MIN,
+  isPinnedWindow,
 } from "@/lib/schedulingEngine";
 import { appSettings } from "@/lib/appSettings";
 import type {
@@ -62,6 +63,8 @@ import type {
 import { CONTEXT_COLORS, TIER_LABELS, PILLARS, PILLAR_LABELS, PILLAR_COLORS, getPillarColor } from "@/lib/types";
 import { AddItemModal, type EditTarget } from "@/components/AddItemModal";
 import { CalendarConnectionsPanel, CALENDARS_CHANGED_EVENT } from "@/components/CalendarConnectionsPanel";
+import { PlanDayPanel, type PlanSpot } from "@/components/PlanDayPanel";
+import { PLAN_PREFIX, PLAN_BUFFER_MIN, clearDraft, emptyDraft, loadDraft, lockInPlan, previewTasks, readListWithAi, saveDraft, todayKey, type PlanDraft } from "@/lib/planDay";
 import { getSyncStatus, pullFromGoogle, mirrorToGoogle, deleteFromGoogle, scheduleAutoPush, updateGoogleSourceEvent } from "@/lib/gcalSync";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, formatRecurrenceSummary, utcDateAsLocal } from "@/lib/recurrence";
 import { PLAN_GOAL_COLUMNS, type PlanGoal } from "@/lib/goalPlanning";
@@ -411,7 +414,48 @@ export function CalendarView({
     pick();
     mq.addEventListener("change", pick);
     return () => mq.removeEventListener("change", pick);
-  }, []);  const [scopeDialog, setScopeDialog] = useState<{ action: "delete" | "edit"; item: PlacedItem } | null>(null);
+  }, []);
+
+  // Plan a day: a draft list, previewed on this calendar as dashed blocks until you lock it in.
+  const [planOpen, setPlanOpen] = useState(() => {
+    // Asked for from another tab (the sidebar's Plan a day button).
+    try {
+      if (embed || sessionStorage.getItem("smartScheduler.openPlanDay") !== "1") return false;
+      sessionStorage.removeItem("smartScheduler.openPlanDay");
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  const [planDraft, setPlanDraftState] = useState<PlanDraft>(loadDraft);
+  const [planReading, setPlanReading] = useState(false);
+  const [planLocking, setPlanLocking] = useState(false);
+  const [planError, setPlanError] = useState<string | null>(null);
+  // Phone: the panel steps aside so you can look at the preview on the calendar.
+  const [planPeek, setPlanPeek] = useState(false);
+  const setPlanDraft = (d: PlanDraft) => {
+    setPlanDraftState(d);
+    saveDraft(d);
+  };
+  // Opened from the sidebar button or the phone menu.
+  useEffect(() => {
+    const open = () => {
+      if (embedRef.current) return;
+      setPlanOpen(true);
+      setPlanPeek(false);
+      setPlanError(null);
+    };
+    window.addEventListener("open-plan-day", open);
+    return () => window.removeEventListener("open-plan-day", open);
+  }, []);
+  // The sidebar widens while the panel is in it.
+  useEffect(() => {
+    if (embed) return;
+    window.dispatchEvent(new CustomEvent("plan-day-panel", { detail: planOpen && !!sidebarSlot }));
+    return () => {
+      window.dispatchEvent(new CustomEvent("plan-day-panel", { detail: false }));
+    };
+  }, [planOpen, sidebarSlot, embed]);  const [scopeDialog, setScopeDialog] = useState<{ action: "delete" | "edit"; item: PlacedItem } | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [addPrefillDate, setAddPrefillDate] = useState<Date | null>(null);
@@ -644,9 +688,15 @@ export function CalendarView({
     })();
   }, []);
 
+  // The Plan a day preview only exists while its panel is open on the plan step.
+  const planTasks = useMemo(
+    () => (planOpen && !embed && planDraft.stage === "preview" ? previewTasks(planDraft) : []),
+    [planOpen, embed, planDraft]
+  );
+
   const { placed: basePlaced, unscheduled } = useMemo(() => {
     const recurringTasks = tasks.filter((t) => t.recurrence_enabled);
-    const nonRecurringTasks = tasks.filter((t) => !t.recurrence_enabled);
+    const nonRecurringTasks = [...tasks.filter((t) => !t.recurrence_enabled), ...planTasks];
     const rangeStart = displayStart;
     const rangeEnd = displayEnd;
     const occByFeDate = new Map<string, FixedEventOccurrence>();
@@ -715,14 +765,61 @@ export function CalendarView({
     }
 
     const fixedOccurrenceIds = new Set(fixedOccurrenceEvents.map((e) => e.id));
-    const result = runEngine(
-      displayStart,
-      [...fixedEvents.filter((e) => !e.recurrence_enabled), ...fixedOccurrenceEvents, ...enrouteAsBusy(enrouteBlocks)],
-      // One-off habits (e.g. last week's 🎯 sessions) whose window closed before this view
-      // starts belong to an earlier week — they're not "missing" from this one.
-      habits.filter((h) => !h.recurrence_enabled && new Date(h.search_end) > displayStart),
-      nonRecurringTasks
-    );
+    const runWith = (taskList: Task[]) =>
+      runEngine(
+        displayStart,
+        [...fixedEvents.filter((e) => !e.recurrence_enabled), ...fixedOccurrenceEvents, ...enrouteAsBusy(enrouteBlocks)],
+        // One-off habits (e.g. last week's 🎯 sessions) whose window closed before this view
+        // starts belong to an earlier week — they're not "missing" from this one.
+        habits.filter((h) => !h.recurrence_enabled && new Date(h.search_end) > displayStart),
+        taskList
+      );
+    let engineResult = runWith(nonRecurringTasks);
+    // Plan a day: a task that only missed because of the buffer after it (e.g. 45 min of
+    // prep right before a lesson) gets a second try without the buffer.
+    let unpadded = new Set<string>();
+    if (planTasks.length) {
+      const missed = engineResult.unscheduled.filter((u) => u.id.startsWith(PLAN_PREFIX)).map((u) => u.id.slice(PLAN_PREFIX.length));
+      if (missed.length) {
+        unpadded = new Set(missed);
+        engineResult = runWith([...tasks.filter((t) => !t.recurrence_enabled), ...previewTasks(planDraft, new Date(), unpadded)]);
+      }
+    }
+    // A task you placed at a set time (dragged or locked in) that's still not done once its
+    // day is over goes back to your list, so you decide where it goes next.
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const taskRow = new Map(tasks.map((t) => [t.id, t]));
+    const lapsed = engineResult.placed.filter((p) => {
+      if (p.kind !== "Task" || p.isBatch || p.end > todayStart) return false;
+      const t = taskRow.get(p.id);
+      return !!t && !t.completed_at && isPinnedWindow(t.search_start, t.deadline, t.duration_min);
+    });
+    const lapsedIds = new Set(lapsed.map((p) => p.id));
+    const result = {
+      placed: engineResult.placed
+        .filter((p) => !lapsedIds.has(p.id))
+        // Plan a day preview: the planner reserved a short buffer after each task; show the task itself.
+        .map((p) =>
+          p.id.startsWith(PLAN_PREFIX) && !unpadded.has(p.id.slice(PLAN_PREFIX.length))
+            ? { ...p, end: new Date(p.end.getTime() - PLAN_BUFFER_MIN * 60000) }
+            : p
+        ),
+      unscheduled: [
+        ...engineResult.unscheduled,
+        ...lapsed.map((p) => ({
+          id: p.id,
+          name: p.name,
+          kind: "Task" as ItemKind,
+          tier: p.tier,
+          deadline: p.end,
+          windowStart: p.start,
+          durationMin: Math.round((p.end.getTime() - p.start.getTime()) / 60000),
+          reason: "window_ended" as const,
+          isBatch: false,
+        })),
+      ],
+    };
     const mapByItemId = new Map<string, EventMapEntry>();
     for (const m of eventMap) {
       if (m.item_id) mapByItemId.set(m.item_id, m);
@@ -938,14 +1035,21 @@ export function CalendarView({
       })
       .filter((p) => p.end > displayStart && p.start < displayEnd && (p.isAllDay || !activityDays.has(p.start.toDateString())));
     return { placed: [...finalPlaced, ...kept], unscheduled: result.unscheduled };
-  }, [weekStart, viewMode, displayStart, displayEnd, fixedEvents, habits, tasks, eventMap, enrouteBlocks, occurrences, fixedEventOccurrences, habitOccurrences, goalSessionDone, keptRows, countGoals]);
+  }, [weekStart, viewMode, displayStart, displayEnd, fixedEvents, habits, tasks, planTasks, planDraft, eventMap, enrouteBlocks, occurrences, fixedEventOccurrences, habitOccurrences, goalSessionDone, keptRows, countGoals]);
 
   // Weekly Review: add its proposed sessions and mark what belongs to the selected card.
   const embedProposals = embed?.proposals;
   const embedSelected = embed?.selectedKey ?? null;
   const embedOwnerOf = embed?.ownerOf;
   const placed = useMemo(() => {
-    if (!embedProposals || !embedOwnerOf) return basePlaced;
+    const withPlan = planTasks.length
+      ? basePlaced.map((p) =>
+          p.id.startsWith(PLAN_PREFIX)
+            ? { ...p, isProposal: true, placementReason: p.placementReason, decorClass: "outline-dashed outline-2 -outline-offset-2 outline-sky-300/80 opacity-90" }
+            : p
+        )
+      : basePlaced;
+    if (!embedProposals || !embedOwnerOf) return withPlan;
     const proposals: PlacedItem[] = embedProposals.map((pr) => ({
       id: pr.key,
       name: pr.name,
@@ -963,7 +1067,7 @@ export function CalendarView({
       utaOverride: pr.utaOverride,
       quietOverride: pr.quietOverride,
     }));
-    return [...basePlaced, ...proposals].map((p) => {
+    return [...withPlan, ...proposals].map((p) => {
       const owner = p.ownerKey ?? embedOwnerOf(p);
       const lit = !!embedSelected && owner === embedSelected;
       const dim = !!embedSelected && !lit;
@@ -971,7 +1075,7 @@ export function CalendarView({
       const decorClass = [p.isProposal ? "outline-dashed outline-2 -outline-offset-2 outline-white/70" : "", lit ? "ring-2 ring-white z-10" : "", dim ? "opacity-30" : ""].join(" ");
       return { ...p, ownerKey: owner, decorClass };
     });
-  }, [basePlaced, embedProposals, embedSelected, embedOwnerOf]);
+  }, [basePlaced, planTasks, embedProposals, embedSelected, embedOwnerOf]);
 
   /** Open an item; in the Weekly Review this also highlights its card (a proposal only highlights). */
   function selectItem(item: PlacedItem) {
@@ -1085,6 +1189,11 @@ export function CalendarView({
 
   /** The hover trash: events pulled from Google open their details first, where deleting asks twice. */
   function quickDelete(item: PlacedItem) {
+    if (item.id.startsWith(PLAN_PREFIX)) {
+      const key = item.id.slice(PLAN_PREFIX.length);
+      setPlanDraft({ ...planDraft, tasks: planDraft.tasks.filter((t) => t.key !== key) });
+      return;
+    }
     if (item.isProposal) {
       embed?.onRemoveProposal(item.id);
       return;
@@ -1962,7 +2071,7 @@ export function CalendarView({
       setOverlapConfirm({ item, newStart, overlapNames: check.overlaps, allow });
       return;
     }
-    if (item.isProposal && embed) {
+    if (item.isProposal) {
       moveProposal(item, newStart, new Date(newStart.getTime() + (item.end.getTime() - item.start.getTime())), allow);
       return;
     }
@@ -1985,6 +2094,16 @@ export function CalendarView({
 
   /** Proposals live in the review until approved: move them there, with Undo. */
   function moveProposal(item: PlacedItem, start: Date, end: Date, allow: Allow = {}) {
+    if (item.id.startsWith(PLAN_PREFIX)) {
+      // Plan a day preview: it stays where you put it (a new length counts too).
+      const key = item.id.slice(PLAN_PREFIX.length);
+      const minutes = Math.max(5, Math.round((end.getTime() - start.getTime()) / 60000));
+      setPlanDraft({
+        ...planDraft,
+        tasks: planDraft.tasks.map((t) => (t.key === key ? { ...t, duration_min: minutes, pin: { start: start.toISOString(), end: end.toISOString() } } : t)),
+      });
+      return;
+    }
     if (!embed) return;
     const keep: Allow = { uta: allow.uta || item.utaOverride, quiet: allow.quiet || item.quietOverride };
     embed.onMoveProposal(item.id, start, end, keep);
@@ -2080,12 +2199,12 @@ export function CalendarView({
   const mobileIsToday = mobileDate.toDateString() === new Date().toDateString();
   // Completed tasks don't need a slot, so they're never "unscheduled".
   const notScheduled = unscheduled.filter(
-    (u) => !(u.kind === "Task" && !u.isBatch && tasks.find((t) => t.id === u.id)?.completed_at)
+    (u) => !u.id.startsWith(PLAN_PREFIX) && !(u.kind === "Task" && !u.isBatch && tasks.find((t) => t.id === u.id)?.completed_at)
   );
   const stats = {
     fixed: placed.filter((p) => p.kind === "Fixed Event").length,
     habits: placed.filter((p) => p.kind === "Habit").length,
-    tasks: placed.filter((p) => p.kind === "Task").length,
+    tasks: placed.filter((p) => p.kind === "Task" && !p.isProposal).length,
     unscheduled: notScheduled.length,
   };
 
@@ -2216,8 +2335,120 @@ export function CalendarView({
 
   const syncFreshness = getSyncFreshness(lastSyncedAt);
 
+  // ---- Plan a day -----------------------------------------------------------
+  const planDayDate = (() => {
+    const [y, m, d] = planDraft.day.split("-").map(Number);
+    return new Date(y, m - 1, d);
+  })();
+  // Where the preview put each draft task.
+  const planSpots = new Map<string, PlanSpot>();
+  for (const p of placed) {
+    if (p.id.startsWith(PLAN_PREFIX)) planSpots.set(p.id.slice(PLAN_PREFIX.length), { start: p.start, end: p.end, reason: p.placementReason });
+  }
+
+  /** That day's calendar, in words, so the AI can tell e.g. that lesson prep is due before the lesson. */
+  function planDayEvents(): string[] {
+    const dayEnd = addDays(planDayDate, 1);
+    const hm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    return placed
+      .filter((p) => !p.isProposal && p.kind !== "Task" && p.start < dayEnd && p.end > planDayDate)
+      .sort((a, b) => a.start.getTime() - b.start.getTime())
+      .slice(0, 30)
+      .map((p) => (p.isAllDay ? `All day: ${p.name}` : `${hm(p.start)}–${hm(p.end)} ${p.name}${p.blocksSchedule === false ? " (info only)" : ""}`));
+  }
+
+  function goToPlanDay(day: string) {
+    const [y, m, d] = day.split("-").map(Number);
+    const date = new Date(y, m - 1, d);
+    if (date < displayStart || date >= displayEnd) setWeekStart(getWeekStart(date));
+  }
+
+  async function readPlanList() {
+    setPlanReading(true);
+    setPlanError(null);
+    try {
+      goToPlanDay(planDraft.day);
+      const parsed = await readListWithAi(planDraft.text, planDraft.day, planDayEvents());
+      if (!parsed.length) throw new Error("The AI didn't find any tasks in that list.");
+      setPlanDraft({ ...planDraft, tasks: parsed, stage: "preview" });
+    } catch (e) {
+      setPlanError(e instanceof Error ? e.message : "Couldn't read the list.");
+    } finally {
+      setPlanReading(false);
+    }
+  }
+
+  async function lockInPlanDay() {
+    setPlanLocking(true);
+    setPlanError(null);
+    try {
+      const spots = new Map([...planSpots].map(([k, v]) => [k, { start: v.start }]));
+      const r = await lockInPlan(planDraft, spots);
+      clearDraft();
+      setPlanDraftState(emptyDraft(planDraft.day < todayKey() ? todayKey() : planDraft.day));
+      setPlanOpen(false);
+      setPlanPeek(false);
+      await loadData();
+      scheduleAutoPush();
+      const bits = [`${r.fixed} locked in`];
+      if (r.flexible) bits.push(`${r.flexible} the planner may move`);
+      if (r.toList) bits.push(`${r.toList} waiting in your list`);
+      showDragMessage(`Plan saved: ${bits.join(", ")}. Adding to Google Calendar…`, 7000);
+    } catch (e) {
+      setPlanError(e instanceof Error ? e.message : "Couldn't save the plan.");
+    } finally {
+      setPlanLocking(false);
+    }
+  }
+
+  const planPanel = (compact: boolean) => (
+    <PlanDayPanel
+      draft={planDraft}
+      onChange={(d) => {
+        if (d.day !== planDraft.day) goToPlanDay(d.day);
+        setPlanDraft(d);
+      }}
+      spots={planSpots}
+      reading={planReading}
+      error={planError}
+      onRead={() => void readPlanList()}
+      onLockIn={() => void lockInPlanDay()}
+      locking={planLocking}
+      onClose={() => {
+        setPlanOpen(false);
+        setPlanPeek(false);
+      }}
+      onShowCalendar={compact ? () => setPlanPeek(true) : undefined}
+      compact={compact}
+    />
+  );
+  const planUi =
+    !embed && planOpen
+      ? sidebarSlot
+        ? createPortal(planPanel(false), sidebarSlot)
+        : planPeek
+          ? (
+              <div className="fixed inset-x-3 bottom-20 z-50 flex items-center justify-between gap-2 rounded-xl border border-blue-500/40 bg-slate-900/95 px-3 py-2.5 shadow-2xl backdrop-blur">
+                <span className="text-xs text-slate-300">
+                  Plan preview · <span className="text-slate-100">{planSpots.size} planned</span>
+                  {planDraft.tasks.length - planSpots.size > 0 && <span className="text-amber-300"> · {planDraft.tasks.length - planSpots.size} won't fit</span>}
+                </span>
+                <span className="flex gap-2">
+                  <button onClick={() => setPlanPeek(false)} className="rounded-lg border border-slate-600 px-2.5 py-1.5 text-xs text-slate-200">Edit plan</button>
+                  <button onClick={() => void lockInPlanDay()} disabled={planLocking} className="rounded-lg bg-blue-600 px-2.5 py-1.5 text-xs font-semibold text-white disabled:opacity-50">Lock in</button>
+                </span>
+              </div>
+            )
+          : (
+              <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/95 px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-24 backdrop-blur">
+                <div className="mx-auto max-w-lg">{planPanel(true)}</div>
+              </div>
+            )
+      : null;
+
   return (
     <>
+      {planUi}
       {layout === "mobile" ? (
         <>
           <MobileCalendar
