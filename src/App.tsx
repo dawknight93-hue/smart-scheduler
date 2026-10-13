@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { deviceTimeZone, homeClockActive } from "@/lib/homeClock";
 import { appSettings } from "@/lib/appSettings";
 import { SETTINGS_EVENT } from "@/lib/appSettingsLoader";
-import { CalendarDays, CheckSquare, Target, ClipboardCheck, Sunrise, Settings as SettingsIcon } from "lucide-react";
+import { CalendarDays, CheckSquare, Target, ClipboardCheck, Sunrise, Settings as SettingsIcon, CalendarCheck } from "lucide-react";
 import { CalendarView } from "@/components/CalendarView";
 import { TasksView } from "@/components/TasksView";
 import { GoalsView } from "@/components/GoalsView";
@@ -62,6 +62,26 @@ function App() {
   }, []);
   const [weekStart, setWeekStart] = useState(() => getWeekStart(new Date()));
   const reviewDue = useReviewDue(view);
+  // Plan a day sits in the sidebar, which widens while it's open.
+  const [planWide, setPlanWide] = useState(false);
+  useEffect(() => {
+    const on = (e: Event) => setPlanWide(!!(e as CustomEvent<boolean>).detail);
+    window.addEventListener("plan-day-panel", on);
+    return () => window.removeEventListener("plan-day-panel", on);
+  }, []);
+  const openPlanDay = () => {
+    if (view !== "calendar") {
+      // The calendar opens the panel as soon as it loads.
+      try {
+        sessionStorage.setItem("smartScheduler.openPlanDay", "1");
+      } catch {
+        /* storage unavailable: open it from the calendar instead */
+      }
+      setView("calendar");
+    } else {
+      window.dispatchEvent(new Event("open-plan-day"));
+    }
+  };
 
   if (window.location.pathname === "/gcal-callback") return <GoogleCallback />;
   if (window.location.pathname === "/privacy") return <PrivacyPolicy />;
@@ -141,11 +161,20 @@ function App() {
       }`}
     >
       {/* Tabs — a block on the left on wider screens (frees the top for the calendar) */}
-      <aside className="hidden md:flex md:flex-col w-52 shrink-0 border-r border-slate-800 bg-slate-900/60 md:sticky md:top-0 md:h-[100dvh]">
+      <aside className={`hidden md:flex md:flex-col ${planWide ? "w-80" : "w-52"} shrink-0 border-r border-slate-800 bg-slate-900/60 md:sticky md:top-0 md:h-[100dvh] transition-[width]`}>
         <nav className="p-3" aria-label="Sections">
           <div className="rounded-xl border border-slate-800 bg-slate-900 p-1.5 flex flex-col gap-0.5">
             {tabs.map((t) => tabButton(t, true))}
           </div>
+          {!planWide && (
+            <button
+              onClick={openPlanDay}
+              className="mt-2 w-full flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-sm font-medium text-blue-200 hover:bg-blue-500/20"
+            >
+              <CalendarCheck className="w-4 h-4" />
+              Plan a day
+            </button>
+          )}
         </nav>
         {/* The Calendar puts its "not on your calendar" tray here. */}
         {homeClockActive && (
