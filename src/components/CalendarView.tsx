@@ -1716,7 +1716,9 @@ export function CalendarView({
 
   /** If resizing this task/habit to end at newEnd leaves too little window for its duration, describe it. */
   function resizeShortfall(item: PlacedItem, newEnd: Date) {
-    if (item.isRecurringOccurrence || item.isBatch) return null;
+    // A resized single habit or task takes its new length (see updateItemDuration), so only a
+    // group of short tasks can end up with a window shorter than it needs.
+    if (item.isRecurringOccurrence || !item.isBatch) return null;
     if (item.kind === "Task") {
       const t = tasks.find((x) => x.id === item.id);
       if (!t) return null;
@@ -1869,11 +1871,27 @@ export function CalendarView({
     const table = item.kind === "Fixed Event" ? "fixed_events" : item.kind === "Habit" ? "habits" : "tasks";
     if (item.kind === "Fixed Event") {
       await supabase.from(table).update({ end_time: newEnd.toISOString() }).eq("id", item.id);
-    } else if (item.kind === "Habit") {
-      const searchEnd = new Date(newEnd);
-      await supabase.from(table).update({ search_end: searchEnd.toISOString() }).eq("id", item.id);
+    } else if (item.isBatch) {
+      // A group of short tasks: its length is the sum of its tasks.
+      showDragMessage("This block is several short tasks grouped together; change their lengths in each task instead.", 6000);
+      return false;
     } else {
-      await supabase.from(table).update({ deadline: newEnd.toISOString() }).eq("id", item.id);
+      // Resizing a habit or task changes how long it takes and keeps it where you see it
+      // (pinned to that start), the same as dragging it there.
+      const minutes = Math.max(SLOT_MIN, Math.round((newEnd.getTime() - item.start.getTime()) / 60000));
+      const endCol = item.kind === "Habit" ? "search_end" : "deadline";
+      const { error } = await supabase
+        .from(table)
+        .update({ search_start: item.start.toISOString(), [endCol]: newEnd.toISOString(), duration_min: minutes })
+        .eq("id", item.id);
+      if (error) {
+        showDragMessage(`Couldn't save the new length: ${error.message}`, 5000);
+        return false;
+      }
+      if (item.kind === "Habit") {
+        // A 🎯 goal session's daily item follows it.
+        await supabase.from("goal_daily_items").update({ minutes }).eq("habit_id", item.id);
+      }
     }
     return true;
   }
