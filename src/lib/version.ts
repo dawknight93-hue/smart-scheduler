@@ -10,7 +10,7 @@
  */
 import { supabase } from "./supabase";
 
-export const APP_VERSION = "2026.10.13-4";
+export const APP_VERSION = "2026.10.15-1";
 export const SCHEMA_VERSION = 20261010120000;
 
 /** The database's layout version, or 0 when it predates the check. */
