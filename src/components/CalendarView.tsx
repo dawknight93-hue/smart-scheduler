@@ -65,7 +65,7 @@ import { AddItemModal, type EditTarget } from "@/components/AddItemModal";
 import { CalendarConnectionsPanel, CALENDARS_CHANGED_EVENT } from "@/components/CalendarConnectionsPanel";
 import { PlanDayPanel, type PlanSpot } from "@/components/PlanDayPanel";
 import { AllDayTimeDialog } from "@/components/AllDayTimeDialog";
-import { PLAN_PREFIX, PLAN_BUFFER_MIN, clearDraft, emptyDraft, loadDraft, lockInPlan, previewTasks, readListWithAi, saveDraft, todayKey, type PlanDraft } from "@/lib/planDay";
+import { PLAN_PREFIX, PLAN_BUFFER_MIN, clearDraft, dayWindow, emptyDraft, loadDraft, lockInPlan, previewTasks, readListWithAi, saveDraft, todayKey, type PlanDraft } from "@/lib/planDay";
 import { getSyncStatus, pullFromGoogle, mirrorToGoogle, deleteFromGoogle, scheduleAutoPush, updateGoogleSourceEvent } from "@/lib/gcalSync";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, formatRecurrenceSummary, utcDateAsLocal } from "@/lib/recurrence";
 import { PLAN_GOAL_COLUMNS, type PlanGoal } from "@/lib/goalPlanning";
@@ -2359,7 +2359,7 @@ export function CalendarView({
         </div>
         <p className={`mt-1 mb-2 ${compact ? "text-[11px] leading-snug" : "text-xs"} text-slate-400`}>
           {compact
-            ? "Not on the calendar this week. Drag one onto the calendar to book it, or click it to change its window or duration."
+            ? "Not on the calendar this week. Drag one onto the calendar, tick it done, send it to tomorrow, or click it to change it."
             : layout === "desktop"
             ? "These don't appear here or in Google Calendar. Drag one onto the calendar to book it, or click it to change its window or duration."
             : "These don't appear here or in Google Calendar. Tap Place, then tap a time on the calendar — or tap the item to change its window or duration."}
@@ -2414,6 +2414,27 @@ export function CalendarView({
                 )}
                 <div className={`mt-0.5 text-slate-300/80 ${compact ? "text-[11px] leading-snug" : ""}`}>{unscheduledReasonText(u)}</div>
               </button>
+              {!u.isBatch && !embed && (u.kind === "Task" || u.kind === "Habit") && (
+                <div className="mt-1 flex gap-1.5">
+                  {u.kind === "Task" && (
+                    <button
+                      type="button"
+                      onClick={() => void trayMarkDone(u)}
+                      className="flex-1 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20"
+                    >
+                      ✓ Done
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void trayToTomorrow(u)}
+                    className="flex-1 whitespace-nowrap rounded-md border border-slate-600 px-2 py-1 text-[11px] font-medium text-slate-300 hover:bg-slate-800"
+                    title="Let the planner find it a time tomorrow"
+                  >
+                    → Tomorrow
+                  </button>
+                </div>
+              )}
               {layout === "mobile" && asPlaced && (
                 <button
                   type="button"
@@ -2429,6 +2450,51 @@ export function CalendarView({
         </div>
       </>
     );
+  }
+
+  /** Tray: you did it after all. */
+  async function trayMarkDone(u: UnscheduledItem) {
+    const t = tasks.find((x) => x.id === u.id);
+    if (!t) return;
+    const { error } = await supabase.from("tasks").update({ completed_at: new Date().toISOString() }).eq("id", t.id);
+    if (error) {
+      showDragMessage(`Couldn't mark it done: ${error.message}`, 5000);
+      return;
+    }
+    await loadData();
+    scheduleAutoPush();
+    showDoneToast(`Marked ${t.name} done`, async () => {
+      await supabase.from("tasks").update({ completed_at: null }).eq("id", t.id);
+      await loadData();
+      scheduleAutoPush();
+    });
+  }
+
+  /** Tray: give it tomorrow as its window; the planner picks the time. */
+  async function trayToTomorrow(u: UnscheduledItem) {
+    const w = dayWindow(todayKey(addDays(new Date(), 1)));
+    const isTask = u.kind === "Task";
+    const row = isTask ? tasks.find((x) => x.id === u.id) : habits.find((x) => x.id === u.id);
+    if (!row) return;
+    const endCol = isTask ? "deadline" : "search_end";
+    const before = { search_start: row.search_start, [endCol]: isTask ? (row as Task).deadline : (row as Habit).search_end };
+    const { error } = await supabase
+      .from(isTask ? "tasks" : "habits")
+      .update({ search_start: w.start.toISOString(), [endCol]: w.end.toISOString() })
+      .eq("id", row.id);
+    if (error) {
+      showDragMessage(`Couldn't move it: ${error.message}`, 5000);
+      return;
+    }
+    // If tomorrow is in the next week, show that week so you can see where it landed.
+    if (w.start >= displayEnd) setWeekStart(getWeekStart(w.start));
+    await loadData();
+    scheduleAutoPush();
+    showDoneToast(`${row.name} moved to tomorrow`, async () => {
+      await supabase.from(isTask ? "tasks" : "habits").update(before).eq("id", row.id);
+      await loadData();
+      scheduleAutoPush();
+    });
   }
 
   function editUnscheduled(u: UnscheduledItem) {
