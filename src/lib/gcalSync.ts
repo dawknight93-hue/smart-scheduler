@@ -334,6 +334,7 @@ export function scheduleAutoPush(delay = 2000): void {
 
 export interface StravaStatus {
   clientReady: boolean;
+  clientId: string | null;
   connected: boolean;
   athlete: string | null;
   lastSyncAt: string | null;
@@ -342,8 +343,8 @@ export interface StravaStatus {
 }
 
 /** Strava's sign-in page; it comes back to this copy's /strava-callback. */
-export function getStravaOAuthUrl(): string {
-  const clientId = import.meta.env.VITE_STRAVA_CLIENT_ID;
+export function getStravaOAuthUrl(serverClientId?: string | null): string {
+  const clientId = serverClientId || import.meta.env.VITE_STRAVA_CLIENT_ID;
   if (!clientId) return "";
   const params = new URLSearchParams({
     client_id: String(clientId),
