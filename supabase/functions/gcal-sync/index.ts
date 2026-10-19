@@ -994,7 +994,7 @@ async function getSyncStatus() {
     .order("created_at");
 
   return {
-    functionVersion: "2026-10-19-strava",
+    functionVersion: "2026-10-19-strava2",
     connected: !!tokenRow,
     email: tokenRow?.email ?? null,
     recentRuns: recentRuns ?? [],
@@ -1240,7 +1240,8 @@ async function stravaStatus() {
   const clientReady = !!Deno.env.get("STRAVA_CLIENT_ID") && !!Deno.env.get("STRAVA_CLIENT_SECRET");
   const { data: row } = await supabase.from("strava_tokens").select("athlete_name, last_sync_at, last_sync_error").eq("id", 1).maybeSingle();
   const { count } = await supabase.from("gcal_event_map").select("id", { count: "exact", head: true }).like("google_event_id", `${STRAVA_PREFIX}%`);
-  return { clientReady, connected: !!row, athlete: row?.athlete_name ?? null, lastSyncAt: row?.last_sync_at ?? null, lastError: row?.last_sync_error ?? null, runsOnCalendar: count ?? 0 };
+  // The client ID is public (it's in the sign-in link), so the app reads it from here instead of its own settings.
+  return { clientReady, clientId: Deno.env.get("STRAVA_CLIENT_ID") ?? null, connected: !!row, athlete: row?.athlete_name ?? null, lastSyncAt: row?.last_sync_at ?? null, lastError: row?.last_sync_error ?? null, runsOnCalendar: count ?? 0 };
 }
 
 Deno.serve(async (req: Request) => {
