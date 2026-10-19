@@ -10,6 +10,7 @@ import { WeeklyReview } from "@/components/WeeklyReview";
 import { BriefingView } from "@/components/BriefingView";
 import { useReviewDue } from "@/lib/useReviewDue";
 import { GoogleCallback } from "@/components/GoogleCallback";
+import { StravaCallback } from "@/components/StravaCallback";
 import { PrivacyPolicy } from "@/components/PrivacyPolicy";
 import { SetupWizard } from "@/components/SetupWizard";
 import { SettingsPanel } from "@/components/SettingsPanel";
@@ -84,6 +85,7 @@ function App() {
   };
 
   if (window.location.pathname === "/gcal-callback") return <GoogleCallback />;
+  if (window.location.pathname === "/strava-callback") return <StravaCallback />;
   if (window.location.pathname === "/privacy") return <PrivacyPolicy />;
   // First-time setup: a copy nobody has set up yet, or ?setup=preview (a dry run).
   const setupPreview = new URLSearchParams(window.location.search).get("setup") === "preview";
