@@ -565,6 +565,15 @@ async function getValidAccessToken(): Promise<string> {
   return tokens.access_token;
 }
 
+/** Runs async jobs with at most `limit` in flight. */
+async function inBatches<T>(items: T[], limit: number, fn: (item: T) => Promise<unknown>) {
+  for (let i = 0; i < items.length; i += limit) {
+    await Promise.all(items.slice(i, i + limit).map(fn));
+  }
+}
+
+const sameTime = (a: string | null | undefined, b: string) => !!a && Date.parse(a) === Date.parse(b);
+
 async function pullEvents(
   connections: { calendar_id: string; role: string; enabled: boolean }[],
   weekStart: string,
@@ -590,35 +599,68 @@ async function pullEvents(
   const seenIds = new Set<string>();
   const fullyListed = new Set<string>();
 
-  for (const conn of sourceConnections) {
-    // The app's own planned events (only on calendars it writes to). A calendar Google won't
-    // search this way (e.g. one subscribed by link) simply has none.
-    const own = await listMirrorEvents(accessToken, conn.calendar_id).catch((e: Error) => {
-      if (e.message === NO_CALENDAR_ACCESS) throw e;
-      return [] as GoogleEvent[];
-    });
-    const ownIds = new Set(own.map((e) => e.id));
-    const url = new URL(GOOGLE_EVENTS_URL(conn.calendar_id));
-    url.searchParams.set("timeMin", weekStartDt.toISOString());
-    url.searchParams.set("timeMax", weekEndDt.toISOString());
-    url.searchParams.set("singleEvents", "true");
-    url.searchParams.set("orderBy", "startTime");
-    url.searchParams.set("maxResults", "250");
+  // 1) Read every calendar from Google at the same time.
+  const fetched = await Promise.all(
+    sourceConnections.map(async (conn) => {
+      // The app's own planned events (only on calendars it writes to). A calendar Google won't
+      // search this way (e.g. one subscribed by link) simply has none.
+      const ownPromise = listMirrorEvents(accessToken, conn.calendar_id).catch((e: Error) => {
+        if (e.message === NO_CALENDAR_ACCESS) throw e;
+        return [] as GoogleEvent[];
+      });
+      const url = new URL(GOOGLE_EVENTS_URL(conn.calendar_id));
+      url.searchParams.set("timeMin", weekStartDt.toISOString());
+      url.searchParams.set("timeMax", weekEndDt.toISOString());
+      url.searchParams.set("singleEvents", "true");
+      url.searchParams.set("orderBy", "startTime");
+      url.searchParams.set("maxResults", "250");
+      const resp = await fetch(url.toString(), { headers: { Authorization: `Bearer ${accessToken}` } });
+      if (!resp.ok) {
+        const errText = await resp.text();
+        throw googleFailure(`Failed to read calendar ${conn.calendar_id}`, resp.status, errText);
+      }
+      const data = await resp.json();
+      const own = await ownPromise;
+      return { conn, data, ownIds: new Set(own.map((e) => e.id)) };
+    })
+  );
 
-    const resp = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+  // 2) What the app already has for those events, in a few batched reads.
+  type MapRow = { id: string; item_id: string | null; calendar_role: string; calendar_id: string; google_event_id: string; item_name: string | null; start_time: string | null; end_time: string | null };
+  type FeRow = { id: string; name: string; start_time: string; end_time: string; blocks_schedule: boolean | null; is_all_day: boolean | null; google_can_edit: boolean | null; source_done: boolean | null };
+  const allIds = [...new Set(fetched.flatMap((f) => ((f.data.items ?? []) as GoogleEvent[]).map((e) => e.id)))];
+  const mapByGoogleId = new Map<string, MapRow>();
+  const chunks: string[][] = [];
+  for (let i = 0; i < allIds.length; i += 100) chunks.push(allIds.slice(i, i + 100));
+  await inBatches(chunks, 5, async (ids) => {
+    const { data } = await supabase
+      .from("gcal_event_map")
+      .select("id, item_id, calendar_role, calendar_id, google_event_id, item_name, start_time, end_time")
+      .in("google_event_id", ids);
+    for (const r of (data as MapRow[]) ?? []) mapByGoogleId.set(r.google_event_id, r);
+  });
+  const feById = new Map<string, FeRow>();
+  const itemIds = [...new Set([...mapByGoogleId.values()].map((r) => r.item_id).filter((x): x is string => !!x))];
+  const itemChunks: string[][] = [];
+  for (let i = 0; i < itemIds.length; i += 100) itemChunks.push(itemIds.slice(i, i + 100));
+  await inBatches(itemChunks, 5, async (ids) => {
+    const { data } = await supabase
+      .from("fixed_events")
+      .select("id, name, start_time, end_time, blocks_schedule, is_all_day, google_can_edit, source_done")
+      .in("id", ids);
+    for (const r of (data as FeRow[]) ?? []) feById.set(r.id, r);
+  });
 
-    if (!resp.ok) {
-      const errText = await resp.text();
-      throw googleFailure(`Failed to read calendar ${conn.calendar_id}`, resp.status, errText);
-    }
+  // 3) Work out what changed; only those get written.
+  const writes: (() => Promise<unknown>)[] = [];
+  const inserts: (() => Promise<void>)[] = [];
+  const calendarUpdates: (() => Promise<unknown>)[] = [];
 
-    const data = await resp.json();
+  for (const { conn, data, ownIds } of fetched) {
     const events: GoogleEvent[] = data.items ?? [];
     const accessRole: string | undefined = data.accessRole;
     if (accessRole) {
-      await supabase.from("calendar_connections").update({ access_role: accessRole }).eq("calendar_id", conn.calendar_id);
+      calendarUpdates.push(() => supabase.from("calendar_connections").update({ access_role: accessRole }).eq("calendar_id", conn.calendar_id));
     }
     for (const ev of events) seenIds.add(ev.id);
     if (!data.nextPageToken) fullyListed.add(conn.calendar_id);
@@ -655,81 +697,97 @@ async function pullEvents(
       // Blocks your time only if its calendar blocks AND the event itself is Busy in Google.
       const blocksSchedule = conn.role !== "display_only" && ev.transparency !== "transparent";
       const sourceDone = /📊\s*Summary/.test(ev.description ?? "") || /runna\.com\/[^\s]*activities\?activityId=/.test(ev.description ?? "");
+      const name = ev.summary ?? "Untitled event";
+      const startIso = evStart.toISOString();
+      const endIso = evEnd.toISOString();
+      const canEdit = googleCanEdit(accessRole, ev);
 
-      const { data: existing } = await supabase
-        .from("gcal_event_map")
-        .select("id, item_id, calendar_role")
-        .eq("google_event_id", ev.id)
-        .maybeSingle();
-
+      const existing = mapByGoogleId.get(ev.id);
       if (existing) {
-        if (existing.calendar_role === "schedule_target") {
-          continue;
+        if (existing.calendar_role === "schedule_target") continue;
+        const fe = existing.item_id ? feById.get(existing.item_id) : undefined;
+        const feChanged =
+          !fe ||
+          fe.name !== name ||
+          !sameTime(fe.start_time, startIso) ||
+          !sameTime(fe.end_time, endIso) ||
+          (fe.blocks_schedule ?? true) !== blocksSchedule ||
+          !!fe.is_all_day !== isAllDay ||
+          (fe.google_can_edit ?? true) !== canEdit ||
+          !!fe.source_done !== sourceDone;
+        if (feChanged && existing.item_id) {
+          const itemId = existing.item_id;
+          writes.push(() =>
+            supabase
+              .from("fixed_events")
+              .update({ name, start_time: startIso, end_time: endIso, blocks_schedule: blocksSchedule, is_all_day: isAllDay, google_can_edit: canEdit, source_done: sourceDone })
+              .eq("id", itemId)
+          );
+          if (fe) Object.assign(fe, { name, start_time: startIso, end_time: endIso, blocks_schedule: blocksSchedule, is_all_day: isAllDay, google_can_edit: canEdit, source_done: sourceDone });
         }
-        await supabase
-          .from("fixed_events")
-          .update({
-            name: ev.summary ?? "Untitled event",
-            start_time: evStart.toISOString(),
-            end_time: evEnd.toISOString(),
-            blocks_schedule: blocksSchedule,
-            is_all_day: isAllDay,
-            google_can_edit: googleCanEdit(accessRole, ev),
-            source_done: sourceDone,
-          })
-          .eq("id", existing.item_id);
-
-        await supabase
-          .from("gcal_event_map")
-          .update({
-            item_name: ev.summary ?? "Untitled event",
-            start_time: evStart.toISOString(),
-            end_time: evEnd.toISOString(),
-            calendar_role: conn.role,
-            calendar_id: conn.calendar_id,
-            synced_at: new Date().toISOString(),
-          })
-          .eq("id", existing.id);
+        const mapChanged =
+          existing.item_name !== name ||
+          !sameTime(existing.start_time, startIso) ||
+          !sameTime(existing.end_time, endIso) ||
+          existing.calendar_role !== conn.role ||
+          existing.calendar_id !== conn.calendar_id;
+        if (mapChanged) {
+          const mapId = existing.id;
+          writes.push(() =>
+            supabase
+              .from("gcal_event_map")
+              .update({ item_name: name, start_time: startIso, end_time: endIso, calendar_role: conn.role, calendar_id: conn.calendar_id, synced_at: new Date().toISOString() })
+              .eq("id", mapId)
+          );
+          Object.assign(existing, { item_name: name, start_time: startIso, end_time: endIso, calendar_role: conn.role, calendar_id: conn.calendar_id });
+        }
       } else {
-        const guessedPillar = await resolvePillarForNewEvent(ev.summary ?? "Untitled event");
+        // Claimed now so the same event in a second calendar isn't added twice.
+        const placeholder: MapRow = { id: "", item_id: null, calendar_role: conn.role, calendar_id: conn.calendar_id, google_event_id: ev.id, item_name: name, start_time: startIso, end_time: endIso };
+        mapByGoogleId.set(ev.id, placeholder);
+        inserts.push(async () => {
+          const guessedPillar = await resolvePillarForNewEvent(name);
           const { data: inserted, error: insertErr } = await supabase
             .from("fixed_events")
             .insert({
-              name: ev.summary ?? "Untitled event",
-              start_time: evStart.toISOString(),
-              end_time: evEnd.toISOString(),
+              name,
+              start_time: startIso,
+              end_time: endIso,
               blocks_schedule: blocksSchedule,
               is_all_day: isAllDay,
               pillar: guessedPillar,
-              google_can_edit: googleCanEdit(accessRole, ev),
+              google_can_edit: canEdit,
               source_done: sourceDone,
             })
-          .select("id")
-          .maybeSingle();
-
-        if (insertErr || !inserted) continue;
-        newItems.push({ id: inserted.id, name: ev.summary ?? "Untitled event", start: evStart.toISOString(), end: evEnd.toISOString(), allDay: isAllDay });
-
-        await supabase.from("gcal_event_map").insert({
-          google_event_id: ev.id,
-          item_type: "fixed_event",
-          item_id: inserted.id,
-          item_name: ev.summary ?? "Untitled event",
-          calendar_role: conn.role,
-          calendar_id: conn.calendar_id,
-          start_time: evStart.toISOString(),
-          end_time: evEnd.toISOString(),
+            .select("id")
+            .maybeSingle();
+          if (insertErr || !inserted) return;
+          newItems.push({ id: inserted.id, name, start: startIso, end: endIso, allDay: isAllDay });
+          await supabase.from("gcal_event_map").insert({
+            google_event_id: ev.id,
+            item_type: "fixed_event",
+            item_id: inserted.id,
+            item_name: name,
+            calendar_role: conn.role,
+            calendar_id: conn.calendar_id,
+            start_time: startIso,
+            end_time: endIso,
+          });
         });
       }
 
       totalPulled++;
     }
 
-    await supabase
-      .from("calendar_connections")
-      .update({ last_synced_at: new Date().toISOString(), last_sync_error: null })
-      .eq("calendar_id", conn.calendar_id);
+    calendarUpdates.push(() =>
+      supabase.from("calendar_connections").update({ last_synced_at: new Date().toISOString(), last_sync_error: null }).eq("calendar_id", conn.calendar_id)
+    );
   }
+
+  // 4) Write only what changed, several at a time.
+  await inBatches(writes, 10, (w) => w());
+  await inBatches(inserts, 5, (w) => w());
+  await inBatches(calendarUpdates, 10, (w) => w());
 
   // Remove app copies of pulled events that are no longer in their Google
   // calendar within this window (deleted there, or moved to a calendar that
@@ -749,12 +807,12 @@ async function pullEvents(
       // which can sit just outside the range Google was asked about.
       .gte("start_time", new Date(weekStartDt.getTime() + DAY_MS).toISOString())
       .lt("start_time", new Date(weekEndDt.getTime() - DAY_MS).toISOString());
-    for (const row of rows ?? []) {
-      if (seenIds.has(row.google_event_id)) continue;
-      if (row.item_id) await supabase.from("fixed_events").delete().eq("id", row.item_id);
-      await supabase.from("gcal_event_map").delete().eq("id", row.id);
-      totalRemoved++;
-    }
+    const gone = ((rows as { id: string; google_event_id: string; item_id: string | null }[]) ?? []).filter((r) => !seenIds.has(r.google_event_id));
+    const goneItems = gone.map((r) => r.item_id).filter((x): x is string => !!x);
+    for (let i = 0; i < goneItems.length; i += 100) await supabase.from("fixed_events").delete().in("id", goneItems.slice(i, i + 100));
+    const goneMaps = gone.map((r) => r.id);
+    for (let i = 0; i < goneMaps.length; i += 100) await supabase.from("gcal_event_map").delete().in("id", goneMaps.slice(i, i + 100));
+    totalRemoved = gone.length;
   }
 
   return { eventsPulled: totalPulled, eventsRemoved: totalRemoved, newItems };
@@ -994,7 +1052,7 @@ async function getSyncStatus() {
     .order("created_at");
 
   return {
-    functionVersion: "2026-10-19-strava2",
+    functionVersion: "2026-10-19-fast-pull",
     connected: !!tokenRow,
     email: tokenRow?.email ?? null,
     recentRuns: recentRuns ?? [],
