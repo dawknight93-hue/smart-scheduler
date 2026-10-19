@@ -284,9 +284,17 @@ export function countGoalEventsIn(goal: PlanGoal, week: WeekData, from: Date, to
     seen.add(m.item_id);
     out.push({ id: m.item_id, name, start, allDay, sourceDone: !!fe?.source_done });
   }
+  // A day with a finished run (Runna's completed event, or a run from Strava) doesn't also
+  // count that day's planned workout: it's the same session.
+  const activityDays = new Set(out.filter((c) => c.sourceDone).map((c) => c.start.toDateString()));
+  for (let i = out.length - 1; i >= 0; i--) {
+    if (!out[i].sourceDone && activityDays.has(out[i].start.toDateString())) {
+      seen.delete(out[i].id);
+      out.splice(i, 1);
+    }
+  }
   // Ticked done, then dropped by its calendar (Runna swaps a finished workout for a
   // completed-activity event): keep counting it, unless that activity has arrived for the day.
-  const activityDays = new Set(out.filter((c) => c.sourceDone).map((c) => c.start.toDateString()));
   for (const k of week.keptDone ?? []) {
     if (k.goal_id !== goal.id || seen.has(k.source_item_id) || week.fixedById.has(k.source_item_id)) continue;
     const [y, mo, d] = k.day.split("-").map(Number);

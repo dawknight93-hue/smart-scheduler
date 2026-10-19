@@ -329,3 +329,45 @@ export function scheduleAutoPush(delay = 2000): void {
     autoPushToGoogle().catch(() => {});
   }, delay);
 }
+
+// ---- Strava (finished runs) ---------------------------------------------------
+
+export interface StravaStatus {
+  clientReady: boolean;
+  connected: boolean;
+  athlete: string | null;
+  lastSyncAt: string | null;
+  lastError: string | null;
+  runsOnCalendar: number;
+}
+
+/** Strava's sign-in page; it comes back to this copy's /strava-callback. */
+export function getStravaOAuthUrl(): string {
+  const clientId = import.meta.env.VITE_STRAVA_CLIENT_ID;
+  if (!clientId) return "";
+  const params = new URLSearchParams({
+    client_id: String(clientId),
+    redirect_uri: `${window.location.origin}/strava-callback`,
+    response_type: "code",
+    approval_prompt: "auto",
+    scope: "read,activity:read_all",
+  });
+  return `https://www.strava.com/oauth/authorize?${params.toString()}`;
+}
+
+export async function stravaStatus(): Promise<StravaStatus | null> {
+  const r = (await callEdgeFunction({ action: "strava-status" })) as SyncResult & Partial<StravaStatus>;
+  return r.success ? (r as unknown as StravaStatus) : null;
+}
+
+export async function stravaExchange(code: string): Promise<SyncResult & { athlete?: string | null; added?: number; syncError?: string }> {
+  return callEdgeFunction({ action: "strava-exchange", code });
+}
+
+export async function stravaSync(rangeDays = 30): Promise<SyncResult & { runs?: number; added?: number; updated?: number; matched?: number; removed?: number }> {
+  return callEdgeFunction({ action: "strava-sync", rangeDays });
+}
+
+export async function stravaDisconnect(): Promise<SyncResult> {
+  return callEdgeFunction({ action: "strava-disconnect" });
+}
