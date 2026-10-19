@@ -1177,16 +1177,15 @@ export function CalendarView({
       setSyncing(false);
       return;
     }
-    try {
-      await recheckEnrouteBlocks();
-    } catch (err) {
-      console.error("Enroute recheck after sync failed", err);
-    }
-    // Finished runs from Strava (after the pull, so Runna's own completed runs are seen first).
-    // Not connected to Strava: this just reports that and nothing changes.
-    await stravaSync(14).catch(() => undefined);
     setLastSyncedAt(new Date());
-    // Show what was just pulled from Google (and any Enroute changes) right away.
+    // Show what was just read from Google right away; the rest finishes behind it.
+    await loadData();
+    // Finished runs from Strava (after the pull, so Runna's own completed runs are seen first)
+    // and the trip drive-time check, side by side. Not connected to Strava: nothing changes.
+    await Promise.all([
+      stravaSync(14).catch(() => undefined),
+      recheckEnrouteBlocks().catch((err) => console.error("Enroute recheck after sync failed", err)),
+    ]);
     await loadData();
     let pushResult: Awaited<ReturnType<typeof mirrorToGoogle>>;
     try {
