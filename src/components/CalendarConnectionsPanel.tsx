@@ -606,7 +606,7 @@ function StravaCard({ onChanged }: { onChanged: () => void }) {
     void load();
   }, [load]);
 
-  const url = getStravaOAuthUrl();
+  const url = getStravaOAuthUrl(status?.clientId);
   const ago = (iso: string) => {
     const min = Math.round((Date.now() - Date.parse(iso)) / 60000);
     return min < 1 ? "just now" : min < 60 ? `${min} min ago` : min < 1440 ? `${Math.round(min / 60)} h ago` : `${Math.round(min / 1440)} d ago`;
@@ -665,7 +665,6 @@ function StravaCard({ onChanged }: { onChanged: () => void }) {
           </button>
         )}
       </div>
-      {!url && <div className="mt-2 text-xs text-amber-200">Waiting for VITE_STRAVA_CLIENT_ID in this copy's .env.</div>}
       {status && !status.clientReady && <div className="mt-2 text-xs text-amber-200">Waiting for the STRAVA_CLIENT_ID / STRAVA_CLIENT_SECRET secrets.</div>}
       {status?.lastError && <div className="mt-2 text-xs text-rose-200">Last sync problem: {status.lastError}</div>}
       {note && <div className="mt-2 text-xs text-orange-100/80">{note}</div>}
