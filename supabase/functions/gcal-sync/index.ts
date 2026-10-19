@@ -101,7 +101,7 @@ async function resolvePillarForNewEvent(title: string): Promise<LifePillar | nul
 
 
 interface SyncRequest {
-  action: "oauth-exchange" | "pull" | "push" | "mirror" | "status" | "disconnect" | "delete" | "update-source-event" | "background-pull" | "list-calendars" | "create-calendar";
+  action: "oauth-exchange" | "pull" | "push" | "mirror" | "status" | "disconnect" | "delete" | "update-source-event" | "background-pull" | "list-calendars" | "create-calendar" | "strava-exchange" | "strava-status" | "strava-sync" | "strava-disconnect";
   /** create-calendar: the new calendar's name and time zone. */
   calendarName?: string;
   timeZone?: string;
@@ -743,6 +743,8 @@ async function pullEvents(
       .in("calendar_id", checkedCalendars)
       .in("calendar_role", ["fixed_source", "display_only"])
       .eq("item_type", "fixed_event")
+      // Runs copied in from Strava live alongside the run calendar's events, not in Google.
+      .not("google_event_id", "like", "strava:%")
       // One-day margin at each edge: all-day events are stored at UTC midnight,
       // which can sit just outside the range Google was asked about.
       .gte("start_time", new Date(weekStartDt.getTime() + DAY_MS).toISOString())
@@ -992,7 +994,7 @@ async function getSyncStatus() {
     .order("created_at");
 
   return {
-    functionVersion: "2026-10-13-all-day-times",
+    functionVersion: "2026-10-19-strava",
     connected: !!tokenRow,
     email: tokenRow?.email ?? null,
     recentRuns: recentRuns ?? [],
@@ -1018,6 +1020,10 @@ async function deleteEvent(itemType: string, itemId: string) {
 
   if (!mapping) {
     return { deleted: false, message: "No linked Google event found for this item." };
+  }
+
+  if (mapping.google_event_id.startsWith(STRAVA_PREFIX)) {
+    return { deleted: false, error: "This run comes from Strava. Delete or change it in Strava and it updates here." };
   }
 
   // Display-only calendars don't hold time, but deleting follows Google's own
@@ -1052,6 +1058,189 @@ async function deleteEvent(itemType: string, itemId: string) {
 
   await supabase.from("gcal_event_map").delete().eq("item_type", itemType).eq("item_id", itemId);
   return { deleted: true };
+}
+
+// ---- Strava: completed runs ---------------------------------------------------
+// Runna doesn't always replace a planned workout with the finished run on its
+// Google calendar. Strava has every run, so each run is copied in as a finished
+// event on the Run goal's calendar (once, keyed by its Strava activity id). When
+// Runna's own completed event for the same run is there, that one is used instead.
+
+const STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token";
+const STRAVA_API = "https://www.strava.com/api/v3";
+const STRAVA_PREFIX = "strava:";
+/** A Strava run and a Runna completed event this close together are the same run. */
+const SAME_RUN_MS = 20 * 60 * 1000;
+
+interface StravaActivity {
+  id: number;
+  name: string;
+  sport_type?: string;
+  type?: string;
+  start_date: string;
+  elapsed_time: number;
+  moving_time: number;
+  distance: number;
+}
+
+async function stravaPost(params: Record<string, string>) {
+  const clientId = Deno.env.get("STRAVA_CLIENT_ID");
+  const clientSecret = Deno.env.get("STRAVA_CLIENT_SECRET");
+  if (!clientId || !clientSecret) throw new Error("Strava isn't set up: add STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET as secrets.");
+  const resp = await fetch(STRAVA_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, ...params }),
+  });
+  if (!resp.ok) throw new Error(`Strava sign-in failed (${resp.status}): ${(await resp.text()).slice(0, 200)}`);
+  return await resp.json();
+}
+
+async function saveStravaTokens(t: { access_token: string; refresh_token: string; expires_at: number; athlete?: { id?: number; firstname?: string; lastname?: string } }, keepAthlete = false) {
+  const row: Record<string, unknown> = {
+    id: 1,
+    access_token: t.access_token,
+    refresh_token: t.refresh_token,
+    expires_at: new Date(t.expires_at * 1000).toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  if (!keepAthlete && t.athlete) {
+    row.athlete_id = t.athlete.id ?? null;
+    row.athlete_name = [t.athlete.firstname, t.athlete.lastname].filter(Boolean).join(" ") || null;
+  }
+  const { error } = await supabase.from("strava_tokens").upsert(row);
+  if (error) throw new Error(`Couldn't save the Strava connection: ${error.message}`);
+}
+
+async function stravaAccessToken(): Promise<string> {
+  const { data: row } = await supabase.from("strava_tokens").select("access_token, refresh_token, expires_at").eq("id", 1).maybeSingle();
+  if (!row) throw new Error("Strava isn't connected.");
+  if (new Date(row.expires_at).getTime() - Date.now() > 5 * 60 * 1000) return row.access_token;
+  const t = await stravaPost({ grant_type: "refresh_token", refresh_token: row.refresh_token });
+  await saveStravaTokens(t, true);
+  return t.access_token;
+}
+
+/** The calendar your Run goal counts from (where finished runs belong). */
+async function runCalendarId(): Promise<string | null> {
+  const { data: goals } = await supabase.from("goals").select("count_calendar_id").eq("plan_mode", "count").not("count_calendar_id", "is", null);
+  const ids = [...new Set(((goals as { count_calendar_id: string }[]) ?? []).map((g) => g.count_calendar_id))];
+  const { data: conns } = await supabase.from("calendar_connections").select("calendar_id, name");
+  const named = ((conns as { calendar_id: string; name: string }[]) ?? []).filter((c) => /runna|run/i.test(c.name)).map((c) => c.calendar_id);
+  return ids.find((id) => named.includes(id)) ?? ids[0] ?? named[0] ?? null;
+}
+
+async function stravaSync(days = 30) {
+  const token = await stravaAccessToken();
+  const runCal = await runCalendarId();
+  if (!runCal) {
+    await supabase.from("strava_tokens").update({ last_sync_error: "No Run goal calendar to put runs on." }).eq("id", 1);
+    throw new Error("Set up a Run goal that counts from your running calendar first.");
+  }
+  const after = new Date(Date.now() - days * DAY_MS);
+  const acts: StravaActivity[] = [];
+  for (let page = 1; page <= 5; page++) {
+    const url = `${STRAVA_API}/athlete/activities?after=${Math.floor(after.getTime() / 1000)}&per_page=100&page=${page}`;
+    const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!resp.ok) {
+      const msg = `Strava activities (${resp.status}): ${(await resp.text()).slice(0, 200)}`;
+      await supabase.from("strava_tokens").update({ last_sync_error: msg }).eq("id", 1);
+      throw new Error(msg);
+    }
+    const batch = (await resp.json()) as StravaActivity[];
+    acts.push(...batch);
+    if (batch.length < 100) break;
+  }
+  const runs = acts.filter((a) => /run/i.test(a.sport_type ?? a.type ?? ""));
+
+  // What's already there: our Strava copies, and Runna's own finished runs.
+  const since = new Date(after.getTime() - DAY_MS).toISOString();
+  const { data: mapRows } = await supabase
+    .from("gcal_event_map")
+    .select("id, item_id, google_event_id, start_time")
+    .eq("calendar_id", runCal)
+    .eq("item_type", "fixed_event")
+    .gte("start_time", since);
+  const rows = (mapRows as { id: string; item_id: string | null; google_event_id: string; start_time: string }[]) ?? [];
+  const ours = new Map(rows.filter((r) => r.google_event_id.startsWith(STRAVA_PREFIX)).map((r) => [r.google_event_id, r]));
+  const runnaIds = rows.filter((r) => !r.google_event_id.startsWith(STRAVA_PREFIX) && r.item_id).map((r) => r.item_id!);
+  const runnaDone: number[] = [];
+  for (let i = 0; i < runnaIds.length; i += 100) {
+    const { data } = await supabase.from("fixed_events").select("start_time").in("id", runnaIds.slice(i, i + 100)).eq("source_done", true).eq("is_all_day", false);
+    for (const e of (data as { start_time: string }[]) ?? []) runnaDone.push(Date.parse(e.start_time));
+  }
+
+  let added = 0;
+  let updated = 0;
+  let matched = 0;
+  let removed = 0;
+  const seen = new Set<string>();
+  for (const a of runs) {
+    const key = STRAVA_PREFIX + a.id;
+    seen.add(key);
+    const start = new Date(a.start_date);
+    const end = new Date(start.getTime() + Math.max(60, a.elapsed_time || a.moving_time || 0) * 1000);
+    const mine = ours.get(key);
+    // Runna posted this run itself: use its event, drop our copy.
+    if (runnaDone.some((t) => Math.abs(t - start.getTime()) <= SAME_RUN_MS)) {
+      if (mine) {
+        if (mine.item_id) await supabase.from("fixed_events").delete().eq("id", mine.item_id);
+        await supabase.from("gcal_event_map").delete().eq("id", mine.id);
+      }
+      matched++;
+      continue;
+    }
+    const miles = a.distance ? (a.distance / 1609.344).toFixed(2) : null;
+    const name = `🏃 ${a.name || "Run"}${miles ? ` · ${miles} mi` : ""}`;
+    if (mine?.item_id) {
+      await supabase.from("fixed_events").update({ name, start_time: start.toISOString(), end_time: end.toISOString() }).eq("id", mine.item_id);
+      await supabase.from("gcal_event_map").update({ item_name: name, start_time: start.toISOString(), end_time: end.toISOString(), synced_at: new Date().toISOString() }).eq("id", mine.id);
+      updated++;
+      continue;
+    }
+    const { data: ins, error } = await supabase
+      .from("fixed_events")
+      .insert({
+        name,
+        start_time: start.toISOString(),
+        end_time: end.toISOString(),
+        blocks_schedule: true,
+        is_all_day: false,
+        pillar: "physical",
+        google_can_edit: false,
+        source_done: true,
+      })
+      .select("id")
+      .maybeSingle();
+    if (error || !ins) continue;
+    await supabase.from("gcal_event_map").insert({
+      google_event_id: key,
+      item_type: "fixed_event",
+      item_id: ins.id,
+      item_name: name,
+      calendar_role: "fixed_source",
+      calendar_id: runCal,
+      start_time: start.toISOString(),
+      end_time: end.toISOString(),
+    });
+    added++;
+  }
+  // Runs deleted in Strava (or no longer runs) within the window.
+  for (const [key, r] of ours) {
+    if (seen.has(key) || Date.parse(r.start_time) < after.getTime()) continue;
+    if (r.item_id) await supabase.from("fixed_events").delete().eq("id", r.item_id);
+    await supabase.from("gcal_event_map").delete().eq("id", r.id);
+    removed++;
+  }
+  await supabase.from("strava_tokens").update({ last_sync_at: new Date().toISOString(), last_sync_error: null }).eq("id", 1);
+  return { runs: runs.length, added, updated, matched, removed };
+}
+
+async function stravaStatus() {
+  const clientReady = !!Deno.env.get("STRAVA_CLIENT_ID") && !!Deno.env.get("STRAVA_CLIENT_SECRET");
+  const { data: row } = await supabase.from("strava_tokens").select("athlete_name, last_sync_at, last_sync_error").eq("id", 1).maybeSingle();
+  const { count } = await supabase.from("gcal_event_map").select("id", { count: "exact", head: true }).like("google_event_id", `${STRAVA_PREFIX}%`);
+  return { clientReady, connected: !!row, athlete: row?.athlete_name ?? null, lastSyncAt: row?.last_sync_at ?? null, lastError: row?.last_sync_error ?? null, runsOnCalendar: count ?? 0 };
 }
 
 Deno.serve(async (req: Request) => {
@@ -1160,8 +1349,35 @@ Deno.serve(async (req: Request) => {
         break;
       }
 
+      case "strava-exchange": {
+        if (!body.code) throw new Error("Authorization code is required.");
+        const t = await stravaPost({ grant_type: "authorization_code", code: body.code });
+        await saveStravaTokens(t);
+        result = { success: true, athlete: t.athlete?.firstname ?? null, ...(await stravaSync(30).catch((e) => ({ syncError: String(e) }))) };
+        break;
+      }
+
+      case "strava-status": {
+        result = { success: true, ...(await stravaStatus()) };
+        break;
+      }
+
+      case "strava-sync": {
+        result = { success: true, ...(await stravaSync(body.rangeDays ?? 30)) };
+        break;
+      }
+
+      case "strava-disconnect": {
+        await supabase.from("strava_tokens").delete().eq("id", 1);
+        result = { success: true };
+        break;
+      }
+
       case "background-pull": {
-        result = { success: true, ...(await backgroundPull()) };
+        const pulled = await backgroundPull();
+        // Then finished runs from Strava (after the pull, so Runna's own completed events are seen first).
+        const strava = await stravaSync(14).catch((e) => ({ skipped: String(e instanceof Error ? e.message : e) }));
+        result = { success: true, ...pulled, strava };
         break;
       }
 
