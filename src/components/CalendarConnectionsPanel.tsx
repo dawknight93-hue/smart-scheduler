@@ -12,6 +12,7 @@ import {
   type GoogleCalendarInfo,
 } from "@/lib/gcalSync";
 import { mirrorCalendarNames } from "@/lib/googleMirror";
+import { getStravaOAuthUrl, stravaDisconnect, stravaStatus, stravaSync, type StravaStatus } from "@/lib/gcalSync";
 import { appSettings } from "@/lib/appSettings";
 
 /** Fired when calendar choices change, so the calendar can sync with the new setup. */
@@ -443,6 +444,8 @@ export function CalendarConnectionsPanel({ onClose }: { onClose: () => void }) {
             </div>
           )}
 
+          <StravaCard onChanged={() => setChanged(true)} />
+
           {/* Added by ID / leftovers */}
           {!loading && (
             <div className="rounded-xl border border-slate-800">
@@ -588,6 +591,84 @@ function ManualRows({
       <div className="flex items-center gap-1.5 text-[11px] text-slate-600">
         <Calendar className="h-3 w-3" /> Find an ID in Google Calendar → the calendar's Settings → Integrate calendar.
       </div>
+    </div>
+  );
+}
+
+/** Strava: finished runs come from here, so a run Runna's calendar drops still counts. */
+function StravaCard({ onChanged }: { onChanged: () => void }) {
+  const [status, setStatus] = useState<StravaStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const load = useCallback(async () => setStatus(await stravaStatus()), []);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const url = getStravaOAuthUrl();
+  const ago = (iso: string) => {
+    const min = Math.round((Date.now() - Date.parse(iso)) / 60000);
+    return min < 1 ? "just now" : min < 60 ? `${min} min ago` : min < 1440 ? `${Math.round(min / 60)} h ago` : `${Math.round(min / 1440)} d ago`;
+  };
+
+  async function syncNow() {
+    setBusy(true);
+    setNote(null);
+    const r = await stravaSync(30);
+    setBusy(false);
+    if (!r.success) setNote(r.error ?? "Sync failed.");
+    else {
+      setNote(`Checked ${r.runs ?? 0} runs from the last 30 days: ${r.added ?? 0} added, ${r.matched ?? 0} already on Runna's calendar.`);
+      if (r.added || r.removed) onChanged();
+    }
+    await load();
+  }
+
+  async function disconnect() {
+    setBusy(true);
+    await stravaDisconnect();
+    setBusy(false);
+    setNote("Strava disconnected. Runs already added stay on your calendar.");
+    await load();
+  }
+
+  return (
+    <div className="rounded-xl border border-orange-500/30 bg-orange-500/5 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0 text-sm">
+          <div className="font-medium text-orange-100">
+            Strava {status?.connected ? `· connected${status.athlete ? ` as ${status.athlete}` : ""}` : ""}
+          </div>
+          <div className="mt-0.5 text-xs text-orange-200/70">
+            {status?.connected
+              ? `Finished runs come from Strava, so a run Runna's calendar drops still counts.${status.lastSyncAt ? ` Last checked ${ago(status.lastSyncAt)}.` : ""}`
+              : "Connect to bring in every finished run, even when Runna's calendar drops it."}
+          </div>
+        </div>
+        {status?.connected ? (
+          <div className="flex gap-2">
+            <button onClick={() => void syncNow()} disabled={busy} className="flex items-center gap-1.5 rounded-lg bg-orange-600 px-3 py-2 text-xs font-medium text-white hover:bg-orange-500 disabled:opacity-50">
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />} Sync now
+            </button>
+            <button onClick={() => void disconnect()} disabled={busy} className="rounded-lg border border-orange-300/30 px-3 py-2 text-xs font-medium text-orange-100 hover:bg-orange-500/20 disabled:opacity-50">
+              Disconnect
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => url && (window.location.href = url)}
+            disabled={!url || status?.clientReady === false}
+            className="rounded-lg bg-orange-600 px-3 py-2 text-xs font-medium text-white hover:bg-orange-500 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Connect Strava
+          </button>
+        )}
+      </div>
+      {!url && <div className="mt-2 text-xs text-amber-200">Waiting for VITE_STRAVA_CLIENT_ID in this copy's .env.</div>}
+      {status && !status.clientReady && <div className="mt-2 text-xs text-amber-200">Waiting for the STRAVA_CLIENT_ID / STRAVA_CLIENT_SECRET secrets.</div>}
+      {status?.lastError && <div className="mt-2 text-xs text-rose-200">Last sync problem: {status.lastError}</div>}
+      {note && <div className="mt-2 text-xs text-orange-100/80">{note}</div>}
     </div>
   );
 }

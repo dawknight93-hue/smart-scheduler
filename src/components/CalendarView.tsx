@@ -66,7 +66,7 @@ import { CalendarConnectionsPanel, CALENDARS_CHANGED_EVENT } from "@/components/
 import { PlanDayPanel, type PlanSpot } from "@/components/PlanDayPanel";
 import { AllDayTimeDialog } from "@/components/AllDayTimeDialog";
 import { PLAN_PREFIX, PLAN_BUFFER_MIN, clearDraft, dayWindow, emptyDraft, loadDraft, lockInPlan, previewTasks, readListWithAi, saveDraft, todayKey, type PlanDraft } from "@/lib/planDay";
-import { getSyncStatus, pullFromGoogle, mirrorToGoogle, deleteFromGoogle, scheduleAutoPush, updateGoogleSourceEvent } from "@/lib/gcalSync";
+import { getSyncStatus, pullFromGoogle, mirrorToGoogle, deleteFromGoogle, scheduleAutoPush, updateGoogleSourceEvent, stravaSync } from "@/lib/gcalSync";
 import { parseRecurrenceFromItem, expandRecurrence, formatLocalDate, formatRecurrenceSummary, utcDateAsLocal } from "@/lib/recurrence";
 import { PLAN_GOAL_COLUMNS, type PlanGoal } from "@/lib/goalPlanning";
 import { effortGoals, loadMeasures } from "@/lib/measures";
@@ -1039,7 +1039,17 @@ export function CalendarView({
         };
       })
       .filter((p) => p.end > displayStart && p.start < displayEnd && (p.isAllDay || !activityDays.has(p.start.toDateString())));
-    return { placed: [...finalPlaced, ...kept], unscheduled: result.unscheduled };
+    // A run calendar's planned workout on a day that already has the finished run (Runna's
+    // completed event, or a run from Strava) is the same session: show just the finished one.
+    const countCals = new Set(countGoals.map((g) => g.count_calendar_id).filter((c): c is string => !!c));
+    const sourceDoneIds = new Set(fixedEvents.filter((e) => e.source_done).map((e) => e.id));
+    const calDay = (p: PlacedItem) =>
+      `${p.googleCalendarId}|${(p.isAllDay ? new Date(p.start.getUTCFullYear(), p.start.getUTCMonth(), p.start.getUTCDate()) : p.start).toDateString()}`;
+    const ranDays = new Set(finalPlaced.filter((p) => p.googleCalendarId && countCals.has(p.googleCalendarId) && sourceDoneIds.has(p.id)).map(calDay));
+    const shown = finalPlaced.filter(
+      (p) => !(p.kind === "Fixed Event" && p.googleCalendarId && countCals.has(p.googleCalendarId) && !sourceDoneIds.has(p.id) && ranDays.has(calDay(p)))
+    );
+    return { placed: [...shown, ...kept], unscheduled: result.unscheduled };
   }, [weekStart, viewMode, displayStart, displayEnd, fixedEvents, habits, tasks, planTasks, planDraft, eventMap, enrouteBlocks, occurrences, fixedEventOccurrences, habitOccurrences, goalSessionDone, keptRows, countGoals]);
 
   // Weekly Review: add its proposed sessions and mark what belongs to the selected card.
@@ -1172,6 +1182,9 @@ export function CalendarView({
     } catch (err) {
       console.error("Enroute recheck after sync failed", err);
     }
+    // Finished runs from Strava (after the pull, so Runna's own completed runs are seen first).
+    // Not connected to Strava: this just reports that and nothing changes.
+    await stravaSync(14).catch(() => undefined);
     setLastSyncedAt(new Date());
     // Show what was just pulled from Google (and any Enroute changes) right away.
     await loadData();
